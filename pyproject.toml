@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stock-predictor"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "ipykernel>=7.2.0",
+    "jupyter>=1.1.1",
+    "lightgbm>=4.6.0",
+    "lxml>=6.0.2",
+    "matplotlib>=3.10.8",
+    "numpy>=2.3.5",
+    "optuna>=4.7.0",
+    "pandas>=3.0.0",
+    "pyarrow>=18.0.0",
+    "scikit-learn>=1.8.0",
+    "yfinance>=1.2.1",
+]
+
+[project.optional-dependencies]
+tiingo = [
+    "requests>=2.31.0",
+    "fredapi>=0.5.0",
+    "python-dotenv>=1.0.0",
+]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[project.scripts]
+train-sp500 = "stock_predictor.cli:main"
+backtest-sp500 = "stock_predictor.backtest:main"
+predict-sp500 = "stock_predictor.predict:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

@@ -1,0 +1,85 @@
+# Full train-sp500 on demand (long-running). Configure repository Secrets first.
+#
+# Secrets (optional depending on provider):
+#   FRED_API_KEY   — Yahoo↔FRED macro merge; required for sensible macro if using merge
+#   TIINGO_API_KEY — only if workflow_dispatch inputs.provider = tiingo
+#
+# Artifacts (retention default 90 days): model.pkl, wf_scored.parquet, plots/
+
+name: train-sp500
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: Equity/macro data provider
+        type: choice
+        default: yfinance
+        options:
+          - yfinance
+          - tiingo
+      sample_n:
+        description: Max tickers (use 10000 for ~full universe)
+        type: string
+        default: "10000"
+
+concurrency:
+  group: train-sp500-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+
+    env:
+      TRAIN_PROVIDER: ${{ github.event.inputs.provider }}
+      PREDICT_PROVIDER: ${{ github.event.inputs.provider }}
+      SAMPLE_N: ${{ github.event.inputs.sample_n }}
+      MODEL: artifacts/model.pkl
+      WF_SCORES: artifacts/wf_scored.parquet
+      PLOTS_DIR: artifacts/plots
+      # Macro merge + optional Tiingo
+      FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+      TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Sync dependencies
+        run: uv sync --extra dev --extra tiingo
+
+      - name: Create artifact directories
+        run: mkdir -p artifacts/plots
+
+      - name: Run full training
+        run: bash scripts/run_pipeline.sh train-full
+
+      - name: Upload model and walk-forward scores
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-and-scores-${{ github.run_id }}
+          path: |
+            artifacts/model.pkl
+            artifacts/wf_scored.parquet
+          if-no-files-found: error
+
+      - name: Upload plots
+        uses: actions/upload-artifact@v4
+        with:
+          name: plots-${{ github.run_id }}
+          path: artifacts/plots/
+          if-no-files-found: warn
+
+      - name: Upload run snapshots (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-snapshots-${{ github.run_id }}
+          path: artifacts/runs/
+          if-no-files-found: ignore
