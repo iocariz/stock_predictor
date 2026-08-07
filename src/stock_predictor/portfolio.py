@@ -13,7 +13,11 @@ from pathlib import Path
 
 import numpy as np
 
-from stock_predictor.execution_calendar import entry_on_or_after, exit_date_iso_after_hold
+from stock_predictor.execution_calendar import (
+    exit_date_iso_after_hold,
+    extend_calendar,
+    next_trading_day,
+)
 
 
 @dataclass(frozen=True)
@@ -178,9 +182,11 @@ def generate_orders(
     Returns (orders, proposed_new_state). The caller decides whether to persist.
 
     Execution assumptions (aligned with :mod:`stock_predictor.backtest`):
-    - Entry session is the first date in *trading_dates* on or after *as_of*;
-      expiry is *holding_days* trading sessions after that day (same offset as
-      the backtest exit).
+    - Entry session is the first trading day strictly after *as_of* — the same
+      convention as the backtest's next-day entry; expiry is *holding_days*
+      trading sessions after that day (same offset as the backtest exit).
+      *trading_dates* ends at the current session, so the calendar is extended
+      with future business days to place entry and expiry.
     - *weighting* ``equal`` or ``probability`` matches cohort weights; lots use
       integer shares so dollar weights are approximate vs a fractional backtest.
     -     *trading_dates* should be the sorted unique session dates from the price
@@ -228,9 +234,13 @@ def generate_orders(
 
         # Filter picks: exclude already-held tickers, take top_n
         eligible = [p for p in picks if p["ticker"] not in already_held][:top_n]
-        entry = entry_on_or_after(as_of, trading_dates)
+        # Extend the calendar past the last downloaded session so entry (next
+        # trading day after as_of) and expiry (holding_days sessions later)
+        # always exist — the raw price calendar ends "today".
+        cal = extend_calendar(trading_dates, holding_days + 5)
+        entry = next_trading_day(as_of, cal)
         expiry_iso = (
-            exit_date_iso_after_hold(entry, holding_days, trading_dates)
+            exit_date_iso_after_hold(entry, holding_days, cal)
             if entry is not None
             else None
         )

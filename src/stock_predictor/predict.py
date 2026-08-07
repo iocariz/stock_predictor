@@ -128,14 +128,13 @@ def _forward_fill_date_level_features(
     Handles both raw (vix, tnx_yield) and derived (vix_ret_5d,
     yield_curve_spread, vix_percentile) macro features.
     """
-    # Identify columns that are date-level: same value across all tickers on a
-    # given date.  MACRO_FEATURE_COLS is the canonical list, but we also catch
-    # any feature column where *every* ticker is NaN on the score date — a
-    # strong signal of a per-date download failure rather than per-ticker data.
+    # Only macro columns are genuinely date-level (one value shared by every
+    # ticker).  Filling a ticker-level column here would smear one ticker's
+    # last value across the whole universe, so restrict to MACRO_FEATURE_COLS.
     day = panel[panel["date"] == score_date]
     cols_all_nan = [
         c for c in feature_cols
-        if c in panel.columns and c != "sector" and day[c].isna().all()
+        if c in MACRO_FEATURE_COLS and c in panel.columns and day[c].isna().all()
     ]
     if not cols_all_nan:
         return panel

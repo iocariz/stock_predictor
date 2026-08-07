@@ -95,3 +95,22 @@ def test_score_universe_missing_features() -> None:
     model = _FakeModel()
     with pytest.raises(ValueError, match="missing"):
         score_universe(model, panel, ["nonexistent_feature"])
+
+
+def test_forward_fill_never_touches_ticker_level_features() -> None:
+    """Regression: only macro columns may be forward-filled from a prior date.
+
+    A ticker-level feature that is all-NaN on the score date must NOT be
+    smeared with one ticker's previous value — scoring should fail instead.
+    """
+    dates = pd.bdate_range("2024-01-02", periods=3)
+    panel = pd.DataFrame({
+        "date": np.tile(dates, 2),
+        "ticker": np.repeat(["AAA", "BBB"], 3),
+        "adj_close": [100.0] * 6,
+        # ticker-level feature: valid earlier, all-NaN on the score date
+        "feat1": [0.5, 0.6, np.nan, 0.7, 0.8, np.nan],
+    })
+    model = _FakeModel()
+    with pytest.raises(ValueError, match="NaN features"):
+        score_universe(model, panel, ["feat1"])

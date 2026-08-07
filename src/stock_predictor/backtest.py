@@ -235,25 +235,38 @@ def _build_daily_nav(
     price_panel: pd.DataFrame,
     config: BacktestConfig,
 ) -> pd.Series:
-    cap_per_cohort = config.initial_capital / config.max_overlapping_cohorts
+    """Cash-ledger NAV: capital leaves cash at entry and returns at exit.
+
+    Each cohort's capital is debited from cash on its entry date and credited
+    back on its exit date as ``capital * (1 + net_return)`` — i.e. realized
+    P&L (including exit slippage and commissions) compounds into cash instead
+    of being discarded.  While a cohort is open (entry day through the day
+    before exit) it is marked to market against its slipped entry prices.
+    """
     nav_index = pd.DatetimeIndex(trading_dates)
     n_days = len(trading_dates)
 
     if not cohorts:
         return pd.Series(config.initial_capital, index=nav_index, dtype=float)
 
-    # Pre-compute per-cohort weighted return factor for each trading day.
-    cohort_val = np.zeros((n_days, len(cohorts)))
-    active_mask = np.zeros((n_days, len(cohorts)), dtype=bool)
+    cash_flow = np.zeros(n_days)
+    invested = np.zeros(n_days)
 
-    for ci, c in enumerate(cohorts):
+    for c in cohorts:
         i0 = int(np.searchsorted(trading_dates, c.entry_date, side="left"))
-        i1 = int(np.searchsorted(trading_dates, c.exit_date, side="right")) - 1
-        if i0 > i1 or i0 >= n_days:
+        if i0 >= n_days:
             continue
-        i1 = min(i1, n_days - 1)
+        i_exit = int(np.searchsorted(trading_dates, c.exit_date, side="left"))
+
+        cash_flow[i0] -= c.capital
+        if i_exit < n_days:
+            cash_flow[i_exit] += c.capital * (1.0 + c.net_return)
+        # Mark-to-market window: entry day through the day before exit; if the
+        # exit falls beyond the calendar, hold the mark through the last day.
+        i1 = min(i_exit - 1, n_days - 1)
+        if i0 > i1:
+            continue
         sl = slice(i0, i1 + 1)
-        active_mask[sl, ci] = True
 
         weights = np.array(c.weights)
         entry_prices = np.array(c.entry_prices)
@@ -262,7 +275,7 @@ def _build_daily_nav(
         # Vectorized price extraction for the active window
         present = [t for t in tickers if t in price_panel.columns]
         if not present:
-            cohort_val[sl, ci] = 1.0
+            invested[sl] += c.capital
             continue
 
         prices = price_panel.loc[nav_index[sl], present].values.copy()
@@ -274,13 +287,10 @@ def _build_daily_nav(
                 col[nans] = entry_prices[ti]  # flat if missing
                 rf[:, ti] = col / entry_prices[ti]
 
-        cohort_val[sl, ci] = rf @ weights
+        invested[sl] += c.capital * (rf @ weights)
 
-    n_active = active_mask.sum(axis=1)
-    invested = (cohort_val * active_mask).sum(axis=1) * cap_per_cohort
-    idle = (config.max_overlapping_cohorts - n_active) * cap_per_cohort
-
-    return pd.Series(invested + idle, index=nav_index, dtype=float)
+    cash = config.initial_capital + np.cumsum(cash_flow)
+    return pd.Series(cash + invested, index=nav_index, dtype=float)
 
 
 # ---------------------------------------------------------------------------
@@ -434,26 +444,37 @@ def run_backtest(
             if d not in vix_by_date.index or float(vix_by_date.loc[d]) <= config.vix_filter_percentile
         ]
 
-    # Build cohorts
-    cap_per_cohort = config.initial_capital / config.max_overlapping_cohorts
+    # Build cohorts sequentially, compounding realized P&L back into cash.
     cohorts: list[Cohort] = []
     by_date = df.groupby("date")
+    cash = config.initial_capital
+    settled = 0  # cohorts are settled in entry order (fixed holding period)
 
     for sig_date in rebalance_dates:
+        # Credit realized proceeds from cohorts that exited before this signal.
+        while settled < len(cohorts) and cohorts[settled].exit_date < sig_date:
+            c = cohorts[settled]
+            cash += c.capital * (1.0 + c.net_return)
+            settled += 1
         # Check overlapping cohort limit
         active = sum(
             1 for c in cohorts if c.entry_date <= sig_date <= c.exit_date
         )
-        if active >= config.max_overlapping_cohorts:
+        free_slots = config.max_overlapping_cohorts - active
+        if free_slots <= 0:
             continue
         if sig_date not in by_date.groups:
             continue
+        capital = cash / free_slots
+        if capital <= 0:
+            continue
         scored_day = by_date.get_group(sig_date)
         cohort = _build_cohort(
-            sig_date, price_panel, scored_day, config, trading_dates, cap_per_cohort,
+            sig_date, price_panel, scored_day, config, trading_dates, capital,
         )
         if cohort is not None:
             cohorts.append(cohort)
+            cash -= capital
 
     # Daily NAV
     daily_nav = _build_daily_nav(cohorts, trading_dates, price_panel, config)

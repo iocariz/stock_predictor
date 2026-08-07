@@ -338,3 +338,86 @@ def test_build_cohort_commission_reduces_net_return() -> None:
 def test_backtest_config_commission_validation() -> None:
     with pytest.raises(ValueError, match="commission"):
         BacktestConfig(commission_per_share=-0.01)
+
+
+# ---------------------------------------------------------------------------
+# Regression: NAV must compound realized P&L (cash-ledger accounting)
+# ---------------------------------------------------------------------------
+
+
+def _rising_market_panel(n_days: int = 120, n_tickers: int = 12) -> pd.DataFrame:
+    """Every stock rises 1%/day → every cohort should be profitable."""
+    dates = pd.bdate_range("2024-01-01", periods=n_days)
+    rng = np.random.default_rng(0)
+    rows = []
+    for i in range(n_tickers):
+        px = 100 * 1.01 ** np.arange(n_days)
+        for d_i, d in enumerate(dates):
+            rows.append({
+                "date": d, "ticker": f"T{i}", "adj_close": px[d_i],
+                "prob": rng.random(),
+            })
+    return pd.DataFrame(rows)
+
+
+def test_nav_compounds_realized_pnl() -> None:
+    """Profitable cohorts must accumulate in the equity curve.
+
+    Regression: NAV used to reset to the fixed capital slice when a cohort
+    exited, discarding all realized P&L (a string of +10% cohorts reported
+    0.00% total return).
+    """
+    cfg = BacktestConfig(
+        top_n=5, holding_days=10, benchmark_ticker=None, slippage_bps=0.0,
+    )
+    r = run_backtest(_rising_market_panel(), cfg)
+    assert len(r.cohorts) >= 5
+    assert all(c.net_return > 0 for c in r.cohorts)
+    assert r.metrics["total_return"] > 0.3
+    # Later cohorts are funded from compounded proceeds → larger capital.
+    assert r.cohorts[-1].capital > r.cohorts[0].capital
+
+
+def test_nav_holds_realized_value_after_exit() -> None:
+    """NAV the day after a profitable exit must keep the realized gain."""
+    dates = pd.bdate_range("2024-01-08", periods=15)
+    panel = _make_price_panel(dates, ["AAA"], price=100.0)
+    panel.loc[dates[11], "AAA"] = 200.0
+    from stock_predictor.backtest import Cohort
+
+    cohort = Cohort(
+        signal_date=dates[0],
+        entry_date=dates[1],
+        exit_date=dates[11],
+        tickers=("AAA",),
+        weights=(1.0,),
+        entry_prices=(100.0,),
+        exit_prices=(200.0,),
+        capital=50_000.0,
+        gross_return=1.0,
+        cost=0.0,
+        net_return=1.0,
+    )
+    cfg = BacktestConfig(
+        initial_capital=100_000.0, max_overlapping_cohorts=2, benchmark_ticker=None,
+    )
+    nav = _build_daily_nav([cohort], dates.values, panel, cfg)
+    # Exit day realizes 50k * (1 + 1.0) = 100k; plus 50k never deployed.
+    assert nav[dates[11]] == pytest.approx(150_000.0)
+    # Regression: the gain must persist after the cohort closes.
+    assert nav[dates[12]] == pytest.approx(150_000.0)
+    assert nav[dates[-1]] == pytest.approx(150_000.0)
+
+
+def test_exit_costs_hit_nav() -> None:
+    """Commissions (realized at exit) must lower the final equity curve."""
+    panel = _rising_market_panel(n_days=60, n_tickers=6)
+    cfg0 = BacktestConfig(
+        top_n=3, holding_days=10, benchmark_ticker=None, commission_per_share=0.0,
+    )
+    cfg1 = BacktestConfig(
+        top_n=3, holding_days=10, benchmark_ticker=None, commission_per_share=1.0,
+    )
+    nav0 = run_backtest(panel, cfg0).daily_nav
+    nav1 = run_backtest(panel, cfg1).daily_nav
+    assert nav1.iloc[-1] < nav0.iloc[-1]

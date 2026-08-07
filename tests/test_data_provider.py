@@ -97,3 +97,20 @@ def test_provider_shape_contract_benchmark() -> None:
     assert isinstance(close, pd.Series)
     assert close.name == "SPY"
     assert len(close) == 5
+
+
+def test_yfinance_single_ticker_column_named_after_ticker() -> None:
+    """Regression: single-ticker downloads returned a column literally named
+    'Close'/'Volume' instead of the ticker symbol."""
+    from stock_predictor.providers import yfinance_provider as yp
+
+    idx = pd.bdate_range("2024-01-02", periods=3)
+    flat = pd.DataFrame(
+        {"Close": [10.0, 10.5, 11.0], "Volume": [100, 110, 120]}, index=idx,
+    )
+    with patch.object(yp.yf, "download", return_value=flat):
+        adj, vol = yp.YFinanceProvider().download_equity_ohlcv(
+            ["AAPL"], "2024-01-02", "2024-01-05",
+        )
+    assert list(adj.columns) == ["AAPL"]
+    assert list(vol.columns) == ["AAPL"]

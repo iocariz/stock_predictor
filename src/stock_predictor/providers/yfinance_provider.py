@@ -31,6 +31,14 @@ class YFinanceProvider:
         )
         adj_close = wide_field(data, "Close")
         volume = wide_field(data, "Volume")
+        # Single-ticker downloads come back without a ticker column level, so
+        # wide_field returns the field name ("Close") as the column — rename it
+        # to the ticker so downstream stacking sees a real symbol.
+        if len(tickers) == 1:
+            if list(adj_close.columns) == ["Close"]:
+                adj_close.columns = [tickers[0]]
+            if list(volume.columns) == ["Volume"]:
+                volume.columns = [tickers[0]]
         return adj_close, volume
 
     def download_macro(

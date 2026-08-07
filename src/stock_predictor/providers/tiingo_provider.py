@@ -164,11 +164,7 @@ class TiingoFredProvider:
     ) -> pd.Series:
         try:
             url = f"{TIINGO_BASE}/{ticker}/prices"
-            resp = self._session.get(
-                url,
-                params={"startDate": start, "endDate": end},
-                timeout=30,
-            )
+            resp = self._get_with_retry(url, {"startDate": start, "endDate": end})
             resp.raise_for_status()
             rows = resp.json()
             if not rows:
