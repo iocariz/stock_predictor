@@ -64,10 +64,23 @@ def main() -> None:
     ap.add_argument("scored_path", type=Path)
     ap.add_argument("--benchmark-ticker", default="SPY")
     ap.add_argument("--capital", type=float, default=100_000.0)
+    ap.add_argument("--from-date", default=None, dest="from_date",
+                    help="Restrict scored panel to dates >= this (YYYY-MM-DD)")
+    ap.add_argument("--until-date", default=None, dest="until_date",
+                    help="Restrict scored panel to dates <= this (YYYY-MM-DD)")
     args = ap.parse_args()
 
     scored = _load_scored(args.scored_path)
     print(f"Loaded {len(scored)} scored rows from {args.scored_path}")
+    if args.from_date or args.until_date:
+        d = pd.to_datetime(scored["date"])
+        if args.from_date:
+            scored = scored[d >= pd.Timestamp(args.from_date)]
+            d = pd.to_datetime(scored["date"])
+        if args.until_date:
+            scored = scored[d <= pd.Timestamp(args.until_date)]
+        print(f"  Date filter: {len(scored)} rows "
+              f"({args.from_date or 'start'} -> {args.until_date or 'end'})")
 
     rows: list[dict[str, object]] = []
     navs: list[tuple[str, pd.Series]] = []

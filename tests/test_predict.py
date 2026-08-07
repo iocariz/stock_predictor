@@ -114,3 +114,25 @@ def test_forward_fill_never_touches_ticker_level_features() -> None:
     model = _FakeModel()
     with pytest.raises(ValueError, match="NaN features"):
         score_universe(model, panel, ["feat1"])
+
+
+class _FakeRanker:
+    """Mimics LGBMRanker: predict() only, arbitrary-scale scores."""
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        return np.linspace(1.5, -2.0, len(X))
+
+
+def test_score_universe_supports_ranker_models() -> None:
+    """Live scoring must work with models that lack predict_proba (LGBMRanker)."""
+    dates = pd.bdate_range("2024-01-02", periods=3)
+    panel = pd.DataFrame({
+        "date": np.tile(dates, 2),
+        "ticker": np.repeat(["AAA", "BBB"], 3),
+        "adj_close": [100.0] * 6,
+        "feat1": np.random.default_rng(5).random(6),
+    })
+    scored = score_universe(_FakeRanker(), panel, ["feat1"])
+    assert len(scored) == 2
+    # Sorted descending by score; scores may be negative for rankers
+    assert scored["prob"].iloc[0] >= scored["prob"].iloc[1]

@@ -27,6 +27,7 @@ from stock_predictor.training import (
     save_model_artifacts,
     select_training_rows,
     train_final_model,
+    train_final_rank_model,
     wide_field,
 )
 
@@ -192,6 +193,7 @@ def main() -> None:
         repro.register_snapshot(manifest, "features_clean", meta)
         repro.write_manifest(snapshot_root / "manifest.json", manifest)
 
+    objective = "rank" if args.rank_objective else "binary"
     optuna_best: dict = {}
     if not args.no_optuna:
         optuna_best = run_optuna_search(
@@ -201,6 +203,7 @@ def main() -> None:
             n_trials=args.optuna_trials,
             seed=args.seed,
             purge_days=horizon,
+            objective=objective,
         )
 
     manual_params = {
@@ -214,9 +217,14 @@ def main() -> None:
     if optuna_best:
         manual_params.update(optuna_best)
 
-    model, n_trees = train_final_model(
-        train, feature_cols, manual_params, args.seed, purge_days=horizon,
-    )
+    if args.rank_objective:
+        model, n_trees = train_final_rank_model(
+            train, feature_cols, manual_params, args.seed, purge_days=horizon,
+        )
+    else:
+        model, n_trees = train_final_model(
+            train, feature_cols, manual_params, args.seed, purge_days=horizon,
+        )
     pr_auc, roc_auc, weekly_precision = evaluate_test_set(model, test, feature_cols)
 
     if args.plots_dir is not None:
@@ -244,7 +252,7 @@ def main() -> None:
             random_state=args.seed,
             return_scores=need_scores,
             purge_days=horizon,
-            objective="rank" if args.rank_objective else "binary",
+            objective=objective,
         )
         if need_scores:
             wf_results, wf_scores = wf_out
@@ -293,6 +301,7 @@ def main() -> None:
     if args.output_model is not None:
         meta = {
             "feature_cols": feature_cols,
+            "objective": objective,
             "horizon": horizon,
             "threshold": threshold,
             "start": start,

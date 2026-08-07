@@ -322,3 +322,78 @@ def test_monthly_walk_forward_invalid_objective() -> None:
             inner_val_frac=0.1, min_train_rows=1, top_k=1, random_state=0,
             objective="pairwise",
         )
+
+
+# ---------------------------------------------------------------------------
+# Rank objective: final model, generic scoring, NDCG Optuna
+# ---------------------------------------------------------------------------
+
+
+def _rank_train_panel(n_days: int = 120, n_tickers: int = 10) -> pd.DataFrame:
+    dates = pd.bdate_range("2024-01-02", periods=n_days)
+    rng = np.random.default_rng(21)
+    rows = []
+    for i in range(n_tickers):
+        for d in dates:
+            fwd = rng.normal(0, 0.05)
+            rows.append({
+                "date": d, "ticker": f"T{i}", "adj_close": 100.0,
+                "f1": fwd + rng.normal(0, 0.01), "f2": rng.random(),
+                "fwd_ret": fwd, "target_5pct": int(fwd >= 0.05),
+            })
+    return pd.DataFrame(rows)
+
+
+def test_train_final_rank_model_and_model_scores() -> None:
+    from stock_predictor.training import model_scores, train_final_rank_model
+
+    train = _rank_train_panel()
+    params = {"n_estimators": 40, "learning_rate": 0.1, "num_leaves": 7,
+              "min_child_samples": 5}
+    model, n_trees = train_final_rank_model(train, ["f1", "f2"], params, seed=0,
+                                            purge_days=5, eval_k=3)
+    assert n_trees >= 1
+    assert not hasattr(model, "predict_proba")  # it's a ranker
+    scores = model_scores(model, train[["f1", "f2"]].head(50))
+    assert len(scores) == 50
+    assert np.std(scores) > 0
+    # Higher f1 (≈ higher fwd_ret) should get higher scores on average
+    hi = train.nlargest(200, "f1")[["f1", "f2"]]
+    lo = train.nsmallest(200, "f1")[["f1", "f2"]]
+    assert model_scores(model, hi).mean() > model_scores(model, lo).mean()
+
+
+def test_model_scores_prefers_predict_proba() -> None:
+    from stock_predictor.training import model_scores
+
+    class _Clf:
+        def predict_proba(self, X):
+            return np.column_stack([np.zeros(len(X)), np.full(len(X), 0.7)])
+
+        def predict(self, X):  # must NOT be used
+            raise AssertionError("predict_proba should take precedence")
+
+    out = model_scores(_Clf(), pd.DataFrame({"a": [1, 2]}))
+    assert list(out) == [0.7, 0.7]
+
+
+def test_run_optuna_search_rank_objective_smoke() -> None:
+    from stock_predictor.training import run_optuna_search
+
+    train = _rank_train_panel(n_days=90, n_tickers=6)
+    best = run_optuna_search(
+        train, ["f1", "f2"],
+        ts_cv_splits=2, n_trials=2, seed=0, purge_days=3,
+        objective="rank", rank_eval_k=3,
+    )
+    assert "learning_rate" in best
+
+
+def test_run_optuna_search_invalid_objective() -> None:
+    from stock_predictor.training import run_optuna_search
+
+    with pytest.raises(ValueError, match="objective"):
+        run_optuna_search(
+            pd.DataFrame({"date": [], "ticker": []}), [],
+            ts_cv_splits=2, n_trials=1, seed=0, objective="regression",
+        )
