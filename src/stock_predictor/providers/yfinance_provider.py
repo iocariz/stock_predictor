@@ -100,7 +100,19 @@ class YFinanceProvider:
         if bench is None or bench.empty:
             return pd.Series(dtype=float, name=ticker)
         if isinstance(bench.columns, pd.MultiIndex):
-            close = bench.xs("Close", axis=1, level=-1).squeeze()
+            # Level order depends on group_by: (Price, Ticker) by default,
+            # (Ticker, Price) with group_by="ticker" — find the Close level.
+            level = next(
+                (
+                    i
+                    for i in range(bench.columns.nlevels)
+                    if "Close" in bench.columns.get_level_values(i)
+                ),
+                None,
+            )
+            if level is None:
+                return pd.Series(dtype=float, name=ticker)
+            close = bench.xs("Close", axis=1, level=level).squeeze()
         else:
             close = bench["Close"]
         close = close.dropna()
