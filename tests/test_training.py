@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from stock_predictor.training import (
     _inner_train_val_split,
@@ -242,3 +243,82 @@ def test_select_training_rows_keeps_partial_nan_features() -> None:
     assert len(out) == 2
     strict = select_training_rows(df, ["ret_1d", "ret_252d"], "target_5pct", strict=True)
     assert len(strict) == 1
+
+
+# ---------------------------------------------------------------------------
+# Lambdarank objective (cross-sectional relevance labels)
+# ---------------------------------------------------------------------------
+
+
+def test_add_rank_labels_per_date_quintiles() -> None:
+    from stock_predictor.training import add_rank_labels
+
+    # 10 tickers on each of 2 dates; fwd_ret ordering differs by date.
+    rows = []
+    for d, order in [("2024-01-02", range(10)), ("2024-01-03", range(9, -1, -1))]:
+        for t, r in zip("ABCDEFGHIJ", order):
+            rows.append({"date": pd.Timestamp(d), "ticker": t, "fwd_ret": float(r)})
+    out = add_rank_labels(pd.DataFrame(rows))
+    assert set(out["rank_grade"].unique()) == {0, 1, 2, 3, 4}
+    # Grades are market-neutral: identical distribution on both dates
+    for _, g in out.groupby("date"):
+        assert sorted(g["rank_grade"].tolist()) == [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
+    # Best fwd_ret on each date gets the top grade
+    best = out.loc[out.groupby("date")["fwd_ret"].idxmax()]
+    assert (best["rank_grade"] == 4).all()
+
+
+def test_add_rank_labels_requires_fwd_ret() -> None:
+    from stock_predictor.training import add_rank_labels
+
+    with pytest.raises(ValueError, match="fwd_ret"):
+        add_rank_labels(pd.DataFrame({"date": [], "x": []}))
+
+
+def test_monthly_walk_forward_rank_objective_runs() -> None:
+    """Lambdarank walk-forward: runs end-to-end and ranks a predictive feature."""
+    dates = pd.bdate_range("2024-01-02", periods=130)
+    rng = np.random.default_rng(11)
+    rows = []
+    for i in range(10):
+        for d in dates:
+            fwd = rng.normal(0, 0.05)
+            rows.append({
+                "date": d,
+                "ticker": f"T{i}",
+                "adj_close": 100.0,
+                "f1": fwd + rng.normal(0, 0.01),  # strongly predictive of fwd_ret
+                "f2": rng.random(),
+                "fwd_ret": fwd,
+                "target_5pct": int(fwd >= 0.05),
+            })
+    df = pd.DataFrame(rows)
+    metrics, scores = monthly_walk_forward(
+        df, ["f1", "f2"], "target_5pct", "date", "2024-05-01",
+        {"n_estimators": 30, "learning_rate": 0.1, "num_leaves": 7, "min_child_samples": 5},
+        inner_val_frac=0.1,
+        min_train_rows=100,
+        top_k=2,
+        random_state=0,
+        return_scores=True,
+        purge_days=5,
+        objective="rank",
+    )
+    assert len(metrics) >= 1
+    assert len(scores) > 0
+    # Ranker scores must vary within a date (not degenerate)
+    per_date_std = scores.groupby("date")["prob"].std()
+    assert (per_date_std > 0).any()
+    # With a near-perfect feature, ranking beats the base positive rate
+    assert metrics["mean_weekly_precision_at_k"].mean() > df["target_5pct"].mean()
+
+
+def test_monthly_walk_forward_invalid_objective() -> None:
+    df = pd.DataFrame({"date": [pd.Timestamp("2024-01-02")], "ticker": ["A"],
+                       "fwd_ret": [0.0], "target_5pct": [0], "f1": [0.1]})
+    with pytest.raises(ValueError, match="objective"):
+        monthly_walk_forward(
+            df, ["f1"], "target_5pct", "date", "2024-02-01", {},
+            inner_val_frac=0.1, min_train_rows=1, top_k=1, random_state=0,
+            objective="pairwise",
+        )

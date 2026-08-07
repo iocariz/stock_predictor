@@ -300,6 +300,30 @@ def purged_date_splits(
     return splits
 
 
+def add_rank_labels(
+    df: pd.DataFrame,
+    date_col: str = "date",
+    fwd_col: str = "fwd_ret",
+    n_grades: int = 5,
+    out_col: str = "rank_grade",
+) -> pd.DataFrame:
+    """Cross-sectional relevance grades for lambdarank: per-date quantiles of
+    forward return (0 = worst quintile that day, n_grades-1 = best).
+
+    Unlike the absolute ``fwd_ret >= threshold`` label, this target is
+    market-neutral by construction: every date has the same grade
+    distribution regardless of whether the market rose or fell.
+    """
+    if fwd_col not in df.columns:
+        raise ValueError(f"add_rank_labels requires a {fwd_col!r} column")
+    pct = df.groupby(date_col)[fwd_col].rank(pct=True, method="average")
+    grades = np.ceil(pct.to_numpy() * n_grades) - 1
+    grades = np.where(np.isnan(grades), 0, grades)  # defensive: NaN fwd_ret → worst grade
+    df = df.copy()
+    df[out_col] = np.clip(grades, 0, n_grades - 1).astype("int8")
+    return df
+
+
 def make_objective(
     X: pd.DataFrame,
     y: np.ndarray,
@@ -379,15 +403,27 @@ def monthly_walk_forward(
     random_state: int,
     return_scores: bool = False,
     purge_days: int = 0,
+    objective: str = "binary",
 ) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
     """Walk forward month by month.
 
     *purge_days* should be the label horizon: the last *purge_days* trading
     dates before each test month are excluded from training so forward-return
     labels never overlap the test window.
+
+    *objective* selects the model: ``binary`` trains an LGBMClassifier on
+    *target_col*; ``rank`` trains an LGBMRanker (lambdarank) grouped by date
+    on per-date forward-return quintile grades — a cross-sectional target
+    that is market-neutral by construction.  Either way, reported metrics
+    (PR-AUC/ROC-AUC vs *target_col*, precision@k) use the same binary target
+    so the two objectives are directly comparable.
     """
+    if objective not in ("binary", "rank"):
+        raise ValueError(f"objective must be 'binary' or 'rank', got {objective!r}")
     d = df.copy()
     d[date_col] = pd.to_datetime(d[date_col])
+    if objective == "rank":
+        d = add_rank_labels(d, date_col=date_col)
     first_p = pd.Timestamp(test_start).to_period("M")
     last_p = d[date_col].max().to_period("M")
     periods = pd.period_range(first_p, last_p, freq="M")
@@ -410,53 +446,100 @@ def monthly_walk_forward(
         )
         if len(tr_in) == 0 or len(va_in) == 0:
             continue
-        y_tr = tr_in[target_col]
-        neg, pos = int((y_tr == 0).sum()), int((y_tr == 1).sum())
-        if neg == 0 or pos == 0:
-            continue
-        spw = neg / pos
-        clf = lgb.LGBMClassifier(
-            **lgb_core,
-            n_estimators=min(2000, max(500, n_est_user * 4)),
-            scale_pos_weight=spw,
-            metric="average_precision",
-            eval_metric="average_precision",
-            random_state=random_state,
-            n_jobs=-1,
-            verbosity=-1,
-        )
-        clf.fit(
-            tr_in[feature_cols],
-            y_tr,
-            eval_set=[(va_in[feature_cols], va_in[target_col])],
-            callbacks=[
-                lgb.early_stopping(80, verbose=False, first_metric_only=True),
-                lgb.log_evaluation(0),
-            ],
-        )
-        bi = clf.best_iteration_
-        if bi is None:
-            # No early stop triggered: use every tree the ES model trained.
-            n_trees = int(clf.n_estimators_)
+        es_cap = min(2000, max(500, n_est_user * 4))
+        if objective == "rank":
+            tr_in = tr_in.sort_values(date_col, kind="stable")
+            va_in = va_in.sort_values(date_col, kind="stable")
+            if tr_in["rank_grade"].nunique() < 2:
+                continue
+            g_tr = tr_in.groupby(date_col).size().to_numpy()
+            g_va = va_in.groupby(date_col).size().to_numpy()
+            es_model = lgb.LGBMRanker(
+                **lgb_core,
+                n_estimators=es_cap,
+                metric="ndcg",
+                eval_at=[top_k],
+                random_state=random_state,
+                n_jobs=-1,
+                verbosity=-1,
+            )
+            es_model.fit(
+                tr_in[feature_cols],
+                tr_in["rank_grade"],
+                group=g_tr,
+                eval_set=[(va_in[feature_cols], va_in["rank_grade"])],
+                eval_group=[g_va],
+                callbacks=[
+                    lgb.early_stopping(80, verbose=False, first_metric_only=True),
+                    lgb.log_evaluation(0),
+                ],
+            )
+            bi = es_model.best_iteration_
+            n_trees = int(bi) + 1 if bi is not None else int(es_model.n_estimators_)
+            train_sorted = train_df.sort_values(date_col, kind="stable")
+            g_full = train_sorted.groupby(date_col).size().to_numpy()
+            final_rank = lgb.LGBMRanker(
+                **lgb_core,
+                n_estimators=n_trees,
+                metric="ndcg",
+                eval_at=[top_k],
+                random_state=random_state,
+                n_jobs=-1,
+                verbosity=-1,
+            )
+            final_rank.fit(
+                train_sorted[feature_cols], train_sorted["rank_grade"], group=g_full,
+            )
+            y_test = test_df[target_col]
+            prob = final_rank.predict(test_df[feature_cols])
         else:
-            n_trees = int(bi) + 1
-        neg_f, pos_f = int((train_df[target_col] == 0).sum()), int((train_df[target_col] == 1).sum())
-        if neg_f == 0 or pos_f == 0:
-            continue
-        spw_f = neg_f / pos_f
-        final = lgb.LGBMClassifier(
-            **lgb_core,
-            n_estimators=n_trees,
-            scale_pos_weight=spw_f,
-            metric="average_precision",
-            eval_metric="average_precision",
-            random_state=random_state,
-            n_jobs=-1,
-            verbosity=-1,
-        )
-        final.fit(train_df[feature_cols], train_df[target_col])
-        y_test = test_df[target_col]
-        prob = final.predict_proba(test_df[feature_cols])[:, 1]
+            y_tr = tr_in[target_col]
+            neg, pos = int((y_tr == 0).sum()), int((y_tr == 1).sum())
+            if neg == 0 or pos == 0:
+                continue
+            spw = neg / pos
+            clf = lgb.LGBMClassifier(
+                **lgb_core,
+                n_estimators=es_cap,
+                scale_pos_weight=spw,
+                metric="average_precision",
+                eval_metric="average_precision",
+                random_state=random_state,
+                n_jobs=-1,
+                verbosity=-1,
+            )
+            clf.fit(
+                tr_in[feature_cols],
+                y_tr,
+                eval_set=[(va_in[feature_cols], va_in[target_col])],
+                callbacks=[
+                    lgb.early_stopping(80, verbose=False, first_metric_only=True),
+                    lgb.log_evaluation(0),
+                ],
+            )
+            bi = clf.best_iteration_
+            if bi is None:
+                # No early stop triggered: use every tree the ES model trained.
+                n_trees = int(clf.n_estimators_)
+            else:
+                n_trees = int(bi) + 1
+            neg_f, pos_f = int((train_df[target_col] == 0).sum()), int((train_df[target_col] == 1).sum())
+            if neg_f == 0 or pos_f == 0:
+                continue
+            spw_f = neg_f / pos_f
+            final = lgb.LGBMClassifier(
+                **lgb_core,
+                n_estimators=n_trees,
+                scale_pos_weight=spw_f,
+                metric="average_precision",
+                eval_metric="average_precision",
+                random_state=random_state,
+                n_jobs=-1,
+                verbosity=-1,
+            )
+            final.fit(train_df[feature_cols], train_df[target_col])
+            y_test = test_df[target_col]
+            prob = final.predict_proba(test_df[feature_cols])[:, 1]
         pr = average_precision_score(y_test, prob)
         try:
             roc = roc_auc_score(y_test, prob)

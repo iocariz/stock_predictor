@@ -82,6 +82,13 @@ def parse_args() -> argparse.Namespace:
         help="Disable Yahoo↔FRED macro cross-fill (use single macro source only)",
     )
     p.add_argument(
+        "--rank-objective",
+        action="store_true",
+        dest="rank_objective",
+        help="Walk-forward trains an LGBMRanker (lambdarank, grouped by date) on "
+        "per-date forward-return quintile grades instead of the binary classifier",
+    )
+    p.add_argument(
         "--strict-dropna",
         action="store_true",
         dest="strict_dropna",
@@ -121,6 +128,7 @@ def main() -> None:
                 "no_optuna": args.no_optuna,
                 "no_macro_merge": args.no_macro_merge,
                 "strict_dropna": args.strict_dropna,
+                "rank_objective": args.rank_objective,
                 "seed": args.seed,
             },
         )
@@ -236,6 +244,7 @@ def main() -> None:
             random_state=args.seed,
             return_scores=need_scores,
             purge_days=horizon,
+            objective="rank" if args.rank_objective else "binary",
         )
         if need_scores:
             wf_results, wf_scores = wf_out

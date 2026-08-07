@@ -22,6 +22,7 @@ cd "$ROOT"
 : "${OPTUNA_TRIALS:=40}"
 : "${TS_CV_SPLITS:=5}"
 : "${EARNINGS_WORKERS:=8}"
+: "${EXTRA_TRAIN_ARGS:=}"
 
 train_full() {
   uv run train-sp500 \
@@ -36,7 +37,8 @@ train_full() {
     --plots-dir "$PLOTS_DIR" \
     --output-model "$MODEL" \
     --wf-scores-path "$WF_SCORES" \
-    --run-backtest
+    --run-backtest \
+    $EXTRA_TRAIN_ARGS
 }
 
 backtest_only() {

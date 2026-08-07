@@ -28,6 +28,10 @@ on:
           run scripts/backtest_sweep.py instead of retraining (leave empty to train)
         type: string
         default: ""
+      extra_train_args:
+        description: Extra flags appended to train-sp500 (e.g. --rank-objective)
+        type: string
+        default: ""
 
 concurrency:
   group: train-sp500-${{ github.repository }}
@@ -45,6 +49,7 @@ jobs:
       MODEL: artifacts/model.pkl
       WF_SCORES: artifacts/wf_scored.parquet
       PLOTS_DIR: artifacts/plots
+      EXTRA_TRAIN_ARGS: ${{ inputs.extra_train_args }}
       # Macro merge + optional Tiingo
       FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
       TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
