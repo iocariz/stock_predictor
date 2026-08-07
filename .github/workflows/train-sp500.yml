@@ -22,6 +22,12 @@ on:
         description: Max tickers (use 10000 for ~full universe)
         type: string
         default: "10000"
+      sweep_run_id:
+        description: >-
+          Sweep-only mode: reuse this train-sp500 run's wf_scored.parquet and
+          run scripts/backtest_sweep.py instead of retraining (leave empty to train)
+        type: string
+        default: ""
 
 concurrency:
   group: train-sp500-${{ github.repository }}
@@ -58,10 +64,25 @@ jobs:
       - name: Create artifact directories
         run: mkdir -p artifacts/plots
 
+      - name: Download walk-forward scores (sweep-only mode)
+        if: inputs.sweep_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: model-and-scores-${{ inputs.sweep_run_id }}
+          run-id: ${{ inputs.sweep_run_id }}
+          github-token: ${{ github.token }}
+          path: artifacts/
+
+      - name: Run backtest sweep (sweep-only mode)
+        if: inputs.sweep_run_id != ''
+        run: uv run python scripts/backtest_sweep.py artifacts/wf_scored.parquet
+
       - name: Run full training
+        if: inputs.sweep_run_id == ''
         run: bash scripts/run_pipeline.sh train-full
 
       - name: Upload model and walk-forward scores
+        if: inputs.sweep_run_id == ''
         uses: actions/upload-artifact@v4
         with:
           name: model-and-scores-${{ github.run_id }}
