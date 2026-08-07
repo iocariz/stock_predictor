@@ -133,7 +133,8 @@ def test_generate_orders_sell_and_buy() -> None:
     # AAPL should no longer be in positions
     remaining_tickers = {p.ticker for p in new_state.positions}
     assert "AAPL" not in remaining_tickers
-    # 2024-01-20 is a Saturday; first session on/after is 2024-01-22 (matches backtest calendar)
+    # 2024-01-20 is a Saturday; first session strictly after is 2024-01-22
+    # (same next-day entry convention as the backtest)
     assert all(p.entry_date == "2024-01-22" for p in new_state.positions)
 
 
@@ -259,3 +260,54 @@ def test_generate_orders_invalid_weighting() -> None:
             trading_dates=_TD,
             weighting="invalid",
         )
+
+
+# ---------------------------------------------------------------------------
+# Regression: live calendar ends at as_of (the real predict-sp500 situation)
+# ---------------------------------------------------------------------------
+
+
+def test_generate_orders_buys_when_calendar_ends_today() -> None:
+    """The downloaded price calendar ends at as_of; buys must still be generated.
+
+    Regression: expiry used to be computed on the raw calendar, whose last
+    session is as_of itself, so `holding_days` sessions ahead never existed →
+    expiry was None → the buy block was silently skipped on every live run.
+    """
+    as_of = "2024-06-14"  # Friday, last session in the downloaded history
+    td = pd.bdate_range(end=as_of, periods=300).values
+    state = init_state(100_000.0)
+    picks = [
+        {"ticker": "NVDA", "adj_close": 100.0, "prob": 0.9},
+        {"ticker": "MSFT", "adj_close": 400.0, "prob": 0.8},
+    ]
+    prices = {"NVDA": 100.0, "MSFT": 400.0}
+    orders, new_state = generate_orders(
+        state, picks, prices,
+        top_n=2, max_cohorts=2, holding_days=10, slippage_bps=5.0, as_of=as_of,
+        trading_dates=td,
+    )
+    buys = [o for o in orders if o.action == "BUY"]
+    assert len(buys) == 2
+    assert len(new_state.positions) == 2
+    # Entry is the next session strictly after as_of (backtest parity):
+    # Friday 2024-06-14 → Monday 2024-06-17.
+    assert all(p.entry_date == "2024-06-17" for p in new_state.positions)
+    # Expiry is holding_days business sessions after entry.
+    expected_expiry = pd.bdate_range("2024-06-18", periods=10)[-1].strftime("%Y-%m-%d")
+    assert all(p.expiry_date == expected_expiry for p in new_state.positions)
+
+
+def test_generate_orders_entry_strictly_after_as_of() -> None:
+    """When as_of is itself a session, entry must be the NEXT session (not same day)."""
+    as_of = "2024-01-10"  # Wednesday, inside _TD
+    state = init_state(100_000.0)
+    picks = [{"ticker": "AAA", "adj_close": 100.0, "prob": 0.9}]
+    prices = {"AAA": 100.0}
+    _, new_state = generate_orders(
+        state, picks, prices,
+        top_n=1, max_cohorts=1, holding_days=5, slippage_bps=0.0, as_of=as_of,
+        trading_dates=_TD,
+    )
+    assert len(new_state.positions) == 1
+    assert new_state.positions[0].entry_date == "2024-01-11"

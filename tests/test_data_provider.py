@@ -97,3 +97,67 @@ def test_provider_shape_contract_benchmark() -> None:
     assert isinstance(close, pd.Series)
     assert close.name == "SPY"
     assert len(close) == 5
+
+
+def test_yfinance_single_ticker_column_named_after_ticker() -> None:
+    """Regression: single-ticker downloads returned a column literally named
+    'Close'/'Volume' instead of the ticker symbol."""
+    from stock_predictor.providers import yfinance_provider as yp
+
+    idx = pd.bdate_range("2024-01-02", periods=3)
+    flat = pd.DataFrame(
+        {"Close": [10.0, 10.5, 11.0], "Volume": [100, 110, 120]}, index=idx,
+    )
+    with patch.object(yp.yf, "download", return_value=flat):
+        adj, vol = yp.YFinanceProvider().download_equity_ohlcv(
+            ["AAPL"], "2024-01-02", "2024-01-05",
+        )
+    assert list(adj.columns) == ["AAPL"]
+    assert list(vol.columns) == ["AAPL"]
+
+
+def test_yfinance_benchmark_retries_on_empty_then_succeeds() -> None:
+    """Regression: a rate-limited (empty) benchmark download is retried."""
+    from stock_predictor.providers import yfinance_provider as yp
+
+    idx = pd.bdate_range("2024-01-02", periods=3)
+    good = pd.DataFrame({"Close": [500.0, 501.0, 502.0]}, index=idx)
+    with (
+        patch.object(yp.yf, "download", side_effect=[pd.DataFrame(), good]) as dl,
+        patch.object(yp.time, "sleep") as slept,
+    ):
+        close = yp.YFinanceProvider().download_benchmark("SPY", "2024-01-02", "2024-01-05")
+    assert dl.call_count == 2
+    assert slept.call_count == 1
+    assert len(close) == 3
+    assert close.name == "SPY"
+
+
+def test_yfinance_benchmark_price_ticker_multiindex() -> None:
+    """Regression: yfinance's default group_by='column' puts Price on level 0
+    ((Price, Ticker)); Close extraction must not assume the ticker comes first."""
+    from stock_predictor.providers import yfinance_provider as yp
+
+    idx = pd.bdate_range("2024-01-02", periods=3)
+    cols = pd.MultiIndex.from_product([["Close", "Volume"], ["SPY"]], names=["Price", "Ticker"])
+    bench = pd.DataFrame(
+        [[500.0, 100], [501.0, 110], [502.0, 120]], index=idx, columns=cols,
+    )
+    with patch.object(yp.yf, "download", return_value=bench):
+        close = yp.YFinanceProvider().download_benchmark("SPY", "2024-01-02", "2024-01-05")
+    assert list(close.values) == [500.0, 501.0, 502.0]
+    assert close.name == "SPY"
+
+
+def test_yfinance_benchmark_ticker_price_multiindex() -> None:
+    """(Ticker, Price) order (group_by='ticker') must also work."""
+    from stock_predictor.providers import yfinance_provider as yp
+
+    idx = pd.bdate_range("2024-01-02", periods=3)
+    cols = pd.MultiIndex.from_product([["SPY"], ["Close", "Volume"]], names=["Ticker", "Price"])
+    bench = pd.DataFrame(
+        [[500.0, 100], [501.0, 110], [502.0, 120]], index=idx, columns=cols,
+    )
+    with patch.object(yp.yf, "download", return_value=bench):
+        close = yp.YFinanceProvider().download_benchmark("SPY", "2024-01-02", "2024-01-05")
+    assert list(close.values) == [500.0, 501.0, 502.0]

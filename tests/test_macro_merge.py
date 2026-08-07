@@ -53,3 +53,31 @@ def test_merge_macro_panels_both_empty() -> None:
 
 def test_macro_fallback_panel_yfinance_no_key_returns_none() -> None:
     assert _macro_fallback_panel("yfinance", "2024-01-01", "2024-02-01", "") is None
+
+
+def test_merge_macro_panels_missing_column_regression() -> None:
+    """Regression: a panel missing a macro column used to crash on pd.nan."""
+    d = pd.bdate_range("2024-01-02", periods=3)
+    primary = pd.DataFrame({  # no irx_yield column at all
+        "date": d,
+        "vix": [15.0, 16.0, 17.0],
+        "tnx_yield": [4.0, 4.1, 4.2],
+    })
+    fallback = pd.DataFrame({
+        "date": d,
+        "vix": [14.0, 15.5, 16.5],
+        "tnx_yield": [3.9, 4.05, 4.15],
+        "irx_yield": [5.0, 5.1, 5.2],
+    })
+    out = merge_macro_panels(primary, fallback)
+    assert list(out.columns) == ["date", "vix", "tnx_yield", "irx_yield"]
+    assert out["vix"].iloc[0] == pytest.approx(15.0)      # primary kept
+    assert out["irx_yield"].iloc[0] == pytest.approx(5.0)  # filled from fallback
+
+
+def test_merge_macro_panels_column_missing_from_both() -> None:
+    d = pd.bdate_range("2024-01-02", periods=2)
+    primary = pd.DataFrame({"date": d, "vix": [15.0, 16.0]})
+    fallback = pd.DataFrame({"date": d, "tnx_yield": [4.0, 4.1]})
+    out = merge_macro_panels(primary, fallback)
+    assert out["irx_yield"].isna().all()

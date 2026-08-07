@@ -21,9 +21,11 @@ from stock_predictor.training import (
     build_labeled_panel,
     evaluate_test_set,
     monthly_walk_forward,
+    purge_train_dates,
     run_optuna_search,
     save_eval_plots,
     save_model_artifacts,
+    select_training_rows,
     train_final_model,
     wide_field,
 )
@@ -79,6 +81,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable Yahoo↔FRED macro cross-fill (use single macro source only)",
     )
+    p.add_argument(
+        "--strict-dropna",
+        action="store_true",
+        dest="strict_dropna",
+        help="Drop rows with ANY NaN feature (legacy behavior); default keeps "
+        "them since LightGBM handles missing values natively",
+    )
     return p.parse_args()
 
 
@@ -111,6 +120,7 @@ def main() -> None:
                 "skip_earnings": args.skip_earnings,
                 "no_optuna": args.no_optuna,
                 "no_macro_merge": args.no_macro_merge,
+                "strict_dropna": args.strict_dropna,
                 "seed": args.seed,
             },
         )
@@ -157,8 +167,13 @@ def main() -> None:
         macro_merge=not args.no_macro_merge,
     )
 
-    features_clean = features.dropna(subset=feature_cols + ["target_5pct"])
+    features_clean = select_training_rows(
+        features, feature_cols, "target_5pct", strict=args.strict_dropna,
+    )
     train = features_clean[features_clean["date"] <= train_end]
+    # Purge: labels look `horizon` trading days ahead, so training rows within
+    # `horizon` days of test_start would leak test-period prices.
+    train = purge_train_dates(train, test_start, horizon)
     test = features_clean[features_clean["date"] >= test_start]
     print(f"Train {train[feature_cols].shape} | pos {train['target_5pct'].mean():.4%}")
     print(f"Test  {test[feature_cols].shape} | pos {test['target_5pct'].mean():.4%}")
@@ -177,6 +192,7 @@ def main() -> None:
             ts_cv_splits=args.ts_cv_splits,
             n_trials=args.optuna_trials,
             seed=args.seed,
+            purge_days=horizon,
         )
 
     manual_params = {
@@ -190,7 +206,9 @@ def main() -> None:
     if optuna_best:
         manual_params.update(optuna_best)
 
-    model, n_trees = train_final_model(train, feature_cols, manual_params, args.seed)
+    model, n_trees = train_final_model(
+        train, feature_cols, manual_params, args.seed, purge_days=horizon,
+    )
     pr_auc, roc_auc, weekly_precision = evaluate_test_set(model, test, feature_cols)
 
     if args.plots_dir is not None:
@@ -217,6 +235,7 @@ def main() -> None:
             top_k=args.wf_top_k,
             random_state=args.seed,
             return_scores=need_scores,
+            purge_days=horizon,
         )
         if need_scores:
             wf_results, wf_scores = wf_out

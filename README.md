@@ -131,7 +131,7 @@ Benchmark prices are **reindexed to the strategy’s trading days** (forward-fil
 | Flag | Default | Description |
 |------|---------|-------------|
 | `scored_path` | — | Parquet (`.parquet`) or CSV with a `date` column |
-| `--top-n` | 10 | Number of tickers per cohort (ranked by score) |
+| `--top-n` | 15 | Number of tickers per cohort (ranked by score) |
 | `--holding-days` | 10 | Holding period in **trading** days |
 | `--rebalance-day` | Friday | `Monday`–`Friday` or `last` (last session in each ISO week) |
 | `--weighting` | equal | `equal` or `probability` (normalize scores to weights) |
@@ -309,7 +309,7 @@ uv run predict-sp500 \
   --state portfolio_state.json \
   --sample-n 10000 \
   --provider yfinance \
-  --top-n 10 \
+  --top-n 15 \
   --max-cohorts 2 \
   --holding-days 10 \
   --slippage-bps 5 \
@@ -430,7 +430,7 @@ uv run predict-sp500 --model models/latest.pkl --skip-earnings --confirm
 | `--state` | `portfolio_state.json` | Portfolio state JSON file |
 | `--init` | off | Create a new portfolio state file |
 | `--initial-capital` | 100000 | Starting capital (with `--init`) |
-| `--top-n` | 10 | Stocks per cohort |
+| `--top-n` | 15 | Stocks per cohort |
 | `--max-cohorts` | 2 | Max overlapping cohorts |
 | `--holding-days` | 10 | Trading days until cohort expiry |
 | `--max-drawdown` | 0.15 | Kill-switch: halt if drawdown exceeds this |

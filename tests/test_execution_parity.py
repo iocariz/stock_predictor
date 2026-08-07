@@ -9,6 +9,8 @@ from stock_predictor.backtest import _compute_weights
 from stock_predictor.execution_calendar import (
     entry_on_or_after,
     exit_date_iso_after_hold,
+    extend_calendar,
+    next_trading_day,
     offset_trading_days,
     trading_dates_from_index,
 )
@@ -38,3 +40,30 @@ def test_live_weights_match_backtest_compute_weights() -> None:
     assert abs(w_eq.sum() - 1.0) < 1e-9
     assert abs(w_pr.sum() - 1.0) < 1e-9
     np.testing.assert_allclose(w_pr, probs)
+
+
+def test_extend_calendar_appends_business_days() -> None:
+    td = pd.bdate_range("2024-06-03", end="2024-06-14").values  # ends Friday
+    cal = extend_calendar(td, 10)
+    assert len(cal) == len(td) + 10
+    # First appended session is the next business day (Monday 2024-06-17)
+    assert pd.Timestamp(cal[len(td)]) == pd.Timestamp("2024-06-17")
+    # Known sessions are untouched
+    assert (cal[: len(td)] == td).all()
+
+
+def test_extend_calendar_empty_and_zero() -> None:
+    td = pd.bdate_range("2024-06-03", periods=5).values
+    assert (extend_calendar(td, 0) == td).all()
+    assert len(extend_calendar(np.array([], dtype="datetime64[ns]"), 5)) == 0
+
+
+def test_live_entry_matches_backtest_next_day_convention() -> None:
+    """Live entry (next session strictly after as_of) equals the backtest's
+    next_trading_day when the session exists in the historical calendar."""
+    td = pd.bdate_range("2024-01-08", periods=40).values
+    as_of = pd.Timestamp("2024-01-10")  # Wednesday, a session in td
+    cal = extend_calendar(td, 15)
+    live_entry = next_trading_day(as_of, cal)
+    bt_entry = next_trading_day(as_of, td)
+    assert live_entry == bt_entry == pd.Timestamp("2024-01-11")

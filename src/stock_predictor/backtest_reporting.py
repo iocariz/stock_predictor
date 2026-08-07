@@ -32,6 +32,86 @@ def _fmt_dollar(v: float) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Relative-return (active vs benchmark) metrics
+# ---------------------------------------------------------------------------
+
+
+def relative_metrics(strategy_nav: pd.Series, bench_nav: pd.Series) -> dict[str, float]:
+    """Active-return statistics of a strategy vs a benchmark.
+
+    Frames the strategy as an overlay on the benchmark: daily active return
+    ``r_strat - r_bench`` (a dollar-neutral long-strategy / short-benchmark
+    book, rebalanced daily). Returns annualized active return, tracking
+    error, information ratio, CAPM beta/alpha, up/down capture, and the
+    overlay equity's total return and max drawdown.
+    """
+    if strategy_nav is None or bench_nav is None:
+        return {}
+    idx = strategy_nav.index.intersection(bench_nav.index).sort_values()
+    if len(idx) < 3:
+        return {}
+    rs = strategy_nav.reindex(idx).astype(float).pct_change()
+    rb = bench_nav.reindex(idx).astype(float).pct_change()
+    both = pd.concat([rs.rename("s"), rb.rename("b")], axis=1).dropna()
+    if len(both) < 2:
+        return {}
+    rs, rb = both["s"], both["b"]
+    active = rs - rb
+
+    te = float(active.std() * np.sqrt(252))
+    active_ann = float(active.mean() * 252)
+    ir = float(active.mean() / active.std() * np.sqrt(252)) if active.std() > 0 else float("nan")
+
+    var_b = float(rb.var())
+    beta = float(rs.cov(rb) / var_b) if var_b > 0 else float("nan")
+    alpha_ann = (
+        float((rs.mean() - beta * rb.mean()) * 252) if beta == beta else float("nan")
+    )
+
+    up = rb > 0
+    down = rb < 0
+    up_capture = float(rs[up].mean() / rb[up].mean()) if up.any() and rb[up].mean() != 0 else float("nan")
+    down_capture = (
+        float(rs[down].mean() / rb[down].mean()) if down.any() and rb[down].mean() != 0 else float("nan")
+    )
+
+    overlay = (1.0 + active).cumprod()
+    overlay_total = float(overlay.iloc[-1] - 1.0)
+    overlay_dd = float((overlay / overlay.cummax() - 1.0).min())
+
+    return {
+        "active_return_ann": active_ann,
+        "tracking_error": te,
+        "information_ratio": ir,
+        "beta": beta,
+        "alpha_ann": alpha_ann,
+        "up_capture": up_capture,
+        "down_capture": down_capture,
+        "overlay_total_return": overlay_total,
+        "overlay_max_drawdown": overlay_dd,
+    }
+
+
+def print_relative_report(strategy_nav: pd.Series, bench_nav: pd.Series, bench_label: str) -> None:
+    """Print the active-vs-benchmark section (no-op if series don't overlap)."""
+    rm = relative_metrics(strategy_nav, bench_nav)
+    if not rm:
+        return
+    print(f"ACTIVE vs {bench_label} (long strategy / short benchmark, daily rebalance)")
+    print("-" * 48)
+    print(f"{'Active return (ann)':28s} {_fmt_pct(rm['active_return_ann']):>10s}")
+    print(f"{'Tracking error (ann)':28s} {_fmt_pct(rm['tracking_error']):>10s}")
+    print(f"{'Information ratio':28s} {_fmt_f(rm['information_ratio']):>10s}")
+    print(f"{'Beta vs benchmark':28s} {_fmt_f(rm['beta']):>10s}")
+    print(f"{'CAPM alpha (ann)':28s} {_fmt_pct(rm['alpha_ann']):>10s}")
+    print(f"{'Up capture':28s} {_fmt_f(rm['up_capture']):>10s}")
+    print(f"{'Down capture':28s} {_fmt_f(rm['down_capture']):>10s}")
+    print(f"{'Overlay total return':28s} {_fmt_pct(rm['overlay_total_return']):>10s}")
+    print(f"{'Overlay max drawdown':28s} {_fmt_pct(rm['overlay_max_drawdown']):>10s}")
+    print()
+
+
+# ---------------------------------------------------------------------------
 # Console reports
 # ---------------------------------------------------------------------------
 
@@ -85,6 +165,10 @@ def print_report(result: BacktestResult) -> None:
         print(f"{label:20s} {strat:>{col_w}s}  {spy:>{col_w}s}")
     print("=" * (22 + 2 + col_w * 2 + 2))
     print()
+    if has_bench and len(result.spy_daily_nav) > 1:
+        print_relative_report(
+            result.daily_nav, result.spy_daily_nav, c.benchmark_ticker or "benchmark",
+        )
 
 
 # ---------------------------------------------------------------------------

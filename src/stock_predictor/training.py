@@ -18,7 +18,6 @@ import optuna
 import pandas as pd
 import yfinance as yf
 from sklearn.metrics import average_precision_score, roc_auc_score
-from sklearn.model_selection import TimeSeriesSplit
 
 from stock_predictor.calendar_features import CALENDAR_FEATURE_COLS, add_calendar_features
 from stock_predictor.data_provider import _load_dotenv
@@ -122,7 +121,12 @@ def add_price_features(df: pd.DataFrame) -> pd.DataFrame:
         gain = delta.clip(lower=0).rolling(window).mean()
         loss = (-delta.clip(upper=0)).rolling(window).mean()
         rs = gain / loss.replace(0, np.nan)
-        return 100 - 100 / (1 + rs)
+        out = 100 - 100 / (1 + rs)
+        # Zero-loss window is maximum strength (RSI 100), not undefined;
+        # a fully flat window (no gains either) is neutral.
+        out = out.mask((loss == 0) & (gain > 0), 100.0)
+        out = out.mask((loss == 0) & (gain == 0), 50.0)
+        return out
 
     df["rsi_14"] = g_price.transform(rsi)
     df["price_vs_ma20"] = g_price.transform(lambda s: s / s.rolling(20).mean() - 1)
@@ -236,8 +240,72 @@ def precision_at_k(y_true: pd.Series, y_scores: np.ndarray, k: int) -> float:
     return float(y_true.values[top_k_idx].mean())
 
 
+def purge_train_dates(
+    df: pd.DataFrame,
+    boundary: str | pd.Timestamp,
+    purge_days: int,
+    date_col: str = "date",
+) -> pd.DataFrame:
+    """Drop the last *purge_days* trading dates strictly before *boundary*.
+
+    A row dated d carries a label computed from prices up to d + horizon
+    trading days.  Training rows within `horizon` days of a test boundary
+    therefore leak test-period prices; purging them removes the overlap.
+    """
+    if purge_days <= 0:
+        return df
+    dates = pd.to_datetime(df[date_col])
+    udates = np.sort(dates.unique())
+    before = udates[udates < np.datetime64(pd.Timestamp(boundary))]
+    if len(before) <= purge_days:
+        return df.iloc[:0]
+    cutoff = before[len(before) - purge_days]  # first purged date
+    return df[dates < cutoff]
+
+
+def purged_date_splits(
+    dates: pd.Series,
+    n_splits: int,
+    purge_days: int,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Expanding-window CV folds grouped by date with a purge gap.
+
+    Mirrors ``TimeSeriesSplit`` but splits on unique *dates* rather than rows,
+    so a trading day never appears in both train and validation, and the last
+    *purge_days* dates before each validation block are excluded from training
+    (labels are forward-looking).  Returns row-index arrays for each fold.
+    """
+    d = pd.to_datetime(dates).to_numpy()
+    udates = np.sort(pd.unique(d))
+    n = len(udates)
+    fold_size = n // (n_splits + 1)
+    if fold_size == 0:
+        raise ValueError(
+            f"Not enough unique dates ({n}) for {n_splits} splits"
+        )
+    splits: list[tuple[np.ndarray, np.ndarray]] = []
+    for k in range(n_splits):
+        val_lo = n - (n_splits - k) * fold_size
+        val_dates = udates[val_lo : val_lo + fold_size]
+        train_hi = max(0, val_lo - purge_days)
+        if train_hi == 0:
+            continue
+        train_cut = udates[train_hi - 1]
+        train_idx = np.flatnonzero(d <= train_cut)
+        val_idx = np.flatnonzero(np.isin(d, val_dates))
+        if len(train_idx) and len(val_idx):
+            splits.append((train_idx, val_idx))
+    if not splits:
+        raise ValueError("purge_days too large for the available date range")
+    return splits
+
+
 def make_objective(
-    X: pd.DataFrame, y: np.ndarray, spw: float, tsc: TimeSeriesSplit, seed: int
+    X: pd.DataFrame,
+    y: np.ndarray,
+    spw: float,
+    splits: list[tuple[np.ndarray, np.ndarray]],
+    seed: int,
 ):
     def objective(trial: optuna.Trial) -> float:
         params = {
@@ -253,7 +321,7 @@ def make_objective(
             "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True),
         }
         fold_scores: list[float] = []
-        for train_idx, val_idx in tsc.split(X):
+        for train_idx, val_idx in splits:
             X_tr, X_va = X.iloc[train_idx], X.iloc[val_idx]
             y_tr, y_va = y[train_idx], y[val_idx]
             clf = lgb.LGBMClassifier(
@@ -281,15 +349,19 @@ def make_objective(
 
 
 def _inner_train_val_split(
-    train_df: pd.DataFrame, date_col: str, val_frac: float
+    train_df: pd.DataFrame, date_col: str, val_frac: float, purge_days: int = 0
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     udates = np.sort(train_df[date_col].unique())
-    if len(udates) < 3:
+    if len(udates) < 3 + purge_days:
         return train_df.iloc[:0], train_df.iloc[:0]
     k = max(1, int(len(udates) * val_frac))
     val_dates = set(udates[-k:])
-    tr = train_df[~train_df[date_col].isin(val_dates)]
     va = train_df[train_df[date_col].isin(val_dates)]
+    tr = train_df[~train_df[date_col].isin(val_dates)]
+    if purge_days > 0:
+        # Labels look `horizon` days ahead: drop training dates whose label
+        # window overlaps the validation block.
+        tr = purge_train_dates(tr, min(val_dates), purge_days, date_col=date_col)
     return tr, va
 
 
@@ -306,7 +378,14 @@ def monthly_walk_forward(
     top_k: int,
     random_state: int,
     return_scores: bool = False,
+    purge_days: int = 0,
 ) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
+    """Walk forward month by month.
+
+    *purge_days* should be the label horizon: the last *purge_days* trading
+    dates before each test month are excluded from training so forward-return
+    labels never overlap the test window.
+    """
     d = df.copy()
     d[date_col] = pd.to_datetime(d[date_col])
     first_p = pd.Timestamp(test_start).to_period("M")
@@ -322,11 +401,13 @@ def monthly_walk_forward(
         m_end = m_start + pd.offsets.MonthEnd(0)
         train_mask = d[date_col] < m_start
         test_mask = (d[date_col] >= m_start) & (d[date_col] <= m_end)
-        train_df = d.loc[train_mask]
+        train_df = purge_train_dates(d.loc[train_mask], m_start, purge_days, date_col=date_col)
         test_df = d.loc[test_mask]
         if len(train_df) < min_train_rows or len(test_df) == 0:
             continue
-        tr_in, va_in = _inner_train_val_split(train_df, date_col, inner_val_frac)
+        tr_in, va_in = _inner_train_val_split(
+            train_df, date_col, inner_val_frac, purge_days=purge_days,
+        )
         if len(tr_in) == 0 or len(va_in) == 0:
             continue
         y_tr = tr_in[target_col]
@@ -355,8 +436,10 @@ def monthly_walk_forward(
         )
         bi = clf.best_iteration_
         if bi is None:
-            bi = n_est_user - 1
-        n_trees = int(bi) + 1
+            # No early stop triggered: use every tree the ES model trained.
+            n_trees = int(clf.n_estimators_)
+        else:
+            n_trees = int(bi) + 1
         neg_f, pos_f = int((train_df[target_col] == 0).sum()), int((train_df[target_col] == 1).sum())
         if neg_f == 0 or pos_f == 0:
             continue
@@ -382,6 +465,9 @@ def monthly_walk_forward(
         scored = test_df.assign(prob=prob)
         if return_scores:
             score_cols = [date_col, "ticker", "prob", "adj_close", "fwd_ret", target_col]
+            # Carry vix_percentile so the backtest --vix-filter can act on it.
+            if "vix_percentile" in scored.columns:
+                score_cols.append("vix_percentile")
             scored_panels.append(scored[score_cols].copy())
         weekly_p = (
             scored.assign(week=lambda x: x[date_col].dt.to_period("W"))
@@ -395,7 +481,7 @@ def monthly_walk_forward(
         records.append(
             {
                 "month": str(p),
-                "train_end": (m_start - pd.Timedelta(days=1)).date(),
+                "train_end": train_df[date_col].max().date(),
                 "n_train": len(train_df),
                 "n_test": len(test_df),
                 "pr_auc": pr,
@@ -609,6 +695,29 @@ def build_feature_panel(
     return features, feature_cols
 
 
+def select_training_rows(
+    features: pd.DataFrame,
+    feature_cols: list[str],
+    target_col: str = "target_5pct",
+    *,
+    strict: bool = False,
+) -> pd.DataFrame:
+    """Pick rows usable for training/evaluation.
+
+    Default: require the label and a minimal price history (``ret_1d``) and
+    keep rows with other NaN features — LightGBM handles missing values
+    natively, and dropping every row with any NaN discards long-lookback
+    warm-up periods (e.g. all rows until ``ret_252d`` exists) plus every date
+    before a ticker's earliest known earnings, biasing the sample.
+
+    ``strict=True`` restores the legacy behavior (drop any NaN feature).
+    """
+    if strict:
+        return features.dropna(subset=feature_cols + [target_col])
+    required = [c for c in ("ret_1d",) if c in features.columns]
+    return features.dropna(subset=required + [target_col])
+
+
 def run_optuna_search(
     train: pd.DataFrame,
     feature_cols: list[str],
@@ -616,21 +725,27 @@ def run_optuna_search(
     ts_cv_splits: int,
     n_trials: int,
     seed: int,
+    purge_days: int = 0,
 ) -> dict:
-    """Run Optuna TPE search over LightGBM hyperparameters."""
+    """Run Optuna TPE search over LightGBM hyperparameters.
+
+    CV folds are grouped by date (no trading day straddles a fold boundary)
+    and purged: the last *purge_days* dates before each validation block are
+    excluded from training so forward-return labels cannot leak.
+    """
     train_sorted = train.sort_values(["date", "ticker"]).reset_index(drop=True)
     X_cv = train_sorted[feature_cols]
     y_cv = train_sorted["target_5pct"].to_numpy()
     neg_cv, pos_cv = int((y_cv == 0).sum()), int((y_cv == 1).sum())
     spw_cv = neg_cv / pos_cv
-    tsc = TimeSeriesSplit(n_splits=ts_cv_splits)
+    splits = purged_date_splits(train_sorted["date"], ts_cv_splits, purge_days)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     study = optuna.create_study(
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=seed),
     )
     study.optimize(
-        make_objective(X_cv, y_cv, spw_cv, tsc, seed),
+        make_objective(X_cv, y_cv, spw_cv, splits, seed),
         n_trials=n_trials,
         show_progress_bar=True,
     )
@@ -644,9 +759,12 @@ def train_final_model(
     feature_cols: list[str],
     params: dict,
     seed: int,
+    purge_days: int = 0,
 ) -> tuple[lgb.LGBMClassifier, int]:
     """Find n_trees via early stopping on a val split, then retrain on full train."""
-    train_inner, val_inner = _inner_train_val_split(train, "date", val_frac=0.15)
+    train_inner, val_inner = _inner_train_val_split(
+        train, "date", val_frac=0.15, purge_days=purge_days,
+    )
     X_tr_inner = train_inner[feature_cols]
     y_tr_inner = train_inner["target_5pct"]
     X_val = val_inner[feature_cols]

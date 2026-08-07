@@ -4,11 +4,16 @@ import numpy as np
 import pandas as pd
 
 from stock_predictor.training import (
+    _inner_train_val_split,
     add_price_features,
     add_regime_features,
     add_cross_sectional_ranks,
     build_labeled_panel,
+    monthly_walk_forward,
     precision_at_k,
+    purge_train_dates,
+    purged_date_splits,
+    select_training_rows,
     wide_field,
 )
 
@@ -106,3 +111,134 @@ def test_cross_sectional_ranks_range() -> None:
         assert col in out.columns
         assert out[col].min() > 0
         assert out[col].max() <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Regression: purge/embargo around forward-return label windows
+# ---------------------------------------------------------------------------
+
+
+def test_purge_train_dates_drops_boundary_window() -> None:
+    dates = pd.bdate_range("2024-01-02", periods=20)
+    df = pd.DataFrame({"date": np.repeat(dates, 2), "x": 1.0})
+    boundary = dates[15]
+    out = purge_train_dates(df[df["date"] < boundary], boundary, purge_days=5)
+    # The last 5 trading dates before the boundary (indices 10..14) are gone.
+    assert out["date"].max() == dates[9]
+
+
+def test_purge_train_dates_zero_is_noop() -> None:
+    dates = pd.bdate_range("2024-01-02", periods=10)
+    df = pd.DataFrame({"date": dates, "x": 1.0})
+    out = purge_train_dates(df, dates[-1], purge_days=0)
+    assert len(out) == len(df)
+
+
+def test_purge_train_dates_window_larger_than_history_empties() -> None:
+    dates = pd.bdate_range("2024-01-02", periods=5)
+    df = pd.DataFrame({"date": dates, "x": 1.0})
+    out = purge_train_dates(df, dates[-1] + pd.Timedelta(days=1), purge_days=10)
+    assert len(out) == 0
+
+
+def test_purged_date_splits_no_label_overlap() -> None:
+    """No train date may fall within `purge_days` dates of its validation block."""
+    dates = pd.bdate_range("2024-01-02", periods=60)
+    s = pd.Series(np.repeat(dates, 3))  # 3 rows per date, shuffled order
+    s = s.sample(frac=1.0, random_state=7).reset_index(drop=True)
+    splits = purged_date_splits(s, n_splits=4, purge_days=5)
+    assert len(splits) >= 1
+    d = pd.to_datetime(s).to_numpy()
+    udates = np.sort(pd.unique(d))
+    for train_idx, val_idx in splits:
+        train_dates = set(d[train_idx])
+        val_dates = np.sort(pd.unique(d[val_idx]))
+        # train strictly before validation
+        assert max(train_dates) < val_dates[0]
+        # purge gap: at least purge_days unique dates between max(train) and val start
+        gap = udates[(udates > max(train_dates)) & (udates < val_dates[0])]
+        assert len(gap) >= 5
+        # no date in both sides
+        assert train_dates.isdisjoint(set(val_dates))
+
+
+def test_inner_train_val_split_purges_before_val() -> None:
+    dates = pd.bdate_range("2024-01-02", periods=50)
+    df = pd.DataFrame({"date": np.repeat(dates, 2), "x": 1.0})
+    tr, va = _inner_train_val_split(df, "date", val_frac=0.2, purge_days=5)
+    assert len(tr) > 0 and len(va) > 0
+    udates = np.sort(df["date"].unique())
+    gap = udates[(udates > tr["date"].max().to_datetime64())
+                 & (udates < va["date"].min().to_datetime64())]
+    assert len(gap) >= 5
+
+
+def _walk_forward_panel(n_days: int = 130, n_tickers: int = 6) -> pd.DataFrame:
+    dates = pd.bdate_range("2024-01-02", periods=n_days)
+    rng = np.random.default_rng(3)
+    rows = []
+    for i in range(n_tickers):
+        for d in dates:
+            rows.append({
+                "date": d,
+                "ticker": f"T{i}",
+                "adj_close": 100.0,
+                "f1": rng.random(),
+                "f2": rng.random(),
+                "fwd_ret": rng.normal(0, 0.05),
+                "target_5pct": int(rng.random() < 0.3),
+                "vix_percentile": 0.42,
+            })
+    return pd.DataFrame(rows)
+
+
+def test_monthly_walk_forward_purges_train_boundary_and_keeps_vix() -> None:
+    df = _walk_forward_panel()
+    test_start = "2024-05-01"
+    metrics, scores = monthly_walk_forward(
+        df, ["f1", "f2"], "target_5pct", "date", test_start,
+        {"n_estimators": 20, "learning_rate": 0.1, "num_leaves": 7},
+        inner_val_frac=0.1,
+        min_train_rows=50,
+        top_k=2,
+        random_state=0,
+        return_scores=True,
+        purge_days=5,
+    )
+    assert len(metrics) >= 1
+    udates = np.sort(df["date"].unique())
+    for _, rec in metrics.iterrows():
+        m_start = pd.Timestamp(rec["month"] + "-01")
+        train_end = pd.Timestamp(rec["train_end"])
+        # At least purge_days unique trading dates between last train date and month start
+        gap = udates[(udates > train_end.to_datetime64()) & (udates < m_start.to_datetime64())]
+        assert len(gap) >= 5, f"month {rec['month']}: only {len(gap)} purged dates"
+    # Regression: vix_percentile carried into scores so --vix-filter can work.
+    assert "vix_percentile" in scores.columns
+
+
+def test_rsi_zero_loss_window_is_100() -> None:
+    dates = pd.bdate_range("2024-01-02", periods=40)
+    df = pd.DataFrame({
+        "date": dates,
+        "ticker": "UP",
+        "adj_close": np.linspace(100, 140, len(dates)),  # strictly rising
+    })
+    out = add_price_features(df)
+    tail = out["rsi_14"].dropna()
+    assert len(tail) > 0
+    assert (tail == 100.0).all()
+
+
+def test_select_training_rows_keeps_partial_nan_features() -> None:
+    df = pd.DataFrame({
+        "date": pd.to_datetime(["2024-01-02"] * 4),
+        "ret_1d": [0.01, np.nan, 0.02, 0.03],
+        "ret_252d": [np.nan, np.nan, np.nan, 0.5],  # long warm-up mostly missing
+        "target_5pct": [1, 0, np.nan, 0],
+    })
+    out = select_training_rows(df, ["ret_1d", "ret_252d"], "target_5pct")
+    # Row 1 (no ret_1d) and row 2 (no label) drop; NaN ret_252d rows survive.
+    assert len(out) == 2
+    strict = select_training_rows(df, ["ret_1d", "ret_252d"], "target_5pct", strict=True)
+    assert len(strict) == 1

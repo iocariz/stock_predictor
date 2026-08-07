@@ -17,6 +17,22 @@ def trading_dates_from_index(index: pd.Index) -> np.ndarray:
     return idx.to_numpy()
 
 
+def extend_calendar(trading_dates: np.ndarray, n_future: int) -> np.ndarray:
+    """Append *n_future* business days after the last known session.
+
+    Live order generation needs entry/expiry sessions that lie beyond the
+    downloaded price history (which necessarily ends "today").  Future
+    sessions are approximated with business days — an exchange holiday can
+    shift the true exit by a session, which is harmless because expiries are
+    settled by ``expiry_date <= as_of`` on a later run.
+    """
+    ts = pd.DatetimeIndex(trading_dates)
+    if len(ts) == 0 or n_future <= 0:
+        return ts.to_numpy()
+    future = pd.bdate_range(ts[-1] + pd.Timedelta(days=1), periods=n_future)
+    return ts.append(future).to_numpy()
+
+
 def next_trading_day(date: pd.Timestamp, trading_dates: np.ndarray) -> pd.Timestamp | None:
     """First session strictly after *date*."""
     ts = pd.DatetimeIndex(trading_dates)

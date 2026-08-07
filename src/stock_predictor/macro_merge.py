@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 # Same series IDs as TiingoFredProvider (avoid importing tiingo → training cycle).
@@ -44,7 +45,7 @@ def download_macro_fred(start: str, end: str | None, api_key: str) -> pd.DataFra
     macro = macro.reset_index().rename(columns={"index": "date"})
     for col in MACRO_COLS:
         if col not in macro.columns:
-            macro[col] = pd.nan
+            macro[col] = np.nan
     return macro[["date", *MACRO_COLS]].copy()
 
 
@@ -64,14 +65,14 @@ def merge_macro_panels(primary: pd.DataFrame, fallback: pd.DataFrame) -> pd.Data
             df["date"] = pd.to_datetime(df["date"]).dt.normalize()
         for col in MACRO_COLS:
             if col not in p.columns:
-                p[col] = pd.nan
+                p[col] = np.nan
             if col not in f.columns:
-                f[col] = pd.nan
+                f[col] = np.nan
         pi = p.set_index("date").sort_index()
         fi = f.set_index("date").sort_index()
         merged = pi.combine_first(fi).sort_index()
         out = merged.reset_index()
     for col in MACRO_COLS:
         if col not in out.columns:
-            out[col] = pd.nan
+            out[col] = np.nan
     return out[["date", *MACRO_COLS]].copy()

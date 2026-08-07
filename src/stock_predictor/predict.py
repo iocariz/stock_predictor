@@ -128,14 +128,13 @@ def _forward_fill_date_level_features(
     Handles both raw (vix, tnx_yield) and derived (vix_ret_5d,
     yield_curve_spread, vix_percentile) macro features.
     """
-    # Identify columns that are date-level: same value across all tickers on a
-    # given date.  MACRO_FEATURE_COLS is the canonical list, but we also catch
-    # any feature column where *every* ticker is NaN on the score date — a
-    # strong signal of a per-date download failure rather than per-ticker data.
+    # Only macro columns are genuinely date-level (one value shared by every
+    # ticker).  Filling a ticker-level column here would smear one ticker's
+    # last value across the whole universe, so restrict to MACRO_FEATURE_COLS.
     day = panel[panel["date"] == score_date]
     cols_all_nan = [
         c for c in feature_cols
-        if c in panel.columns and c != "sector" and day[c].isna().all()
+        if c in MACRO_FEATURE_COLS and c in panel.columns and day[c].isna().all()
     ]
     if not cols_all_nan:
         return panel
@@ -292,7 +291,7 @@ def parse_args() -> argparse.Namespace:
                    help="Portfolio state JSON (default: portfolio_state.json)")
     p.add_argument("--init", action="store_true", help="Create new portfolio state")
     p.add_argument("--initial-capital", type=float, default=100_000.0, dest="initial_capital")
-    p.add_argument("--top-n", type=int, default=10, dest="top_n")
+    p.add_argument("--top-n", type=int, default=15, dest="top_n")
     p.add_argument("--max-cohorts", type=int, default=2, dest="max_cohorts")
     p.add_argument("--holding-days", type=int, default=10, dest="holding_days")
     p.add_argument("--max-drawdown", type=float, default=0.15, dest="max_drawdown")
