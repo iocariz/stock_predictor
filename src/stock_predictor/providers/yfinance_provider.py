@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -9,6 +11,11 @@ import yfinance as yf
 from stock_predictor.training import wide_field
 
 MACRO_YF = ["^VIX", "^TNX", "^IRX"]
+
+# Yahoo intermittently rate-limits single-ticker downloads (empty frame or
+# exception); retry with exponential backoff before giving up.
+_BENCHMARK_RETRIES = 4
+_BENCHMARK_BACKOFF_S = 2.0
 
 
 class YFinanceProvider:
@@ -71,14 +78,26 @@ class YFinanceProvider:
         end: str,
     ) -> pd.Series:
         end_ts = pd.Timestamp(end) + pd.Timedelta(days=5)
-        bench = yf.download(
-            ticker,
-            start=start,
-            end=end_ts.strftime("%Y-%m-%d"),
-            auto_adjust=True,
-            progress=False,
-        )
-        if bench.empty:
+        bench = pd.DataFrame()
+        for attempt in range(_BENCHMARK_RETRIES):
+            try:
+                bench = yf.download(
+                    ticker,
+                    start=start,
+                    end=end_ts.strftime("%Y-%m-%d"),
+                    auto_adjust=True,
+                    progress=False,
+                )
+            except Exception as exc:
+                print(f"  Benchmark download error ({ticker}): {exc}")
+                bench = pd.DataFrame()
+            if bench is not None and not bench.empty:
+                break
+            if attempt < _BENCHMARK_RETRIES - 1:
+                wait = _BENCHMARK_BACKOFF_S * 2 ** attempt
+                print(f"  Benchmark download empty ({ticker}); retry in {wait:.0f}s…")
+                time.sleep(wait)
+        if bench is None or bench.empty:
             return pd.Series(dtype=float, name=ticker)
         if isinstance(bench.columns, pd.MultiIndex):
             close = bench.xs("Close", axis=1, level=-1).squeeze()

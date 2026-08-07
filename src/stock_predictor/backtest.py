@@ -17,7 +17,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
 from stock_predictor.execution_calendar import next_trading_day, offset_trading_days
 
@@ -344,29 +343,14 @@ def _download_benchmark(
     *, provider: object | None = None,
 ) -> tuple[pd.Series, pd.Series]:
     try:
-        if provider is not None:
-            close = provider.download_benchmark(
-                ticker, str(start.date()), str(end.date()),
-            )
-        else:
-            bench = yf.download(
-                ticker, start=start, end=end + pd.Timedelta(days=5),
-                auto_adjust=True, progress=False,
-            )
-            if bench.empty:
-                return pd.Series(dtype=float), pd.Series(dtype=float)
-            if isinstance(bench.columns, pd.MultiIndex):
-                close = bench.xs("Close", axis=1, level=-1).squeeze()
-            else:
-                close = bench["Close"]
-            close = close.dropna()
-            if len(close) == 0:
-                return pd.Series(dtype=float), pd.Series(dtype=float)
-            idx = pd.DatetimeIndex(close.index)
-            if idx.tz is not None:
-                idx = idx.tz_convert("UTC").tz_localize(None)
-            close.index = idx.normalize()
-            close = close.astype(float)
+        if provider is None:
+            # Default to the yfinance provider (includes rate-limit retry).
+            from stock_predictor.providers.yfinance_provider import YFinanceProvider
+
+            provider = YFinanceProvider()
+        close = provider.download_benchmark(
+            ticker, str(start.date()), str(end.date()),
+        )
         if close.empty:
             return pd.Series(dtype=float), pd.Series(dtype=float)
         nav = initial_capital * close / float(close.iloc[0])

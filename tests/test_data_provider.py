@@ -114,3 +114,20 @@ def test_yfinance_single_ticker_column_named_after_ticker() -> None:
         )
     assert list(adj.columns) == ["AAPL"]
     assert list(vol.columns) == ["AAPL"]
+
+
+def test_yfinance_benchmark_retries_on_empty_then_succeeds() -> None:
+    """Regression: a rate-limited (empty) benchmark download is retried."""
+    from stock_predictor.providers import yfinance_provider as yp
+
+    idx = pd.bdate_range("2024-01-02", periods=3)
+    good = pd.DataFrame({"Close": [500.0, 501.0, 502.0]}, index=idx)
+    with (
+        patch.object(yp.yf, "download", side_effect=[pd.DataFrame(), good]) as dl,
+        patch.object(yp.time, "sleep") as slept,
+    ):
+        close = yp.YFinanceProvider().download_benchmark("SPY", "2024-01-02", "2024-01-05")
+    assert dl.call_count == 2
+    assert slept.call_count == 1
+    assert len(close) == 3
+    assert close.name == "SPY"
