@@ -421,3 +421,49 @@ def test_exit_costs_hit_nav() -> None:
     nav0 = run_backtest(panel, cfg0).daily_nav
     nav1 = run_backtest(panel, cfg1).daily_nav
     assert nav1.iloc[-1] < nav0.iloc[-1]
+
+
+# ---------------------------------------------------------------------------
+# Relative-return framing
+# ---------------------------------------------------------------------------
+
+
+def test_relative_metrics_identical_series() -> None:
+    from stock_predictor.backtest_reporting import relative_metrics
+
+    idx = pd.bdate_range("2024-01-02", periods=60)
+    nav = pd.Series(100.0 * 1.001 ** np.arange(60), index=idx)
+    rm = relative_metrics(nav, nav.copy())
+    assert rm["beta"] == pytest.approx(1.0)
+    assert rm["active_return_ann"] == pytest.approx(0.0, abs=1e-12)
+    assert rm["tracking_error"] == pytest.approx(0.0, abs=1e-12)
+    assert rm["overlay_total_return"] == pytest.approx(0.0, abs=1e-12)
+    assert np.isnan(rm["information_ratio"])  # zero tracking error
+
+
+def test_relative_metrics_constant_daily_edge() -> None:
+    """Strategy = benchmark + 5 bps/day -> beta 1, positive alpha/IR/overlay."""
+    from stock_predictor.backtest_reporting import relative_metrics
+
+    idx = pd.bdate_range("2024-01-02", periods=252)
+    rng = np.random.default_rng(7)
+    rb = rng.normal(0.0004, 0.01, len(idx))
+    rs = rb + 0.0005
+    bench = pd.Series(100.0 * np.cumprod(1 + rb), index=idx)
+    strat = pd.Series(100.0 * np.cumprod(1 + rs), index=idx)
+    rm = relative_metrics(strat, bench)
+    assert rm["beta"] == pytest.approx(1.0, abs=0.02)
+    assert rm["alpha_ann"] == pytest.approx(0.0005 * 252, rel=0.05)
+    assert rm["active_return_ann"] == pytest.approx(0.0005 * 252, rel=0.05)
+    assert rm["information_ratio"] > 5  # near-deterministic edge
+    assert rm["overlay_total_return"] > 0.10
+    assert rm["up_capture"] > 1.0
+    assert rm["down_capture"] < 1.0  # loses less than benchmark on down days
+
+
+def test_relative_metrics_insufficient_overlap() -> None:
+    from stock_predictor.backtest_reporting import relative_metrics
+
+    a = pd.Series([1.0, 1.1], index=pd.bdate_range("2024-01-02", periods=2))
+    b = pd.Series([1.0, 1.1], index=pd.bdate_range("2025-01-02", periods=2))
+    assert relative_metrics(a, b) == {}

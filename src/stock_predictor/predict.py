@@ -291,7 +291,7 @@ def parse_args() -> argparse.Namespace:
                    help="Portfolio state JSON (default: portfolio_state.json)")
     p.add_argument("--init", action="store_true", help="Create new portfolio state")
     p.add_argument("--initial-capital", type=float, default=100_000.0, dest="initial_capital")
-    p.add_argument("--top-n", type=int, default=10, dest="top_n")
+    p.add_argument("--top-n", type=int, default=15, dest="top_n")
     p.add_argument("--max-cohorts", type=int, default=2, dest="max_cohorts")
     p.add_argument("--holding-days", type=int, default=10, dest="holding_days")
     p.add_argument("--max-drawdown", type=float, default=0.15, dest="max_drawdown")

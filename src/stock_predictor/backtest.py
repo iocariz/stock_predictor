@@ -28,7 +28,7 @@ from stock_predictor.execution_calendar import next_trading_day, offset_trading_
 
 @dataclass(frozen=True)
 class BacktestConfig:
-    top_n: int = 10
+    top_n: int = 15
     holding_days: int = 10
     rebalance_day: str = "Friday"  # or "last" for last trading day of ISO week
     weighting: str = "equal"  # "equal" or "probability"
@@ -539,7 +539,7 @@ def _load_scored(path: Path) -> pd.DataFrame:
 def main() -> None:
     p = argparse.ArgumentParser(description="Run portfolio backtest on walk-forward scored data.")
     p.add_argument("scored_path", type=Path, help="Path to scored parquet or CSV")
-    p.add_argument("--top-n", type=int, default=10)
+    p.add_argument("--top-n", type=int, default=15)
     p.add_argument("--holding-days", type=int, default=10)
     p.add_argument(
         "--rebalance-day",
