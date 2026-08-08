@@ -537,3 +537,71 @@ def test_relative_metrics_alpha_t() -> None:
     # Identical series -> zero residual variance -> t undefined.
     rm_same = relative_metrics(bench, bench.copy())
     assert np.isnan(rm_same["alpha_t"])
+
+
+# ---------------------------------------------------------------------------
+# Rank-hold backtest
+# ---------------------------------------------------------------------------
+
+
+def _scored_panel_from_scores(
+    score_fn, n_days: int = 40, tickers: tuple[str, ...] = ("AAA", "BBB", "CCC"),
+) -> pd.DataFrame:
+    """score_fn(ticker, day_index) -> score; constant price 100."""
+    days = pd.bdate_range("2024-01-08", periods=n_days)
+    rows = []
+    for d_i, d in enumerate(days):
+        for t in tickers:
+            rows.append({"date": d, "ticker": t, "prob": score_fn(t, d_i), "adj_close": 100.0})
+    return pd.DataFrame(rows)
+
+
+def test_rank_hold_persistent_scores_never_sell() -> None:
+    """Stable ranking -> buy once, hold forever: zero closed trades, far lower costs."""
+    from stock_predictor.backtest import run_rank_hold_backtest
+
+    base = {"AAA": 0.9, "BBB": 0.6, "CCC": 0.1}
+    panel = _scored_panel_from_scores(lambda t, i: base[t])
+    cfg = BacktestConfig(top_n=2, exit_rank=2, benchmark_ticker=None)
+    r = run_rank_hold_backtest(panel, cfg)
+    assert len(r.cohorts) == 0                       # nothing ever closed
+    assert r.metrics["n_open_positions"] == 2.0      # AAA + BBB held to the end
+    # Cohort engine on the same panel churns every 10 days; rank-hold pays
+    # the entry leg once (4x lower cost on this 40-day flat panel).
+    r_cohort = run_backtest(panel, BacktestConfig(top_n=2, benchmark_ticker=None))
+    assert r.metrics["total_costs"] <= 0.3 * r_cohort.metrics["total_costs"]
+
+
+def test_rank_hold_sells_on_rank_decay() -> None:
+    """When a holding's rank decays beyond exit_rank it is sold and replaced."""
+    from stock_predictor.backtest import run_rank_hold_backtest
+
+    def score(t: str, i: int) -> float:
+        if t == "AAA":
+            return 0.9 if i < 15 else 0.05   # collapses mid-sample
+        if t == "BBB":
+            return 0.05 if i < 15 else 0.9   # takes over
+        return 0.5                            # CCC always middling
+
+    panel = _scored_panel_from_scores(score)
+    cfg = BacktestConfig(top_n=1, exit_rank=1, benchmark_ticker=None)
+    r = run_rank_hold_backtest(panel, cfg)
+    closed_tickers = [c.tickers[0] for c in r.cohorts]
+    assert "AAA" in closed_tickers               # decayed name was sold
+    assert r.metrics["n_open_positions"] == 1.0  # replacement still held
+
+
+def test_rank_hold_nav_matches_flat_market() -> None:
+    """Constant prices -> NAV loses exactly the entry slippage, nothing else."""
+    from stock_predictor.backtest import run_rank_hold_backtest
+
+    panel = _scored_panel_from_scores(lambda t, i: {"AAA": 0.9, "BBB": 0.6, "CCC": 0.1}[t])
+    cfg = BacktestConfig(top_n=2, exit_rank=3, benchmark_ticker=None, slippage_bps=0.0)
+    r = run_rank_hold_backtest(panel, cfg)
+    # No slippage, flat prices, no sells -> NAV stays at initial capital.
+    assert r.daily_nav.iloc[-1] == pytest.approx(cfg.initial_capital)
+
+
+def test_backtest_config_exit_rank_validation() -> None:
+    with pytest.raises(ValueError, match="exit_rank"):
+        BacktestConfig(top_n=20, exit_rank=10)

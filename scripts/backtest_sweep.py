@@ -21,6 +21,7 @@ from stock_predictor.backtest import (
     _download_benchmark,
     _load_scored,
     run_backtest,
+    run_rank_hold_backtest,
 )
 from stock_predictor.backtest_reporting import relative_metrics
 
@@ -48,9 +49,23 @@ VIX_CONFIGS: list[tuple[str, dict]] = [
     ("scaled + skip >0.90", {"vix_scale_exposure": True, "vix_filter_percentile": 0.90}),
 ]
 
+# Cohort (fixed 10d liquidation) vs rank-based holding (sell on rank decay).
+# The special "mode" key selects the backtest engine; everything else is
+# BacktestConfig overrides.
+HOLD_CONFIGS: list[tuple[str, dict]] = [
+    ("cohort top15/hold10 (baseline)", {}),
+    ("rank-hold exit>25", {"mode": "rank_hold", "exit_rank": 25}),
+    ("rank-hold exit>40", {"mode": "rank_hold", "exit_rank": 40}),
+    ("rank-hold exit>60", {"mode": "rank_hold", "exit_rank": 60}),
+    ("rank-hold exit>100", {"mode": "rank_hold", "exit_rank": 100}),
+    ("rank-hold exit>40 top20", {"mode": "rank_hold", "exit_rank": 40, "top_n": 20}),
+    ("rank-hold exit>40 + vix-scaled", {"mode": "rank_hold", "exit_rank": 40, "vix_scale_exposure": True}),
+]
+
 GRIDS: dict[str, list[tuple[str, dict]]] = {
     "default": CONFIGS,
     "vix": VIX_CONFIGS,
+    "hold": HOLD_CONFIGS,
 }
 
 
@@ -106,13 +121,15 @@ def main() -> None:
     rows: list[dict[str, object]] = []
     navs: list[tuple[str, pd.Series]] = []
     for label, overrides in configs:
+        ov = dict(overrides)
+        engine = run_rank_hold_backtest if ov.pop("mode", "cohort") == "rank_hold" else run_backtest
         cfg = BacktestConfig(
-            benchmark_ticker=None, initial_capital=args.capital, **overrides,
+            benchmark_ticker=None, initial_capital=args.capital, **ov,
         )
-        res = run_backtest(scored, cfg)
+        res = engine(scored, cfg)
         rows.append(_row(label, res.metrics))
         navs.append((label, res.daily_nav))
-        print(f"  ran: {label} ({res.metrics.get('n_cohorts', 0):.0f} cohorts)")
+        print(f"  ran: {label} ({res.metrics.get('n_cohorts', 0):.0f} closed trades/cohorts)")
 
     baseline_nav = navs[0][1]
     aligned = pd.Series(dtype=float)

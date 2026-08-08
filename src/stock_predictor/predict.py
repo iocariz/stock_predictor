@@ -29,6 +29,7 @@ from stock_predictor.portfolio import (
     PortfolioState,
     check_kill_switch,
     generate_orders,
+    generate_orders_rank_hold,
     init_state,
     load_state,
     portfolio_value,
@@ -244,7 +245,7 @@ def print_signal_report(
     buys = [o for o in orders if o.action == "BUY"]
 
     if sells:
-        print("EXPIRING POSITIONS (sell at open):")
+        print("CLOSING POSITIONS (sell at open):")
         for o in sells:
             # Find matching position for P&L
             pos = next((p for p in state.positions if p.ticker == o.ticker and p.cohort_id == o.cohort_id), None)
@@ -301,6 +302,23 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--top-n", type=int, default=15, dest="top_n")
     p.add_argument("--max-cohorts", type=int, default=2, dest="max_cohorts")
     p.add_argument("--holding-days", type=int, default=10, dest="holding_days")
+    p.add_argument(
+        "--hold-mode",
+        default="fixed",
+        choices=["fixed", "rank"],
+        dest="hold_mode",
+        help="fixed: sell after --holding-days sessions (cohort parity); "
+        "rank: sell only when a holding's rank decays beyond --exit-rank "
+        "(parity with backtest-sp500 --mode rank-hold). Do not switch modes "
+        "on an existing state file.",
+    )
+    p.add_argument(
+        "--exit-rank",
+        type=int,
+        default=40,
+        dest="exit_rank",
+        help="rank mode: sell held names ranked worse than this (>= top-n)",
+    )
     p.add_argument("--max-drawdown", type=float, default=0.15, dest="max_drawdown")
     p.add_argument("--slippage-bps", type=float, default=5.0, dest="slippage_bps")
     p.add_argument("--skip-earnings", action="store_true", dest="skip_earnings")
@@ -405,20 +423,34 @@ def main() -> None:
 
     # Generate orders (calendar = session dates in downloaded OHLC index)
     trading_dates = trading_dates_from_index(adj_close.index)
-    picks = scored.head(args.top_n * 2).to_dict("records")  # extra candidates in case some filtered
-    orders, new_state = generate_orders(
-        state, picks, latest_prices,
-        top_n=args.top_n,
-        max_cohorts=args.max_cohorts,
-        holding_days=args.holding_days,
-        slippage_bps=args.slippage_bps,
-        as_of=date.today().isoformat(),
-        trading_dates=trading_dates,
-        weighting=args.weighting,
-        commission_per_share=args.commission_per_share,
-        commission_per_order=args.commission_per_order,
-        allow_buys=not halted,
-    )
+    if args.hold_mode == "rank":
+        # Rank exits need the FULL ranking, not just the top of the list.
+        orders, new_state = generate_orders_rank_hold(
+            state, scored.to_dict("records"), latest_prices,
+            top_n=args.top_n,
+            exit_rank=args.exit_rank,
+            slippage_bps=args.slippage_bps,
+            as_of=date.today().isoformat(),
+            trading_dates=trading_dates,
+            commission_per_share=args.commission_per_share,
+            commission_per_order=args.commission_per_order,
+            allow_buys=not halted,
+        )
+    else:
+        picks = scored.head(args.top_n * 2).to_dict("records")  # extra candidates in case some filtered
+        orders, new_state = generate_orders(
+            state, picks, latest_prices,
+            top_n=args.top_n,
+            max_cohorts=args.max_cohorts,
+            holding_days=args.holding_days,
+            slippage_bps=args.slippage_bps,
+            as_of=date.today().isoformat(),
+            trading_dates=trading_dates,
+            weighting=args.weighting,
+            commission_per_share=args.commission_per_share,
+            commission_per_order=args.commission_per_order,
+            allow_buys=not halted,
+        )
 
     print_signal_report(
         scored, orders, state, nav, dd, halted,

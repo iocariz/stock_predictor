@@ -47,6 +47,10 @@ class BacktestConfig:
     """Dollars per share per buy or sell leg (round-trip = 2× per name)."""
     commission_per_order: float = 0.0
     """Flat dollars per ticker per buy or sell order (round-trip = 2× per name)."""
+    exit_rank: int = 40
+    """Rank-hold mode only (:func:`run_rank_hold_backtest`): sell a held name
+    when its cross-sectional rank decays beyond this (or it leaves the scored
+    universe). Must be >= top_n; larger values -> lower turnover."""
 
     def __post_init__(self) -> None:
         if self.weighting not in ("equal", "probability"):
@@ -55,6 +59,10 @@ class BacktestConfig:
             raise ValueError("top_n must be >= 1")
         if self.holding_days < 1:
             raise ValueError("holding_days must be >= 1")
+        if self.exit_rank < self.top_n:
+            raise ValueError(
+                f"exit_rank ({self.exit_rank}) must be >= top_n ({self.top_n})"
+            )
         valid_days = {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "last"}
         if self.rebalance_day not in valid_days:
             raise ValueError(f"rebalance_day must be one of {valid_days}, got {self.rebalance_day!r}")
@@ -391,13 +399,10 @@ def _align_benchmark_to_nav(
 # ---------------------------------------------------------------------------
 
 
-def run_backtest(
+def _prepare_scored(
     scored_df: pd.DataFrame,
-    config: BacktestConfig = BacktestConfig(),
-    *,
-    provider: object | None = None,
-) -> BacktestResult:
-    """Run the weekly-rebalance backtest on walk-forward scored data."""
+) -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame]:
+    """Validate a scored panel and return (df, trading_dates, ffilled price panel)."""
     if scored_df is None or len(scored_df) == 0:
         raise ValueError("scored_df is empty")
 
@@ -418,19 +423,86 @@ def run_backtest(
     if len(trading_dates) < 2:
         raise ValueError("Need at least two distinct dates in scored_df")
 
-    # Build price lookup panel (forward-fill gaps)
     price_panel = df.pivot_table(
         index="date", columns="ticker", values="adj_close", aggfunc="first",
     ).sort_index().ffill()
+    return df, trading_dates, price_panel
 
-    rebalance_dates = _get_rebalance_dates(trading_dates, config.rebalance_day)
 
-    # Per-date VIX percentile (regime filter and/or exposure scaling)
-    vix_by_date: pd.Series | None = None
+def _vix_percentile_by_date(df: pd.DataFrame, config: BacktestConfig) -> pd.Series | None:
+    """Per-date VIX percentile when the config uses regime filtering/scaling."""
     if "vix_percentile" in df.columns and (
         config.vix_filter_percentile is not None or config.vix_scale_exposure
     ):
-        vix_by_date = df.groupby("date", sort=False)["vix_percentile"].first()
+        return df.groupby("date", sort=False)["vix_percentile"].first()
+    return None
+
+
+def _vix_exposure_scale(
+    config: BacktestConfig, vix_by_date: pd.Series | None, sig_date: pd.Timestamp,
+) -> float:
+    """Capital multiplier for the VIX-scaled exposure mode (1.0 when off/unknown)."""
+    if not config.vix_scale_exposure or vix_by_date is None or sig_date not in vix_by_date.index:
+        return 1.0
+    v = float(vix_by_date.loc[sig_date])
+    if v != v:  # NaN-safe: unknown regime -> full size
+        return 1.0
+    return min(1.0, max(0.0, 2.0 * (1.0 - v)))
+
+
+def _benchmark_leg(
+    config: BacktestConfig,
+    daily_nav: pd.Series,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+    provider: object | None,
+) -> tuple[pd.Series, pd.Series, dict[str, float]]:
+    """Download, align, and score the buy-and-hold benchmark leg."""
+    spy_nav = pd.Series(dtype=float)
+    spy_ret = pd.Series(dtype=float)
+    spy_metrics: dict[str, float] = {}
+    if not config.benchmark_ticker:
+        return spy_nav, spy_ret, spy_metrics
+    raw_nav, _ = _download_benchmark(
+        start_date, end_date, config.benchmark_ticker, config.initial_capital,
+        provider=provider,
+    )
+    if raw_nav.empty:
+        print(
+            f"Note: no benchmark bars returned for {config.benchmark_ticker!r} "
+            f"({start_date.date()} → {end_date.date()}). "
+            "Check network, yfinance limits, or date range."
+        )
+    spy_nav = _align_benchmark_to_nav(raw_nav, daily_nav.index, config.initial_capital)
+    spy_ret = spy_nav.pct_change().dropna()
+    spy_metrics = _compute_metrics(spy_nav, []) if len(spy_nav) > 1 else {}
+    if not spy_metrics:
+        usable = int(spy_nav.notna().sum()) if len(spy_nav) else 0
+        if not raw_nav.empty and usable == 0:
+            print(
+                "Note: benchmark loaded but no prices aligned to strategy trading days "
+                "(index/calendar mismatch or strategy dates outside benchmark range). "
+                "Benchmark column will show N/A."
+            )
+        elif not raw_nav.empty:
+            print(
+                "Note: benchmark aligned series has insufficient returns for metrics; "
+                "benchmark column will show N/A."
+            )
+    return spy_nav, spy_ret, spy_metrics
+
+
+def run_backtest(
+    scored_df: pd.DataFrame,
+    config: BacktestConfig = BacktestConfig(),
+    *,
+    provider: object | None = None,
+) -> BacktestResult:
+    """Run the weekly-rebalance cohort backtest on walk-forward scored data."""
+    df, trading_dates, price_panel = _prepare_scored(scored_df)
+
+    rebalance_dates = _get_rebalance_dates(trading_dates, config.rebalance_day)
+    vix_by_date = _vix_percentile_by_date(df, config)
 
     # VIX filter: skip rebalances entirely above the threshold
     if config.vix_filter_percentile is not None and vix_by_date is not None:
@@ -460,11 +532,7 @@ def run_backtest(
             continue
         if sig_date not in by_date.groups:
             continue
-        capital = cash / free_slots
-        if config.vix_scale_exposure and vix_by_date is not None and sig_date in vix_by_date.index:
-            v = float(vix_by_date.loc[sig_date])
-            if v == v:  # NaN-safe: unknown regime -> full size
-                capital *= min(1.0, max(0.0, 2.0 * (1.0 - v)))
+        capital = (cash / free_slots) * _vix_exposure_scale(config, vix_by_date, sig_date)
         if capital <= 0:
             continue
         scored_day = by_date.get_group(sig_date)
@@ -484,44 +552,192 @@ def run_backtest(
 
     start_date = pd.Timestamp(trading_dates[0])
     end_date = pd.Timestamp(trading_dates[-1])
-    spy_nav = pd.Series(dtype=float)
-    spy_ret = pd.Series(dtype=float)
-    spy_metrics: dict[str, float] = {}
-    if config.benchmark_ticker:
-        raw_nav, _ = _download_benchmark(
-            start_date, end_date, config.benchmark_ticker, config.initial_capital,
-            provider=provider,
-        )
-        if raw_nav.empty:
-            print(
-                f"Note: no benchmark bars returned for {config.benchmark_ticker!r} "
-                f"({start_date.date()} → {end_date.date()}). "
-                "Check network, yfinance limits, or date range."
-            )
-        spy_nav = _align_benchmark_to_nav(raw_nav, daily_nav.index, config.initial_capital)
-        spy_ret = spy_nav.pct_change().dropna()
-        spy_metrics = _compute_metrics(spy_nav, []) if len(spy_nav) > 1 else {}
-        if not spy_metrics and config.benchmark_ticker:
-            usable = int(spy_nav.notna().sum()) if len(spy_nav) else 0
-            if not raw_nav.empty and usable == 0:
-                print(
-                    "Note: benchmark loaded but no prices aligned to strategy trading days "
-                    "(index/calendar mismatch or strategy dates outside benchmark range). "
-                    "SPY column will show N/A."
-                )
-            elif raw_nav.empty:
-                pass
-            else:
-                print(
-                    "Note: benchmark aligned series has insufficient returns for metrics; "
-                    "SPY column will show N/A."
-                )
+    spy_nav, spy_ret, spy_metrics = _benchmark_leg(
+        config, daily_nav, start_date, end_date, provider,
+    )
 
     return BacktestResult(
         config=config,
         daily_nav=daily_nav,
         daily_returns=daily_returns,
         cohorts=tuple(cohorts),
+        spy_daily_nav=spy_nav,
+        spy_daily_returns=spy_ret,
+        metrics=metrics,
+        spy_metrics=spy_metrics,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rank-hold backtest: one continuous portfolio, sell on rank decay
+# ---------------------------------------------------------------------------
+
+
+def run_rank_hold_backtest(
+    scored_df: pd.DataFrame,
+    config: BacktestConfig = BacktestConfig(),
+    *,
+    provider: object | None = None,
+) -> BacktestResult:
+    """Rank-based holding: buy the top-N, sell only when a name's rank decays.
+
+    One continuously managed portfolio instead of fixed-period cohorts. Each
+    rebalance day the universe is ranked by score; held names whose rank has
+    fallen beyond ``config.exit_rank`` (or that left the scored universe) are
+    sold at the next session's close, and freed capital is deployed equally
+    across the open slots into the best-ranked names not yet held, up to
+    ``top_n`` positions. Turnover — and its cost — is driven by signal decay
+    instead of the calendar, which is the point: the fixed-holding cohort
+    engine liquidates winners every ``holding_days`` sessions only to re-buy
+    many of them a week later.
+
+    The VIX filter blocks *buys* on stressed dates (sells always execute);
+    ``vix_scale_exposure`` scales new-buy budgets. Each closed round trip is
+    recorded as a single-ticker :class:`Cohort` so win-rate/cost reporting
+    and comparisons work unchanged; ``metrics["total_costs"]`` additionally
+    includes entry costs of positions still open at the end.
+    """
+    df, trading_dates, price_panel = _prepare_scored(scored_df)
+    n_days = len(trading_dates)
+    nav_index = pd.DatetimeIndex(trading_dates)
+    rebalance_dates = _get_rebalance_dates(trading_dates, config.rebalance_day)
+    vix_by_date = _vix_percentile_by_date(df, config)
+    by_date = df.groupby("date")
+    slip = config.slippage_bps / 10_000
+
+    cash = config.initial_capital
+    open_pos: dict[str, dict] = {}
+    closed: list[Cohort] = []
+    cash_flow = np.zeros(n_days)
+    # (entry_idx, exit_idx or None while open, ticker, shares)
+    intervals: list[list] = []
+    total_costs = 0.0
+
+    for sig_date in rebalance_dates:
+        if sig_date not in by_date.groups:
+            continue
+        entry_date = next_trading_day(sig_date, trading_dates)
+        if entry_date is None:
+            break
+        e_idx = int(np.searchsorted(trading_dates, np.datetime64(entry_date)))
+        scored_day = by_date.get_group(sig_date).sort_values("prob", ascending=False)
+        ranked_tickers = list(scored_day["ticker"])
+        ranks = {t: i + 1 for i, t in enumerate(ranked_tickers)}
+
+        # Sells: rank decayed beyond exit_rank, or name left the universe.
+        for t in list(open_pos):
+            if ranks.get(t, config.exit_rank + 1) <= config.exit_rank:
+                continue
+            pos = open_pos.pop(t)
+            px = float(price_panel.at[entry_date, t]) if t in price_panel.columns else float("nan")
+            if px != px or px <= 0:
+                px = pos["raw_entry"]  # last resort: exit flat
+            sell_px = _apply_slippage(px, config.slippage_bps, -1)
+            sell_comm = pos["shares"] * config.commission_per_share + config.commission_per_order
+            proceeds = pos["shares"] * sell_px - sell_comm
+            cash += proceeds
+            cash_flow[e_idx] += proceeds
+            exit_cost = pos["shares"] * px * slip + sell_comm
+            total_costs += exit_cost
+            closed.append(Cohort(
+                signal_date=pos["signal_date"],
+                entry_date=pos["entry_date"],
+                exit_date=entry_date,
+                tickers=(t,),
+                weights=(1.0,),
+                entry_prices=(pos["entry_price"],),
+                exit_prices=(sell_px,),
+                capital=pos["basis"],
+                gross_return=px / pos["raw_entry"] - 1.0,
+                cost=pos["entry_cost"] + exit_cost,
+                net_return=proceeds / pos["basis"] - 1.0,
+            ))
+            for iv in intervals:
+                if iv[2] == t and iv[1] is None:
+                    iv[1] = e_idx
+                    break
+
+        # Buys (regime filter blocks new exposure, never the sells above)
+        if (
+            config.vix_filter_percentile is not None
+            and vix_by_date is not None
+            and sig_date in vix_by_date.index
+            and float(vix_by_date.loc[sig_date]) > config.vix_filter_percentile
+        ):
+            continue
+        slots = config.top_n - len(open_pos)
+        if slots <= 0:
+            continue
+        budget = cash * _vix_exposure_scale(config, vix_by_date, sig_date)
+        if budget <= 0:
+            continue
+        per = budget / slots
+        bought = 0
+        for t in ranked_tickers:
+            if bought >= slots:
+                break
+            if t in open_pos or t not in price_panel.columns:
+                continue
+            px = float(price_panel.at[entry_date, t])
+            if px != px or px <= 0:
+                continue
+            buy_px = _apply_slippage(px, config.slippage_bps, +1)
+            shares = per / buy_px
+            buy_comm = shares * config.commission_per_share + config.commission_per_order
+            outlay = per + buy_comm
+            if outlay > cash + 1e-9:
+                shares = max(0.0, (cash - config.commission_per_order)) / (
+                    buy_px + config.commission_per_share
+                )
+                buy_comm = shares * config.commission_per_share + config.commission_per_order
+                outlay = shares * buy_px + buy_comm
+                if shares * buy_px < 1e-6:
+                    continue
+            cash -= outlay
+            cash_flow[e_idx] -= outlay
+            entry_cost = shares * px * slip + buy_comm
+            total_costs += entry_cost
+            open_pos[t] = {
+                "shares": shares,
+                "basis": outlay,
+                "entry_price": buy_px,
+                "raw_entry": px,
+                "entry_cost": entry_cost,
+                "signal_date": sig_date,
+                "entry_date": entry_date,
+            }
+            intervals.append([e_idx, None, t, shares])
+            bought += 1
+
+    # Daily NAV: cash ledger + open market value per position interval.
+    invested = np.zeros(n_days)
+    for entry_idx, exit_idx, t, shares in intervals:
+        hi = exit_idx if exit_idx is not None else n_days
+        if hi <= entry_idx:
+            continue
+        px_arr = price_panel[t].to_numpy()[entry_idx:hi]
+        invested[entry_idx:hi] += shares * np.nan_to_num(px_arr, nan=0.0)
+    cash_series = config.initial_capital + np.cumsum(cash_flow)
+    daily_nav = pd.Series(cash_series + invested, index=nav_index, dtype=float)
+    daily_returns = daily_nav.pct_change().dropna()
+
+    metrics = _compute_metrics(daily_nav, closed)
+    metrics["total_costs"] = total_costs  # include open positions' entry costs
+    metrics["n_open_positions"] = float(len(open_pos))
+
+    start_date = pd.Timestamp(trading_dates[0])
+    end_date = pd.Timestamp(trading_dates[-1])
+    spy_nav, spy_ret, spy_metrics = _benchmark_leg(
+        config, daily_nav, start_date, end_date, provider,
+    )
+
+    return BacktestResult(
+        config=config,
+        daily_nav=daily_nav,
+        daily_returns=daily_returns,
+        cohorts=tuple(closed),
         spy_daily_nav=spy_nav,
         spy_daily_returns=spy_ret,
         metrics=metrics,
@@ -554,8 +770,21 @@ def _load_scored(path: Path) -> pd.DataFrame:
 def main() -> None:
     p = argparse.ArgumentParser(description="Run portfolio backtest on walk-forward scored data.")
     p.add_argument("scored_path", type=Path, help="Path to scored parquet or CSV")
+    p.add_argument(
+        "--mode",
+        default="cohort",
+        choices=["cohort", "rank-hold"],
+        help="cohort: fixed holding_days baskets; rank-hold: continuous portfolio, "
+        "sell only when a name's rank decays beyond --exit-rank",
+    )
     p.add_argument("--top-n", type=int, default=15)
     p.add_argument("--holding-days", type=int, default=10)
+    p.add_argument(
+        "--exit-rank",
+        type=int,
+        default=40,
+        help="rank-hold mode: sell held names ranked worse than this (>= top-n)",
+    )
     p.add_argument(
         "--rebalance-day",
         default="Friday",
@@ -636,8 +865,10 @@ def main() -> None:
         benchmark_ticker=None if args.no_benchmark else args.benchmark_ticker,
         commission_per_share=args.commission_per_share,
         commission_per_order=args.commission_per_order,
+        exit_rank=args.exit_rank,
     )
-    result = run_backtest(scored, config, provider=bt_provider)
+    backtest_fn = run_rank_hold_backtest if args.mode == "rank-hold" else run_backtest
+    result = backtest_fn(scored, config, provider=bt_provider)
     print_report(result)
 
     if args.plots_dir is not None:
@@ -647,7 +878,7 @@ def main() -> None:
         path_b = args.compare_with
         scored_b = _load_scored(path_b)
         print(f"Loaded {len(scored_b)} scored rows from {path_b} (comparison)")
-        result_b = run_backtest(scored_b, config, provider=bt_provider)
+        result_b = backtest_fn(scored_b, config, provider=bt_provider)
         la = args.compare_label_a or path.stem
         lb = args.compare_label_b or path_b.stem
         print_strategy_comparison(result, result_b, label_a=la, label_b=lb)

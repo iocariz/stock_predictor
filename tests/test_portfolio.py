@@ -311,3 +311,73 @@ def test_generate_orders_entry_strictly_after_as_of() -> None:
     )
     assert len(new_state.positions) == 1
     assert new_state.positions[0].entry_date == "2024-01-11"
+
+
+# ---------------------------------------------------------------------------
+# Rank-hold live order generation
+# ---------------------------------------------------------------------------
+
+
+def _ranked(*tickers_prices) -> tuple[list[dict], dict[str, float]]:
+    picks = [{"ticker": t, "adj_close": px, "prob": 1.0 - i * 0.01}
+             for i, (t, px) in enumerate(tickers_prices)]
+    prices = {t: px for t, px in tickers_prices}
+    return picks, prices
+
+
+def test_generate_orders_rank_hold_sells_decayed_and_fills_slots() -> None:
+    from stock_predictor.portfolio import OPEN_ENDED_EXPIRY, generate_orders_rank_hold
+
+    held_good = Position("AAA", 10, 100.0, "2024-01-02", OPEN_ENDED_EXPIRY, "c1")
+    held_bad = Position("ZZZ", 10, 50.0, "2024-01-02", OPEN_ENDED_EXPIRY, "c1")
+    state = PortfolioState(
+        initial_capital=100_000.0, cash=80_000.0, high_watermark=100_000.0,
+        positions=(held_good, held_bad),
+    )
+    # Full ranking: AAA rank 1, BBB rank 2, CCC rank 3; ZZZ absent -> rank inf.
+    picks, prices = _ranked(("AAA", 100.0), ("BBB", 200.0), ("CCC", 300.0))
+    prices["ZZZ"] = 55.0
+    orders, new_state = generate_orders_rank_hold(
+        state, picks, prices,
+        top_n=2, exit_rank=2, slippage_bps=0.0, as_of="2024-06-14",
+        trading_dates=pd.bdate_range(end="2024-06-14", periods=100).values,
+    )
+    sells = [o for o in orders if o.action == "SELL"]
+    buys = [o for o in orders if o.action == "BUY"]
+    assert [o.ticker for o in sells] == ["ZZZ"]
+    assert sells[0].reason == "rank_exit"
+    assert [o.ticker for o in buys] == ["BBB"]  # one open slot, best unheld name
+    held_after = {p.ticker for p in new_state.positions}
+    assert held_after == {"AAA", "BBB"}
+    assert all(p.expiry_date == OPEN_ENDED_EXPIRY for p in new_state.positions
+               if p.ticker == "BBB")
+
+
+def test_generate_orders_rank_hold_no_churn_when_ranks_stable() -> None:
+    from stock_predictor.portfolio import OPEN_ENDED_EXPIRY, generate_orders_rank_hold
+
+    p1 = Position("AAA", 10, 100.0, "2024-01-02", OPEN_ENDED_EXPIRY, "c1")
+    p2 = Position("BBB", 5, 200.0, "2024-01-02", OPEN_ENDED_EXPIRY, "c1")
+    state = PortfolioState(
+        initial_capital=100_000.0, cash=1_000.0, high_watermark=100_000.0,
+        positions=(p1, p2),
+    )
+    picks, prices = _ranked(("AAA", 100.0), ("BBB", 200.0), ("CCC", 300.0))
+    orders, new_state = generate_orders_rank_hold(
+        state, picks, prices,
+        top_n=2, exit_rank=3, slippage_bps=0.0, as_of="2024-06-14",
+        trading_dates=pd.bdate_range(end="2024-06-14", periods=100).values,
+    )
+    assert orders == ()  # both holdings still well-ranked, no free slots
+    assert {p.ticker for p in new_state.positions} == {"AAA", "BBB"}
+
+
+def test_generate_orders_rank_hold_validates_exit_rank() -> None:
+    from stock_predictor.portfolio import generate_orders_rank_hold
+
+    with pytest.raises(ValueError, match="exit_rank"):
+        generate_orders_rank_hold(
+            init_state(), [], {},
+            top_n=15, exit_rank=10, slippage_bps=0.0, as_of="2024-06-14",
+            trading_dates=pd.bdate_range(end="2024-06-14", periods=10).values,
+        )
