@@ -300,6 +300,97 @@ def purged_date_splits(
     return splits
 
 
+def add_rank_labels(
+    df: pd.DataFrame,
+    date_col: str = "date",
+    fwd_col: str = "fwd_ret",
+    n_grades: int = 5,
+    out_col: str = "rank_grade",
+) -> pd.DataFrame:
+    """Cross-sectional relevance grades for lambdarank: per-date quantiles of
+    forward return (0 = worst quintile that day, n_grades-1 = best).
+
+    Unlike the absolute ``fwd_ret >= threshold`` label, this target is
+    market-neutral by construction: every date has the same grade
+    distribution regardless of whether the market rose or fell.
+    """
+    if fwd_col not in df.columns:
+        raise ValueError(f"add_rank_labels requires a {fwd_col!r} column")
+    pct = df.groupby(date_col)[fwd_col].rank(pct=True, method="average")
+    grades = np.ceil(pct.to_numpy() * n_grades) - 1
+    grades = np.where(np.isnan(grades), 0, grades)  # defensive: NaN fwd_ret → worst grade
+    df = df.copy()
+    df[out_col] = np.clip(grades, 0, n_grades - 1).astype("int8")
+    return df
+
+
+def model_scores(model: object, X: pd.DataFrame) -> np.ndarray:
+    """Score rows with either model family.
+
+    LGBMClassifier exposes ``predict_proba`` (probability of the positive
+    class); LGBMRanker only exposes ``predict`` (raw ranking scores). Both
+    are monotone pick-the-largest signals for the portfolio.
+    """
+    if hasattr(model, "predict_proba"):
+        return model.predict_proba(X)[:, 1]
+    return np.asarray(model.predict(X))
+
+
+def _date_group_sizes(dates: np.ndarray) -> np.ndarray:
+    """Group sizes per date for LGBMRanker, assuming rows sorted by date."""
+    return np.unique(dates, return_counts=True)[1]
+
+
+def make_rank_objective(
+    X: pd.DataFrame,
+    grades: np.ndarray,
+    dates: np.ndarray,
+    splits: list[tuple[np.ndarray, np.ndarray]],
+    seed: int,
+    eval_k: int,
+):
+    """Optuna objective for lambdarank: mean validation NDCG@eval_k across folds."""
+
+    def objective(trial: optuna.Trial) -> float:
+        params = {
+            "n_estimators": trial.suggest_int("n_estimators", 200, 1200),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 31, 511),
+            "max_depth": trial.suggest_int("max_depth", 4, 12),
+            "min_child_samples": trial.suggest_int("min_child_samples", 10, 200),
+            "subsample": trial.suggest_float("subsample", 0.5, 1.0),
+            "subsample_freq": trial.suggest_int("subsample_freq", 1, 7),
+            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+            "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True),
+            "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True),
+        }
+        fold_scores: list[float] = []
+        for train_idx, val_idx in splits:
+            rk = lgb.LGBMRanker(
+                **params,
+                metric="ndcg",
+                eval_at=[eval_k],
+                random_state=seed,
+                n_jobs=-1,
+                verbosity=-1,
+            )
+            rk.fit(
+                X.iloc[train_idx],
+                grades[train_idx],
+                group=_date_group_sizes(dates[train_idx]),
+                eval_set=[(X.iloc[val_idx], grades[val_idx])],
+                eval_group=[_date_group_sizes(dates[val_idx])],
+                callbacks=[
+                    lgb.early_stopping(80, verbose=False, first_metric_only=True),
+                    lgb.log_evaluation(0),
+                ],
+            )
+            fold_scores.append(float(rk.best_score_["valid_0"][f"ndcg@{eval_k}"]))
+        return float(np.mean(fold_scores))
+
+    return objective
+
+
 def make_objective(
     X: pd.DataFrame,
     y: np.ndarray,
@@ -379,15 +470,27 @@ def monthly_walk_forward(
     random_state: int,
     return_scores: bool = False,
     purge_days: int = 0,
+    objective: str = "binary",
 ) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
     """Walk forward month by month.
 
     *purge_days* should be the label horizon: the last *purge_days* trading
     dates before each test month are excluded from training so forward-return
     labels never overlap the test window.
+
+    *objective* selects the model: ``binary`` trains an LGBMClassifier on
+    *target_col*; ``rank`` trains an LGBMRanker (lambdarank) grouped by date
+    on per-date forward-return quintile grades — a cross-sectional target
+    that is market-neutral by construction.  Either way, reported metrics
+    (PR-AUC/ROC-AUC vs *target_col*, precision@k) use the same binary target
+    so the two objectives are directly comparable.
     """
+    if objective not in ("binary", "rank"):
+        raise ValueError(f"objective must be 'binary' or 'rank', got {objective!r}")
     d = df.copy()
     d[date_col] = pd.to_datetime(d[date_col])
+    if objective == "rank":
+        d = add_rank_labels(d, date_col=date_col)
     first_p = pd.Timestamp(test_start).to_period("M")
     last_p = d[date_col].max().to_period("M")
     periods = pd.period_range(first_p, last_p, freq="M")
@@ -410,53 +513,100 @@ def monthly_walk_forward(
         )
         if len(tr_in) == 0 or len(va_in) == 0:
             continue
-        y_tr = tr_in[target_col]
-        neg, pos = int((y_tr == 0).sum()), int((y_tr == 1).sum())
-        if neg == 0 or pos == 0:
-            continue
-        spw = neg / pos
-        clf = lgb.LGBMClassifier(
-            **lgb_core,
-            n_estimators=min(2000, max(500, n_est_user * 4)),
-            scale_pos_weight=spw,
-            metric="average_precision",
-            eval_metric="average_precision",
-            random_state=random_state,
-            n_jobs=-1,
-            verbosity=-1,
-        )
-        clf.fit(
-            tr_in[feature_cols],
-            y_tr,
-            eval_set=[(va_in[feature_cols], va_in[target_col])],
-            callbacks=[
-                lgb.early_stopping(80, verbose=False, first_metric_only=True),
-                lgb.log_evaluation(0),
-            ],
-        )
-        bi = clf.best_iteration_
-        if bi is None:
-            # No early stop triggered: use every tree the ES model trained.
-            n_trees = int(clf.n_estimators_)
+        es_cap = min(2000, max(500, n_est_user * 4))
+        if objective == "rank":
+            tr_in = tr_in.sort_values(date_col, kind="stable")
+            va_in = va_in.sort_values(date_col, kind="stable")
+            if tr_in["rank_grade"].nunique() < 2:
+                continue
+            g_tr = tr_in.groupby(date_col).size().to_numpy()
+            g_va = va_in.groupby(date_col).size().to_numpy()
+            es_model = lgb.LGBMRanker(
+                **lgb_core,
+                n_estimators=es_cap,
+                metric="ndcg",
+                eval_at=[top_k],
+                random_state=random_state,
+                n_jobs=-1,
+                verbosity=-1,
+            )
+            es_model.fit(
+                tr_in[feature_cols],
+                tr_in["rank_grade"],
+                group=g_tr,
+                eval_set=[(va_in[feature_cols], va_in["rank_grade"])],
+                eval_group=[g_va],
+                callbacks=[
+                    lgb.early_stopping(80, verbose=False, first_metric_only=True),
+                    lgb.log_evaluation(0),
+                ],
+            )
+            bi = es_model.best_iteration_
+            n_trees = int(bi) + 1 if bi is not None else int(es_model.n_estimators_)
+            train_sorted = train_df.sort_values(date_col, kind="stable")
+            g_full = train_sorted.groupby(date_col).size().to_numpy()
+            final_rank = lgb.LGBMRanker(
+                **lgb_core,
+                n_estimators=n_trees,
+                metric="ndcg",
+                eval_at=[top_k],
+                random_state=random_state,
+                n_jobs=-1,
+                verbosity=-1,
+            )
+            final_rank.fit(
+                train_sorted[feature_cols], train_sorted["rank_grade"], group=g_full,
+            )
+            y_test = test_df[target_col]
+            prob = final_rank.predict(test_df[feature_cols])
         else:
-            n_trees = int(bi) + 1
-        neg_f, pos_f = int((train_df[target_col] == 0).sum()), int((train_df[target_col] == 1).sum())
-        if neg_f == 0 or pos_f == 0:
-            continue
-        spw_f = neg_f / pos_f
-        final = lgb.LGBMClassifier(
-            **lgb_core,
-            n_estimators=n_trees,
-            scale_pos_weight=spw_f,
-            metric="average_precision",
-            eval_metric="average_precision",
-            random_state=random_state,
-            n_jobs=-1,
-            verbosity=-1,
-        )
-        final.fit(train_df[feature_cols], train_df[target_col])
-        y_test = test_df[target_col]
-        prob = final.predict_proba(test_df[feature_cols])[:, 1]
+            y_tr = tr_in[target_col]
+            neg, pos = int((y_tr == 0).sum()), int((y_tr == 1).sum())
+            if neg == 0 or pos == 0:
+                continue
+            spw = neg / pos
+            clf = lgb.LGBMClassifier(
+                **lgb_core,
+                n_estimators=es_cap,
+                scale_pos_weight=spw,
+                metric="average_precision",
+                eval_metric="average_precision",
+                random_state=random_state,
+                n_jobs=-1,
+                verbosity=-1,
+            )
+            clf.fit(
+                tr_in[feature_cols],
+                y_tr,
+                eval_set=[(va_in[feature_cols], va_in[target_col])],
+                callbacks=[
+                    lgb.early_stopping(80, verbose=False, first_metric_only=True),
+                    lgb.log_evaluation(0),
+                ],
+            )
+            bi = clf.best_iteration_
+            if bi is None:
+                # No early stop triggered: use every tree the ES model trained.
+                n_trees = int(clf.n_estimators_)
+            else:
+                n_trees = int(bi) + 1
+            neg_f, pos_f = int((train_df[target_col] == 0).sum()), int((train_df[target_col] == 1).sum())
+            if neg_f == 0 or pos_f == 0:
+                continue
+            spw_f = neg_f / pos_f
+            final = lgb.LGBMClassifier(
+                **lgb_core,
+                n_estimators=n_trees,
+                scale_pos_weight=spw_f,
+                metric="average_precision",
+                eval_metric="average_precision",
+                random_state=random_state,
+                n_jobs=-1,
+                verbosity=-1,
+            )
+            final.fit(train_df[feature_cols], train_df[target_col])
+            y_test = test_df[target_col]
+            prob = final.predict_proba(test_df[feature_cols])[:, 1]
         pr = average_precision_score(y_test, prob)
         try:
             roc = roc_auc_score(y_test, prob)
@@ -726,30 +876,48 @@ def run_optuna_search(
     n_trials: int,
     seed: int,
     purge_days: int = 0,
+    objective: str = "binary",
+    rank_eval_k: int = 15,
 ) -> dict:
     """Run Optuna TPE search over LightGBM hyperparameters.
 
     CV folds are grouped by date (no trading day straddles a fold boundary)
     and purged: the last *purge_days* dates before each validation block are
     excluded from training so forward-return labels cannot leak.
+
+    ``objective="binary"`` tunes LGBMClassifier for PR-AUC;
+    ``objective="rank"`` tunes LGBMRanker (lambdarank) for NDCG@rank_eval_k
+    on per-date quintile grades.
     """
+    if objective not in ("binary", "rank"):
+        raise ValueError(f"objective must be 'binary' or 'rank', got {objective!r}")
     train_sorted = train.sort_values(["date", "ticker"]).reset_index(drop=True)
     X_cv = train_sorted[feature_cols]
-    y_cv = train_sorted["target_5pct"].to_numpy()
-    neg_cv, pos_cv = int((y_cv == 0).sum()), int((y_cv == 1).sum())
-    spw_cv = neg_cv / pos_cv
     splits = purged_date_splits(train_sorted["date"], ts_cv_splits, purge_days)
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     study = optuna.create_study(
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=seed),
     )
-    study.optimize(
-        make_objective(X_cv, y_cv, spw_cv, splits, seed),
-        n_trials=n_trials,
-        show_progress_bar=True,
-    )
-    print(f"Optuna best CV PR-AUC: {study.best_value:.4f}")
+    if objective == "rank":
+        graded = add_rank_labels(train_sorted)
+        fn = make_rank_objective(
+            X_cv,
+            graded["rank_grade"].to_numpy(),
+            pd.to_datetime(train_sorted["date"]).to_numpy(),
+            splits,
+            seed,
+            rank_eval_k,
+        )
+        metric_name = f"NDCG@{rank_eval_k}"
+    else:
+        y_cv = train_sorted["target_5pct"].to_numpy()
+        neg_cv, pos_cv = int((y_cv == 0).sum()), int((y_cv == 1).sum())
+        spw_cv = neg_cv / pos_cv
+        fn = make_objective(X_cv, y_cv, spw_cv, splits, seed)
+        metric_name = "PR-AUC"
+    study.optimize(fn, n_trials=n_trials, show_progress_bar=True)
+    print(f"Optuna best CV {metric_name}: {study.best_value:.4f}")
     print("Best params:", study.best_params)
     return dict(study.best_params)
 
@@ -810,14 +978,79 @@ def train_final_model(
     return model, n_trees
 
 
+def train_final_rank_model(
+    train: pd.DataFrame,
+    feature_cols: list[str],
+    params: dict,
+    seed: int,
+    purge_days: int = 0,
+    eval_k: int = 15,
+) -> tuple[lgb.LGBMRanker, int]:
+    """Lambdarank final model: n_trees via NDCG early stopping, retrain on full train.
+
+    Mirrors :func:`train_final_model` but trains an LGBMRanker grouped by
+    date on per-date forward-return quintile grades (see
+    :func:`add_rank_labels`).  *train* must contain ``fwd_ret``.
+    """
+    graded = add_rank_labels(train)
+    train_inner, val_inner = _inner_train_val_split(
+        graded, "date", val_frac=0.15, purge_days=purge_days,
+    )
+    train_inner = train_inner.sort_values("date", kind="stable")
+    val_inner = val_inner.sort_values("date", kind="stable")
+
+    es_model = lgb.LGBMRanker(
+        **params,
+        metric="ndcg",
+        eval_at=[eval_k],
+        random_state=seed,
+        n_jobs=-1,
+    )
+    es_model.fit(
+        train_inner[feature_cols],
+        train_inner["rank_grade"],
+        group=_date_group_sizes(train_inner["date"].to_numpy()),
+        eval_set=[(val_inner[feature_cols], val_inner["rank_grade"])],
+        eval_group=[_date_group_sizes(val_inner["date"].to_numpy())],
+        callbacks=[
+            lgb.early_stopping(50, verbose=False, first_metric_only=True),
+            lgb.log_evaluation(100),
+        ],
+    )
+    best_iter = es_model.best_iteration_
+    n_trees = int(best_iter) + 1 if best_iter is not None else int(es_model.n_estimators_)
+    print(f"Best iteration (from val split, NDCG@{eval_k}): {n_trees}")
+
+    graded = graded.sort_values("date", kind="stable")
+    final_params = {k: v for k, v in params.items() if k != "n_estimators"}
+    model = lgb.LGBMRanker(
+        **final_params,
+        n_estimators=n_trees,
+        metric="ndcg",
+        eval_at=[eval_k],
+        random_state=seed,
+        n_jobs=-1,
+    )
+    model.fit(
+        graded[feature_cols],
+        graded["rank_grade"],
+        group=_date_group_sizes(graded["date"].to_numpy()),
+    )
+    return model, n_trees
+
+
 def evaluate_test_set(
-    model: lgb.LGBMClassifier,
+    model: object,
     test: pd.DataFrame,
     feature_cols: list[str],
 ) -> tuple[float, float, pd.Series]:
-    """Score the test set and return PR-AUC, ROC-AUC, and weekly precision@10."""
+    """Score the test set and return PR-AUC, ROC-AUC, and weekly precision@10.
+
+    Works with either LGBMClassifier (probabilities) or LGBMRanker (raw
+    ranking scores) — both are monotone signals for the same binary target.
+    """
     y_test = test["target_5pct"]
-    y_prob = model.predict_proba(test[feature_cols])[:, 1]
+    y_prob = model_scores(model, test[feature_cols])
     pr_auc = average_precision_score(y_test, y_prob)
     roc_auc = roc_auc_score(y_test, y_prob)
     print(f"PR-AUC:  {pr_auc:.4f} (baseline {y_test.mean():.4f})")

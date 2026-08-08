@@ -28,6 +28,14 @@ on:
           run scripts/backtest_sweep.py instead of retraining (leave empty to train)
         type: string
         default: ""
+      extra_train_args:
+        description: Extra flags appended to train-sp500 (e.g. --rank-objective)
+        type: string
+        default: ""
+      sweep_args:
+        description: Extra flags for backtest_sweep.py in sweep-only mode (e.g. --until-date 2022-12-31)
+        type: string
+        default: ""
 
 concurrency:
   group: train-sp500-${{ github.repository }}
@@ -45,6 +53,7 @@ jobs:
       MODEL: artifacts/model.pkl
       WF_SCORES: artifacts/wf_scored.parquet
       PLOTS_DIR: artifacts/plots
+      EXTRA_TRAIN_ARGS: ${{ inputs.extra_train_args }}
       # Macro merge + optional Tiingo
       FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
       TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
@@ -75,7 +84,7 @@ jobs:
 
       - name: Run backtest sweep (sweep-only mode)
         if: inputs.sweep_run_id != ''
-        run: uv run python scripts/backtest_sweep.py artifacts/wf_scored.parquet
+        run: uv run python scripts/backtest_sweep.py artifacts/wf_scored.parquet ${{ inputs.sweep_args }}
 
       - name: Run full training
         if: inputs.sweep_run_id == ''

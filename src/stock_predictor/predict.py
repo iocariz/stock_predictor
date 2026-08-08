@@ -34,7 +34,12 @@ from stock_predictor.portfolio import (
     portfolio_value,
     save_state,
 )
-from stock_predictor.training import MACRO_FEATURE_COLS, build_feature_panel, wide_field
+from stock_predictor.training import (
+    MACRO_FEATURE_COLS,
+    build_feature_panel,
+    model_scores,
+    wide_field,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +198,9 @@ def score_universe(
     if nan_pct > 0:
         print(f"  Note: {nan_pct:.1%} feature values are NaN (LightGBM handles these natively)")
 
-    probs = model.predict_proba(day[feature_cols])[:, 1]
+    # Classifier → probability of +5%; ranker → raw lambdarank score.
+    # Both are pick-the-largest signals.
+    probs = model_scores(model, day[feature_cols])
     scored = (
         day[["ticker", "adj_close"]]
         .assign(prob=probs)
@@ -250,7 +257,7 @@ def print_signal_report(
         print()
     elif buys:
         print("NEW PICKS (buy at open):")
-        print(f"  {'Rank':>4s}  {'Ticker':<6s}  {'P(+5%)':>7s}  {'Shares':>6s}  {'~Cost':>8s}")
+        print(f"  {'Rank':>4s}  {'Ticker':<6s}  {'Score':>7s}  {'Shares':>6s}  {'~Cost':>8s}")
         for i, o in enumerate(buys, 1):
             cost = o.shares * o.price
             # Find prob from scored
