@@ -1,6 +1,8 @@
 # stock-predictor
 
-LightGBM classifier that predicts which S&P 500 stocks will gain ≥ 5% over the next 10 trading days. Built for educational research into quantitative equity screening—not production trading.
+LightGBM model that ranks S&P 500 stocks by expected 10-day performance. Two training objectives are supported: a **binary classifier** (probability of gaining ≥ 5% over the next 10 sessions) and a **lambdarank ranker** (`--rank-objective`) trained on per-date forward-return quintile grades — a cross-sectional target that is market-neutral by construction. Built for educational research into quantitative equity screening—not production trading.
+
+The evaluation pipeline is deliberately conservative: purged walk-forward splits (no forward-return label ever straddles a train/test boundary), cash-ledger backtest NAV (realized P&L, slippage, and commissions all compound through cash), benchmark comparison with CAPM alpha/beta, information ratio, and alpha t-statistics, and sweep tooling for out-of-sample sub-window checks.
 
 ## Setup
 
@@ -51,6 +53,8 @@ Use the built-in workflow at `.github/workflows/train-sp500.yml`:
 4. Choose:
    - `provider`: `yfinance` (default) or `tiingo`
    - `sample_n`: e.g. `10000` for near-full universe
+   - `extra_train_args`: extra flags appended to `train-sp500` (e.g. `--rank-objective --start 2015-01-01 --test-start 2019-01-01`)
+   - `sweep_run_id` + `sweep_args`: **sweep-only mode** — skip training and run `scripts/backtest_sweep.py` against a previous run's `wf_scored.parquet` artifact (e.g. `sweep_args: --grid hold --until-date 2022-12-31`); finishes in under a minute
 5. Download workflow artifacts:
    - `model-and-scores-*` (`model.pkl`, `wf_scored.parquet`)
    - `plots-*`
@@ -89,6 +93,10 @@ uv run train-sp500 --help
 # Fast smoke run (small universe, no Optuna, no earnings fetch)
 uv run train-sp500 --sample-n 100 --no-optuna --skip-earnings
 
+# Lambdarank objective (cross-sectional quintile grades; NDCG-tuned Optuna;
+# ranker saved as the model artifact and used in the walk-forward)
+uv run train-sp500 --rank-objective --output-model artifacts/model.pkl
+
 # Equivalent launcher at repo root
 uv run python train_sp500.py --sample-n 100 --no-optuna --skip-earnings
 
@@ -111,7 +119,12 @@ uv run train-sp500 --no-snapshot
 
 ### Backtest CLI
 
-**Input:** a Parquet or CSV panel from walk-forward scoring (`--wf-scores-path` or the notebook). Required columns: **`date`**, **`ticker`**, **`adj_close`**, and either **`prob`** or **`probability`**. Optional **`vix_percentile`** enables **`--vix-filter`**.
+**Input:** a Parquet or CSV panel from walk-forward scoring (`--wf-scores-path` or the notebook). Required columns: **`date`**, **`ticker`**, **`adj_close`**, and either **`prob`** or **`probability`**. Optional **`vix_percentile`** enables **`--vix-filter`** and the `vix_scale_exposure` config option.
+
+Two portfolio engines share the same cash-ledger NAV discipline:
+
+- **`--mode cohort`** (default): weekly top-N baskets held exactly `--holding-days` sessions, up to `--max-cohorts` overlapping, funded from the compounding cash pool.
+- **`--mode rank-hold`**: one continuously managed portfolio — buy the top-N, sell a holding only when its cross-sectional rank decays beyond `--exit-rank` (or it leaves the scored universe). Turnover is driven by signal decay instead of the calendar, which cuts trading costs substantially at wide exit thresholds.
 
 ```bash
 uv run backtest-sp500 --help
@@ -119,26 +132,31 @@ uv run backtest-sp500 --help
 uv run backtest-sp500 path/to/wf_scored.parquet --plots-dir artifacts/plots
 uv run python backtest.py path/to/wf_scored.parquet --plots-dir artifacts/plots
 
+# Rank-based holding instead of fixed 10-day baskets
+uv run backtest-sp500 scores.parquet --mode rank-hold --exit-rank 40
+
 # Offline (no benchmark download); optional rebalance / benchmark ticker
 uv run backtest-sp500 scores.parquet --no-benchmark --rebalance-day last
-uv run backtest-sp500 scores.parquet --benchmark-ticker VOO --plots-dir artifacts/plots
+uv run backtest-sp500 scores.parquet --benchmark-ticker RSP --plots-dir artifacts/plots
 ```
 
-Benchmark prices are **reindexed to the strategy’s trading days** (forward-filled) so strategy vs buy-and-hold metrics use the **same calendar**.
+Benchmark prices are **reindexed to the strategy’s trading days** (forward-filled) so strategy vs buy-and-hold metrics use the **same calendar**. When a benchmark is present, the report also prints an **ACTIVE vs benchmark** section: annualized active return, tracking error, information ratio, CAPM beta/alpha with its **t-statistic**, up/down capture, and the equity of a dollar-neutral long-strategy/short-benchmark overlay. Comparing against **`--benchmark-ticker RSP`** (equal-weight S&P 500) isolates stock-selection skill from the equal-weight-vs-cap-weight effect.
 
 #### Backtest flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `scored_path` | — | Parquet (`.parquet`) or CSV with a `date` column |
-| `--top-n` | 15 | Number of tickers per cohort (ranked by score) |
-| `--holding-days` | 10 | Holding period in **trading** days |
+| `--mode` | cohort | `cohort` (fixed `--holding-days` baskets) or `rank-hold` (sell on rank decay) |
+| `--top-n` | 15 | Number of tickers per cohort / portfolio slots (ranked by score) |
+| `--holding-days` | 10 | Cohort mode: holding period in **trading** days |
+| `--exit-rank` | 40 | Rank-hold mode: sell held names ranked worse than this (must be ≥ top-n) |
 | `--rebalance-day` | Friday | `Monday`–`Friday` or `last` (last session in each ISO week) |
 | `--weighting` | equal | `equal` or `probability` (normalize scores to weights) |
 | `--slippage-bps` | 5 | Round-trip modeled as **per-side** basis points |
 | `--capital` | 100000 | Starting notional |
-| `--max-cohorts` | 2 | Overlapping cohorts (capital / max_cohorts per slot) |
-| `--vix-filter` | none | Skip rebalance when `vix_percentile` exceeds this (requires column in data) |
+| `--max-cohorts` | 2 | Cohort mode: overlapping cohorts (cash / free slots per entry) |
+| `--vix-filter` | none | Skip rebalance (cohort) / block buys (rank-hold) when `vix_percentile` exceeds this |
 | `--benchmark-ticker` | SPY | yfinance symbol for buy-and-hold column |
 | `--no-benchmark` | off | Skip benchmark download (table shows N/A for benchmark) |
 | `--plots-dir` | none | Writes `equity_curve.png`, `drawdown.png`, `monthly_returns.png` |
@@ -148,13 +166,15 @@ Benchmark prices are **reindexed to the strategy’s trading days** (forward-fil
 | `--commission-per-share` | 0 | Dollars per share on each buy and sell leg (0 = off) |
 | `--commission-per-order` | 0 | Flat dollars per ticker on each buy and sell order (0 = off) |
 
+**Config-only option:** `BacktestConfig(vix_scale_exposure=True)` (Python API and the sweep's `--grid vix`) scales new-entry capital by the VIX regime instead of — or on top of — the hard skip: full size while `vix_percentile ≤ 0.5`, linearly down to zero at 1.0, with the remainder held in cash. Produces a lower-beta, lower-drawdown variant.
+
 #### Execution assumptions (backtest vs predict)
 
-- **Calendar:** Both paths use the **union of session dates present in the data** (scored panel for the backtest; downloaded OHLC index for `predict-sp500`), not a full exchange holiday calendar.
-- **Backtest:** Signal on date *T* → **entry** on the next session in that calendar → **exit** after `--holding-days` **trading sessions** (same offset as `exit` in `Cohort`). Cohort returns are **fractional** weights; slippage is applied to historical **adj. close** bars.
-- **predict-sp500:** `--as-of` is **calendar** *today*; **entry** is the first session in the OHLC index on or after that day; **expiry** uses the same **trading-day count** as the backtest. Orders use **integer shares** (lot sizes differ from a fractional simulation).
-- **Commissions:** When non-zero, fees reduce **cohort `net_return` and `total_costs`** in the backtest. The **daily NAV time series** still marks positions using prices only (it does not apply the same cash drag as the cohort-level cost line), so risk metrics from NAV can be **slightly optimistic** when commissions are large—use `total_costs` and cohort stats as a cross-check.
-- **Parity:** Use the same `--weighting`, `--slippage-bps`, `--holding-days`, and commission flags in both CLIs when comparing research simulation to generated orders.
+- **Calendar:** Both paths use the **union of session dates present in the data** (scored panel for the backtest; downloaded OHLC index for `predict-sp500`, extended with future business days for entry/expiry placement), not a full exchange holiday calendar.
+- **Backtest:** Signal on date *T* → **entry** on the next session in that calendar → **exit** after `--holding-days` trading sessions (cohort mode) or on rank decay (rank-hold mode). Cohort returns are **fractional** weights; slippage is applied to historical **adj. close** bars.
+- **NAV accounting:** the daily NAV is a **cash ledger** — capital is debited at entry and credited back at exit as `capital × (1 + net_return)`, so realized P&L, exit slippage, and commissions all compound through cash. Total return, Sharpe, and drawdown reflect costs.
+- **predict-sp500:** entry is the first session **strictly after** *today* (same next-day convention as the backtest); fixed mode expiries use the same trading-day count as the backtest, rank mode positions carry an open-ended expiry sentinel and close on rank decay. Orders use **integer shares** (lot sizes differ from a fractional simulation).
+- **Parity:** Use the same `--weighting`, `--slippage-bps`, `--holding-days` / `--exit-rank`, and commission flags in both CLIs when comparing research simulation to generated orders. Do **not** switch `--hold-mode` on an existing state file.
 
 #### Comparing two strategies
 
@@ -171,6 +191,27 @@ In Python: `print_strategy_comparison`, `plot_strategy_comparison` in `stock_pre
 
 **Fair comparison tips:** use the **same date range and universe** in both panels when possible; keep **`--capital`** identical so the overlay is in comparable dollars.
 
+#### Strategy sweeps (grids of variants)
+
+[`scripts/backtest_sweep.py`](scripts/backtest_sweep.py) runs a grid of `BacktestConfig` variants over one scored panel, downloads the benchmark **once**, and prints two tables: absolute metrics per variant and the relative-return framing vs the benchmark (active return, IR, beta, alpha + t-stat, capture, overlay).
+
+```bash
+# General grid: top-N ladder, weighting, VIX filter, holding periods
+uv run python scripts/backtest_sweep.py artifacts/wf_scored.parquet
+
+# Low-beta / VIX-regime grid (skip thresholds, continuous exposure scaling)
+uv run python scripts/backtest_sweep.py artifacts/wf_scored.parquet --grid vix
+
+# Cohort vs rank-hold engines (exit-rank ladder)
+uv run python scripts/backtest_sweep.py artifacts/wf_scored.parquet --grid hold
+
+# Out-of-sample sub-window + alternate benchmark
+uv run python scripts/backtest_sweep.py artifacts/wf_scored.parquet \
+  --grid hold --until-date 2022-12-31 --benchmark-ticker RSP
+```
+
+The same sweeps run on GitHub Actions in ~30 s via the `train-sp500` workflow's `sweep_run_id` + `sweep_args` inputs (reuses a previous run's `wf_scored.parquet` artifact — no retraining). **Discipline note:** a grid's best cell is a hypothesis, not a result — re-test it on a sub-window it has never seen (`--from-date` / `--until-date`) and check the alpha t-stat before believing it.
+
 #### Strategy ideas to try (research / educational)
 
 | Idea | What to vary | How to approximate here |
@@ -180,7 +221,8 @@ In Python: `print_strategy_comparison`, `plot_strategy_comparison` in `stock_pre
 | **Concentration** | `top_n` | Same scores, compare `--top-n 5` vs `--top-n 20` (two CLI runs or two configs in a notebook) |
 | **Holding horizon** | `holding_days` vs label horizon | Align `holding_days` to your forward window or try shorter/longer holds on the same scores |
 | **Rebalance rhythm** | `--rebalance-day Friday` vs `last` vs Monday | Same scores, different execution calendar |
-| **Risk-off filter** | VIX / regime | Build scores with `vix_percentile` in the panel; compare `--vix-filter` off vs on (or different cutoffs) |
+| **Risk-off filter** | VIX / regime | Build scores with `vix_percentile` in the panel; compare `--vix-filter` off vs on, or `vix_scale_exposure` (see `--grid vix`) |
+| **Holding rule** | Fixed expiry vs rank decay | Same scores, `--mode cohort` vs `--mode rank-hold` with an `--exit-rank` ladder (see `--grid hold`) |
 | **Overlapping slots** | `--max-cohorts` | More slots ≈ more concurrent exposure (capital split across cohorts) |
 | **Simple baseline** | Cross-sectional rank / random | Export a panel with `prob` = past 20d momentum rank or shuffle (sanity check vs your model) |
 
@@ -195,12 +237,14 @@ These are **not** recommendations—only sensible axes to explore when you stres
 | `--train-end` | 2022-12-31 | Last date in training set |
 | `--test-start` | 2023-01-01 | First date in test / walk-forward region |
 | `--sample-n` | 500 | Max tickers to download |
-| `--horizon` | 10 | Forward return horizon (sessions) |
+| `--horizon` | 10 | Forward return horizon (sessions); also the **purge window** at every split boundary |
 | `--threshold` | 0.05 | Binary label threshold (e.g. 5%) |
+| `--rank-objective` | off | Train LGBMRanker (lambdarank, grouped by date) on per-date forward-return quintile grades instead of the binary classifier; applies to Optuna (NDCG@15), the walk-forward, and the saved model |
 | `--no-optuna` | off | Skip Optuna search; use defaults + any prior best |
 | `--optuna-trials` | 40 | Optuna trials |
-| `--ts-cv-splits` | 5 | `TimeSeriesSplit` folds for tuning |
+| `--ts-cv-splits` | 5 | Purged, **date-grouped** expanding CV folds for tuning (no trading day straddles a fold; last `horizon` dates before each validation block are excluded) |
 | `--seed` | 42 | RNG seed |
+| `--strict-dropna` | off | Drop rows with ANY NaN feature (legacy); default keeps them — LightGBM handles missing values natively |
 | `--skip-earnings` | off | Omit Yahoo earnings feature (faster) |
 | `--earnings-workers` | 8 | Parallelism for earnings fetch |
 | `--skip-walk-forward` | off | Skip monthly walk-forward |
@@ -418,6 +462,9 @@ uv run predict-sp500 --model models/latest.pkl --init --initial-capital 100000
 # Daily signal (dry run — shows orders without executing)
 uv run predict-sp500 --model models/latest.pkl --skip-earnings
 
+# Rank-hold mode: sell only when a holding's rank decays (fresh state file!)
+uv run predict-sp500 --model models/latest.pkl --hold-mode rank --exit-rank 40
+
 # Execute (updates portfolio_state.json with new positions)
 uv run predict-sp500 --model models/latest.pkl --skip-earnings --confirm
 ```
@@ -430,9 +477,11 @@ uv run predict-sp500 --model models/latest.pkl --skip-earnings --confirm
 | `--state` | `portfolio_state.json` | Portfolio state JSON file |
 | `--init` | off | Create a new portfolio state file |
 | `--initial-capital` | 100000 | Starting capital (with `--init`) |
-| `--top-n` | 15 | Stocks per cohort |
-| `--max-cohorts` | 2 | Max overlapping cohorts |
-| `--holding-days` | 10 | Trading days until cohort expiry |
+| `--top-n` | 15 | Stocks per cohort / portfolio slots |
+| `--max-cohorts` | 2 | Fixed mode: max overlapping cohorts |
+| `--holding-days` | 10 | Fixed mode: trading days until cohort expiry |
+| `--hold-mode` | fixed | `fixed` (expiry after `--holding-days`) or `rank` (sell on rank decay; parity with `backtest-sp500 --mode rank-hold`). Don't switch modes on an existing state file |
+| `--exit-rank` | 40 | Rank mode: sell held names ranked worse than this (≥ top-n) |
 | `--max-drawdown` | 0.15 | Kill-switch: halt if drawdown exceeds this |
 | `--slippage-bps` | 5 | Slippage per side (basis points) |
 | `--skip-earnings` | off | Skip earnings feature (must match training) |
@@ -480,7 +529,7 @@ Ensure the repo root or `src` is on `PYTHONPATH`, or run notebooks from an envir
 uv run pytest
 ```
 
-Covers PIT membership, calendar features, reproducibility, training utilities, backtest engine, portfolio management, execution parity, and inference pipeline (`tests/`).
+Covers PIT membership, calendar features, reproducibility, training utilities (purged splits, rank labels, both Optuna objectives), both backtest engines (NAV compounding, rank-decay exits, VIX scaling), relative-return metrics, portfolio management (fixed and rank-hold order generation), execution parity, macro merge, data providers, and the inference pipeline (`tests/`, 120+ tests).
 
 ## Reproducibility (snapshots + manifest)
 
@@ -492,7 +541,7 @@ When snapshots are enabled (default), each run writes under `--snapshot-dir` or 
 | `stints.parquet` | PIT membership table |
 | `equity_prices_long.parquet` | Long-format adjusted close + volume |
 | `labeled_pit.parquet` | Panel after forward return + PIT filter |
-| `features_clean.parquet` | Feature matrix after `dropna` on model inputs |
+| `features_clean.parquet` | Feature matrix after NaN-tolerant row selection (label + minimal price history; `--strict-dropna` restores full-row `dropna`) |
 
 With `--output-model`, the manifest also records the pickle path and checksum; the manifest is rewritten at the end of the run.
 
@@ -503,15 +552,15 @@ With **`--no-snapshot`**, no Parquet files and no `manifest.json` are written (t
 ## Pipeline
 
 1. **Universe**: Point-in-time S&P 500 membership via [fja05680/sp500](https://github.com/fja05680/sp500)
-2. **Prices**: Daily adjusted close + volume from Yahoo Finance (`yfinance`)
-3. **Labels**: Binary — forward return ≥ `--threshold` over `--horizon` sessions
+2. **Prices**: Daily adjusted close + volume from Yahoo Finance (`yfinance`) or Tiingo
+3. **Labels**: Binary (forward return ≥ `--threshold` over `--horizon` sessions) or, with `--rank-objective`, per-date forward-return quintile grades (market-neutral by construction)
 4. **Features**: Price/volume (15), sector-relative (4), macro (5), regime (2), cross-sectional ranks (3), calendar (6), optional earnings (1)
-5. **Tuning**: Optuna + `TimeSeriesSplit` (optional)
-6. **Training**: LightGBM with inner validation for effective tree count
-7. **Evaluation**: PR-AUC, ROC-AUC, weekly Precision@K
-8. **Walk-forward**: Monthly expanding window (optional)
-9. **Backtest**: Weekly-rebalance long-only simulation vs configurable benchmark
-10. **Inference**: Daily scoring of the live universe, portfolio state management, order generation with kill-switch risk control
+5. **Tuning**: Optuna over purged, date-grouped expanding CV folds — PR-AUC for the classifier, NDCG@15 for the ranker (optional)
+6. **Training**: LightGBM (classifier or lambdarank ranker) with a purged inner validation split for effective tree count
+7. **Evaluation**: PR-AUC, ROC-AUC, weekly Precision@K (same binary target for both objectives, so they compare directly)
+8. **Walk-forward**: Monthly expanding window with a `horizon`-day purge before each test month (optional)
+9. **Backtest**: Cash-ledger simulation vs configurable benchmark — cohort or rank-hold engine, with relative-return framing (IR, beta, alpha + t-stat) and sweep grids
+10. **Inference**: Daily scoring of the live universe (either model family), portfolio state management, fixed-expiry or rank-hold order generation with kill-switch risk control
 
 ## Project layout
 
@@ -520,18 +569,26 @@ src/stock_predictor/
   __init__.py            Version + re-exports
   pit.py                 PIT S&P 500 membership
   calendar_features.py   Calendar / FOMC features
-  training.py            Features, Optuna, train/eval, model IO
+  training.py            Features, labels (binary + rank grades), purged CV,
+                         Optuna (PR-AUC / NDCG), walk-forward, train/eval, model IO
   cli.py                 train-sp500 entry point
-  backtest.py            Backtest engine + CLI
-  backtest_reporting.py  Reporting + plots for backtest results
-  portfolio.py           Portfolio state, orders, kill-switch
+  backtest.py            Backtest engines (cohort + rank-hold) + CLI
+  backtest_reporting.py  Reports, relative-return metrics (IR/beta/alpha/t), plots
+  portfolio.py           Portfolio state, fixed & rank-hold orders, kill-switch
   predict.py             Daily inference CLI (predict-sp500)
+  execution_calendar.py  Trading-day calendar helpers (shared backtest/live)
+  macro_merge.py         Yahoo ↔ FRED macro cross-fill
+  data_provider.py       Provider protocol + factory
+  providers/             yfinance + Tiingo/FRED implementations
   repro.py               Run manifests, hashing, Parquet snapshots
+scripts/
+  run_pipeline.sh        train-full / backtest / predict orchestration
+  backtest_sweep.py      Variant grids (default / vix / hold) + relative tables
 train_sp500.py           Thin launcher → cli
 backtest.py              Thin launcher → backtest
 sp500_pit.py             Notebook shim → pit
 calendar_features.py     Notebook shim → calendar_features
-tests/                   pytest suite (51 tests)
+tests/                   pytest suite (120+ tests)
 notebooks/               Exploration + full pipeline
 ```
 
@@ -546,7 +603,9 @@ notebooks/               Exploration + full pipeline
 ## Limitations
 
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
+- **Honest results disclosure:** in our own evaluations on 2019–2026 walk-forward data with this pipeline (purged splits, cost-inclusive NAV, sub-window checks), **no configuration produced statistically significant CAPM alpha vs SPY** (all |t| < 1). The model shows real cross-sectional ranking skill — roughly enough to pay its own trading costs against an equal-weight benchmark — and configurations that beat SPY on raw return did so via higher market beta, not skill. Treat any better-looking result you produce with this repo with the same suspicion: check the alpha t-stat and re-test on a sub-window the configuration has never seen.
 - **Sector labels** are a pragmatic blend of current Wikipedia GICS and a fixed override; they are not a perfect point-in-time sector history for every ticker-date.
 - **Earnings** come from Yahoo as-of download time; the feature is not a fully audited point-in-time fundamental database.
+- **Delisted tickers**: Yahoo no longer serves many departed S&P members (~90–140 depending on the window), so even with PIT membership the price panel has survivorship bias that flatters results. A Tiingo key recovers most of them.
 - **FOMC / calendar** helpers depend on maintained date lists—verify critical dates for your own research.
 - **Survivorship and data snooping**: even with PIT index membership, corporate actions, delistings, and feature lookahead need careful review for any live use.
