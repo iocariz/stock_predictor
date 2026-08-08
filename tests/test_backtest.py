@@ -467,3 +467,73 @@ def test_relative_metrics_insufficient_overlap() -> None:
     a = pd.Series([1.0, 1.1], index=pd.bdate_range("2024-01-02", periods=2))
     b = pd.Series([1.0, 1.1], index=pd.bdate_range("2025-01-02", periods=2))
     assert relative_metrics(a, b) == {}
+
+
+# ---------------------------------------------------------------------------
+# VIX exposure scaling
+# ---------------------------------------------------------------------------
+
+
+def _vix_panel(vix_pct: float, n_days: int = 25) -> pd.DataFrame:
+    days = pd.bdate_range("2024-01-08", periods=n_days)
+    rows = []
+    for d in days:
+        for t in ("AAA", "BBB"):
+            rows.append({
+                "date": d, "ticker": t, "prob": 0.9 if t == "AAA" else 0.1,
+                "adj_close": 100.0, "vix_percentile": vix_pct,
+            })
+    return pd.DataFrame(rows)
+
+
+def test_vix_scale_exposure_reduces_capital_in_stress() -> None:
+    """At vix_percentile 0.9, cohort capital = 2*(1-0.9) = 20% of the slot."""
+    cfg = BacktestConfig(
+        top_n=1, max_overlapping_cohorts=1, benchmark_ticker=None,
+        vix_scale_exposure=True,
+    )
+    calm = run_backtest(_vix_panel(0.10), cfg)
+    stress = run_backtest(_vix_panel(0.90), cfg)
+    assert len(calm.cohorts) >= 1 and len(stress.cohorts) >= 1
+    # Calm half of the regime -> full slot; stressed -> 20% of it.
+    assert stress.cohorts[0].capital == pytest.approx(0.2 * calm.cohorts[0].capital, rel=1e-6)
+
+
+def test_vix_scale_full_exposure_below_median() -> None:
+    cfg = BacktestConfig(
+        top_n=1, max_overlapping_cohorts=1, benchmark_ticker=None,
+        vix_scale_exposure=True,
+    )
+    r_scaled = run_backtest(_vix_panel(0.40), cfg)
+    cfg_off = BacktestConfig(top_n=1, max_overlapping_cohorts=1, benchmark_ticker=None)
+    r_plain = run_backtest(_vix_panel(0.40), cfg_off)
+    assert r_scaled.cohorts[0].capital == pytest.approx(r_plain.cohorts[0].capital)
+
+
+def test_vix_scale_at_extreme_skips_cohort() -> None:
+    """vix_percentile 1.0 -> scale 0 -> no capital deployed at all."""
+    cfg = BacktestConfig(
+        top_n=1, max_overlapping_cohorts=1, benchmark_ticker=None,
+        vix_scale_exposure=True,
+    )
+    r = run_backtest(_vix_panel(1.0), cfg)
+    assert len(r.cohorts) == 0
+    assert r.metrics["total_return"] == pytest.approx(0.0)
+
+
+def test_relative_metrics_alpha_t() -> None:
+    from stock_predictor.backtest_reporting import relative_metrics
+
+    idx = pd.bdate_range("2022-01-03", periods=504)
+    rng = np.random.default_rng(3)
+    rb = rng.normal(0.0004, 0.01, len(idx))
+    # 4 bps/day of alpha with small idiosyncratic noise at beta 1
+    rs = rb + 0.0004 + rng.normal(0, 0.001, len(idx))
+    bench = pd.Series(100.0 * np.cumprod(1 + rb), index=idx)
+    strat = pd.Series(100.0 * np.cumprod(1 + rs), index=idx)
+    rm = relative_metrics(strat, bench)
+    # Strong daily edge vs tiny residual vol -> large t-stat.
+    assert rm["alpha_t"] > 5
+    # Identical series -> zero residual variance -> t undefined.
+    rm_same = relative_metrics(bench, bench.copy())
+    assert np.isnan(rm_same["alpha_t"])

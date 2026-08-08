@@ -67,6 +67,16 @@ def relative_metrics(strategy_nav: pd.Series, bench_nav: pd.Series) -> dict[str,
     alpha_ann = (
         float((rs.mean() - beta * rb.mean()) * 252) if beta == beta else float("nan")
     )
+    # t-stat of daily CAPM alpha: mean/std of regression residuals * sqrt(n).
+    # |t| >= ~2 is the usual bar for "not noise".
+    alpha_t = float("nan")
+    if beta == beta:
+        resid = rs - beta * rb
+        rstd = float(resid.std())
+        # Epsilon guard: identical series leave ~1e-17 float noise in the
+        # residuals, whose mean/std ratio is a spurious t-stat.
+        if rstd > 1e-12:
+            alpha_t = float(resid.mean() / rstd * np.sqrt(len(resid)))
 
     up = rb > 0
     down = rb < 0
@@ -85,6 +95,7 @@ def relative_metrics(strategy_nav: pd.Series, bench_nav: pd.Series) -> dict[str,
         "information_ratio": ir,
         "beta": beta,
         "alpha_ann": alpha_ann,
+        "alpha_t": alpha_t,
         "up_capture": up_capture,
         "down_capture": down_capture,
         "overlay_total_return": overlay_total,
@@ -104,6 +115,7 @@ def print_relative_report(strategy_nav: pd.Series, bench_nav: pd.Series, bench_l
     print(f"{'Information ratio':28s} {_fmt_f(rm['information_ratio']):>10s}")
     print(f"{'Beta vs benchmark':28s} {_fmt_f(rm['beta']):>10s}")
     print(f"{'CAPM alpha (ann)':28s} {_fmt_pct(rm['alpha_ann']):>10s}")
+    print(f"{'Alpha t-stat':28s} {_fmt_f(rm['alpha_t']):>10s}")
     print(f"{'Up capture':28s} {_fmt_f(rm['up_capture']):>10s}")
     print(f"{'Down capture':28s} {_fmt_f(rm['down_capture']):>10s}")
     print(f"{'Overlay total return':28s} {_fmt_pct(rm['overlay_total_return']):>10s}")
