@@ -314,3 +314,120 @@ def generate_orders(
     )
     all_orders = (*sell_orders, *buy_orders)
     return all_orders, new_state
+
+
+# Sentinel expiry for rank-hold positions: they close on rank decay, not time.
+OPEN_ENDED_EXPIRY = "9999-12-31"
+
+
+def generate_orders_rank_hold(
+    state: PortfolioState,
+    ranked_picks: list[dict],
+    prices: dict[str, float],
+    *,
+    top_n: int,
+    exit_rank: int,
+    slippage_bps: float,
+    as_of: str,
+    trading_dates: np.ndarray,
+    commission_per_share: float = 0.0,
+    commission_per_order: float = 0.0,
+    allow_buys: bool = True,
+) -> tuple[tuple[Order, ...], PortfolioState]:
+    """Rank-hold order generation (mirrors :func:`run_rank_hold_backtest`).
+
+    *ranked_picks* must be the FULL universe scored today, best first — the
+    exit decision needs every held name's current rank, not just the top of
+    the list. Held names ranked worse than *exit_rank* (or missing from the
+    ranking) are sold; freed capital is split equally across the open slots
+    up to *top_n* positions. Positions carry the OPEN_ENDED_EXPIRY sentinel:
+    they are closed by rank decay, never by the fixed-expiry path, so don't
+    mix rank-hold and fixed-hold orders on the same state file.
+    """
+    if exit_rank < top_n:
+        raise ValueError(f"exit_rank ({exit_rank}) must be >= top_n ({top_n})")
+    if commission_per_share < 0 or commission_per_order < 0:
+        raise ValueError("commission_per_share and commission_per_order must be >= 0")
+
+    rank_of = {p["ticker"]: i + 1 for i, p in enumerate(ranked_picks)}
+
+    # Sells: rank decayed or ticker no longer scored
+    sell_orders: list[Order] = []
+    kept_positions: list[Position] = []
+    cash_from_sells = 0.0
+    new_history = list(state.history)
+    for p in state.positions:
+        if rank_of.get(p.ticker, exit_rank + 1) <= exit_rank:
+            kept_positions.append(p)
+            continue
+        px = prices.get(p.ticker, p.entry_price)
+        sell_px = px * (1 - slippage_bps / 10_000)
+        sell_comm = p.shares * commission_per_share + commission_per_order
+        sell_orders.append(Order(
+            action="SELL", ticker=p.ticker, shares=p.shares,
+            price=sell_px, cohort_id=p.cohort_id, reason="rank_exit",
+        ))
+        cash_from_sells += p.shares * sell_px - sell_comm
+        new_history.append({
+            "cohort_id": p.cohort_id,
+            "closed_date": as_of,
+            "tickers": [p.ticker],
+            "pnl": round(p.shares * sell_px - sell_comm - p.shares * p.entry_price, 2),
+        })
+
+    # Buys: fill open slots from the top of the ranking
+    buy_orders: list[Order] = []
+    new_positions: list[Position] = []
+    cash_used = 0.0
+    slots = top_n - len(kept_positions)
+    if slots > 0 and allow_buys:
+        held = {p.ticker for p in kept_positions}
+        cal = extend_calendar(trading_dates, 10)
+        entry = next_trading_day(as_of, cal)
+        if entry is not None:
+            entry_iso = entry.strftime("%Y-%m-%d")
+            cash_available = state.cash + cash_from_sells
+            per = cash_available / slots
+            cohort_id = uuid.uuid4().hex[:8]
+            bought = 0
+            for pick in ranked_picks:
+                if bought >= slots:
+                    break
+                ticker = pick["ticker"]
+                if ticker in held:
+                    continue
+                px = prices.get(ticker, pick.get("adj_close", 0))
+                if px <= 0:
+                    continue
+                buy_px = px * (1 + slippage_bps / 10_000)
+                shares = floor(per / buy_px)
+                if shares < 1:
+                    continue
+                buy_comm = shares * commission_per_share + commission_per_order
+                buy_orders.append(Order(
+                    action="BUY", ticker=ticker, shares=shares,
+                    price=buy_px, cohort_id=cohort_id, reason="new_pick",
+                ))
+                new_positions.append(Position(
+                    ticker=ticker, shares=shares, entry_price=buy_px,
+                    entry_date=entry_iso, expiry_date=OPEN_ENDED_EXPIRY,
+                    cohort_id=cohort_id,
+                ))
+                cash_used += shares * buy_px + buy_comm
+                bought += 1
+
+    new_cash = state.cash + cash_from_sells - cash_used
+    nav = new_cash + sum(
+        p.shares * prices.get(p.ticker, p.entry_price)
+        for p in (*kept_positions, *new_positions)
+    )
+    new_state = PortfolioState(
+        initial_capital=state.initial_capital,
+        cash=round(new_cash, 2),
+        high_watermark=round(max(state.high_watermark, nav), 2),
+        positions=(*kept_positions, *new_positions),
+        created_at=state.created_at,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+        history=tuple(new_history),
+    )
+    return (*sell_orders, *buy_orders), new_state
