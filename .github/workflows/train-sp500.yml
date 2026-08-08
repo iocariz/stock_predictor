@@ -9,6 +9,11 @@
 name: train-sp500
 
 on:
+  # Monthly retrain so the deployed model doesn't go stale: 05:00 UTC on the
+  # 1st (before US market open). Scheduled runs use the yfinance provider,
+  # full universe, and the lambdarank objective (see EXTRA_TRAIN_ARGS below).
+  schedule:
+    - cron: "0 5 1 * *"
   workflow_dispatch:
     inputs:
       provider:
@@ -53,7 +58,9 @@ jobs:
       MODEL: artifacts/model.pkl
       WF_SCORES: artifacts/wf_scored.parquet
       PLOTS_DIR: artifacts/plots
-      EXTRA_TRAIN_ARGS: ${{ inputs.extra_train_args }}
+      # Manual dispatch: whatever the user typed. Scheduled retrain: default
+      # to the promoted lambdarank objective.
+      EXTRA_TRAIN_ARGS: ${{ inputs.extra_train_args || (github.event_name == 'schedule' && '--rank-objective') || '' }}
       # Macro merge + optional Tiingo
       FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
       TIINGO_API_KEY: ${{ secrets.TIINGO_API_KEY }}
