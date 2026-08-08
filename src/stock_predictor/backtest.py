@@ -36,6 +36,11 @@ class BacktestConfig:
     initial_capital: float = 100_000.0
     max_overlapping_cohorts: int = 2
     vix_filter_percentile: float | None = None
+    vix_scale_exposure: bool = False
+    """Scale each cohort's capital by the VIX regime instead of (or on top of)
+    the hard skip: full size while vix_percentile <= 0.5, then linearly down
+    to zero at vix_percentile = 1.0 (scale = clip(2 * (1 - pct), 0, 1)).
+    Unallocated capital stays in cash. Requires a vix_percentile column."""
     benchmark_ticker: str | None = "SPY"
     """Download this ticker for buy-and-hold comparison; None skips benchmark (no network)."""
     commission_per_share: float = 0.0
@@ -420,9 +425,15 @@ def run_backtest(
 
     rebalance_dates = _get_rebalance_dates(trading_dates, config.rebalance_day)
 
-    # VIX filter
-    if config.vix_filter_percentile is not None and "vix_percentile" in df.columns:
+    # Per-date VIX percentile (regime filter and/or exposure scaling)
+    vix_by_date: pd.Series | None = None
+    if "vix_percentile" in df.columns and (
+        config.vix_filter_percentile is not None or config.vix_scale_exposure
+    ):
         vix_by_date = df.groupby("date", sort=False)["vix_percentile"].first()
+
+    # VIX filter: skip rebalances entirely above the threshold
+    if config.vix_filter_percentile is not None and vix_by_date is not None:
         rebalance_dates = [
             d for d in rebalance_dates
             if d not in vix_by_date.index or float(vix_by_date.loc[d]) <= config.vix_filter_percentile
@@ -450,6 +461,10 @@ def run_backtest(
         if sig_date not in by_date.groups:
             continue
         capital = cash / free_slots
+        if config.vix_scale_exposure and vix_by_date is not None and sig_date in vix_by_date.index:
+            v = float(vix_by_date.loc[sig_date])
+            if v == v:  # NaN-safe: unknown regime -> full size
+                capital *= min(1.0, max(0.0, 2.0 * (1.0 - v)))
         if capital <= 0:
             continue
         scored_day = by_date.get_group(sig_date)

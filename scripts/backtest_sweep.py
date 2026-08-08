@@ -35,6 +35,24 @@ CONFIGS: list[tuple[str, dict]] = [
     ("top20 + hold15", {"top_n": 20, "holding_days": 15}),
 ]
 
+# Low-beta / VIX-regime grid: hard-skip thresholds vs continuous de-risking
+# (full size below the median VIX percentile, linearly to zero at the top).
+VIX_CONFIGS: list[tuple[str, dict]] = [
+    ("baseline top15 (no filter)", {}),
+    ("vix skip >0.95", {"vix_filter_percentile": 0.95}),
+    ("vix skip >0.90", {"vix_filter_percentile": 0.90}),
+    ("vix skip >0.85", {"vix_filter_percentile": 0.85}),
+    ("vix skip >0.80", {"vix_filter_percentile": 0.80}),
+    ("vix skip >0.70", {"vix_filter_percentile": 0.70}),
+    ("vix-scaled exposure", {"vix_scale_exposure": True}),
+    ("scaled + skip >0.90", {"vix_scale_exposure": True, "vix_filter_percentile": 0.90}),
+]
+
+GRIDS: dict[str, list[tuple[str, dict]]] = {
+    "default": CONFIGS,
+    "vix": VIX_CONFIGS,
+}
+
 
 def _row(label: str, m: dict[str, float]) -> dict[str, object]:
     def pct(k: str) -> str:
@@ -68,7 +86,10 @@ def main() -> None:
                     help="Restrict scored panel to dates >= this (YYYY-MM-DD)")
     ap.add_argument("--until-date", default=None, dest="until_date",
                     help="Restrict scored panel to dates <= this (YYYY-MM-DD)")
+    ap.add_argument("--grid", default="default", choices=sorted(GRIDS),
+                    help="Which variant grid to run (default: general strategy grid)")
     args = ap.parse_args()
+    configs = GRIDS[args.grid]
 
     scored = _load_scored(args.scored_path)
     print(f"Loaded {len(scored)} scored rows from {args.scored_path}")
@@ -84,7 +105,7 @@ def main() -> None:
 
     rows: list[dict[str, object]] = []
     navs: list[tuple[str, pd.Series]] = []
-    for label, overrides in CONFIGS:
+    for label, overrides in configs:
         cfg = BacktestConfig(
             benchmark_ticker=None, initial_capital=args.capital, **overrides,
         )
@@ -126,6 +147,7 @@ def main() -> None:
                 "info_ratio": f"{rm['information_ratio']:.2f}",
                 "beta": f"{rm['beta']:.2f}",
                 "alpha_ann": f"{rm['alpha_ann']:+.1%}",
+                "alpha_t": f"{rm['alpha_t']:.2f}",
                 "up_capt": f"{rm['up_capture']:.2f}",
                 "down_capt": f"{rm['down_capture']:.2f}",
                 "overlay_ret": f"{rm['overlay_total_return']:+.1%}",
