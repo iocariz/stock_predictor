@@ -73,7 +73,9 @@ def relative_metrics(strategy_nav: pd.Series, bench_nav: pd.Series) -> dict[str,
     if beta == beta:
         resid = rs - beta * rb
         rstd = float(resid.std())
-        if rstd > 0:
+        # Epsilon guard: identical series leave ~1e-17 float noise in the
+        # residuals, whose mean/std ratio is a spurious t-stat.
+        if rstd > 1e-12:
             alpha_t = float(resid.mean() / rstd * np.sqrt(len(resid)))
 
     up = rb > 0
