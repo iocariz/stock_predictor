@@ -19,6 +19,9 @@ artifacts/
 *.pickle
 *.joblib
 
+# Live portfolio state (mutated by predict-sp500 --confirm; never commit)
+portfolio_state.json
+
 # IDE
 .idea/
 .vscode/
