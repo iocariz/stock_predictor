@@ -115,3 +115,54 @@ def test_coverage_below_threshold_but_allowed_only_warns(capsys) -> None:
 def test_coverage_rejects_empty_download() -> None:
     with pytest.raises(DownloadCoverageError):
         check_download_coverage(["A", "B"], pd.DataFrame(), min_coverage=0.9)
+
+
+# ---------------------------------------------------------------------------
+# Two-tier coverage: current members vs departed members
+# ---------------------------------------------------------------------------
+
+
+def test_departed_members_do_not_fail_the_run() -> None:
+    """Yahoo drops most acquired/renamed symbols. On the real S&P universe
+    that is ~97 of 691 tickers — all departed, with 100% of current members
+    served. A flat threshold would block every full-universe run."""
+    current = _alphabet_universe(80)
+    departed = [f"OLD{i:03d}" for i in range(20)]
+    requested = sorted(current + departed)
+    # Every current member returned; only half the departed ones.
+    got = _wide(current + departed[:10])
+
+    cov = check_download_coverage(
+        requested, got, min_coverage=0.98, active=set(current),
+    )
+    assert cov == pytest.approx(90 / 100)
+
+
+def test_missing_current_member_still_fails() -> None:
+    """A gap among current members means a broken or throttled download."""
+    current = _alphabet_universe(80)
+    departed = [f"OLD{i:03d}" for i in range(20)]
+    got = _wide(current[:40] + departed)  # half the current members lost
+
+    with pytest.raises(DownloadCoverageError, match="current"):
+        check_download_coverage(
+            sorted(current + departed), got, min_coverage=0.98, active=set(current),
+        )
+
+
+def test_survivorship_gap_is_reported(capsys) -> None:
+    current = _alphabet_universe(80)
+    departed = [f"OLD{i:03d}" for i in range(20)]
+    check_download_coverage(
+        sorted(current + departed), _wide(current), min_coverage=0.98,
+        active=set(current),
+    )
+    out = capsys.readouterr().out.lower()
+    assert "survivorship" in out
+    assert "20" in out
+
+
+def test_active_set_that_is_empty_falls_back_to_flat_threshold() -> None:
+    req = _alphabet_universe(100)
+    with pytest.raises(DownloadCoverageError):
+        check_download_coverage(req, _wide(req[:40]), min_coverage=0.9, active=set())

@@ -48,11 +48,18 @@ class DataProvider(Protocol):
         ...
 
 
-def get_provider(name: str) -> DataProvider:
-    """Instantiate a data provider by name ('yfinance' or 'tiingo')."""
+def get_provider(name: str, *, batch_size: int | None = None) -> DataProvider:
+    """Instantiate a data provider by name ('yfinance' or 'tiingo').
+
+    *batch_size* caps how many symbols go into one yfinance request. Lower it
+    when Yahoo throttles a large universe; it has no effect on Tiingo, which
+    is fetched per symbol.
+    """
     if name == "yfinance":
         from stock_predictor.providers.yfinance_provider import YFinanceProvider
 
+        if batch_size is not None:
+            return YFinanceProvider(batch_size=batch_size)
         return YFinanceProvider()
 
     if name == "tiingo":

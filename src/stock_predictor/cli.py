@@ -14,7 +14,12 @@ import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd
 
 from stock_predictor.data_provider import get_provider
-from stock_predictor.pit import SP500_STINTS_URL, load_sp500_stints, tickers_overlapping_window
+from stock_predictor.pit import (
+    SP500_STINTS_URL,
+    current_members,
+    load_sp500_stints,
+    tickers_overlapping_window,
+)
 from stock_predictor import repro
 from stock_predictor.universe import (
     DEFAULT_MIN_COVERAGE,
@@ -53,12 +58,22 @@ def parse_args() -> argparse.Namespace:
         "for the full universe",
     )
     p.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        dest="batch_size",
+        help="Symbols per yfinance request (default 100). Lower it if Yahoo "
+        "throttles a large universe; no effect with --provider tiingo",
+    )
+    p.add_argument(
         "--min-coverage",
         type=float,
         default=DEFAULT_MIN_COVERAGE,
         dest="min_coverage",
         help="Fail the run if the price download returns fewer than this "
-        "fraction of the requested tickers (0 = never fail, warn only)",
+        "fraction of the CURRENT index members. Departed members that the "
+        "vendor no longer serves are reported as a survivorship gap, not "
+        "gated (0 = never fail, warn only)",
     )
     p.add_argument("--horizon", type=int, default=10)
     p.add_argument("--threshold", type=float, default=0.05)
@@ -122,7 +137,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    provider = get_provider(args.provider)
+    provider = get_provider(args.provider, batch_size=args.batch_size)
     start, end = args.start, args.end
     train_end, test_start = args.train_end, args.test_start
     horizon, threshold = args.horizon, args.threshold
@@ -178,7 +193,10 @@ def main() -> None:
     adj_close, volume = provider.download_equity_ohlcv(sample, start, end)
     print(f"  adj_close shape: {adj_close.shape}")
     coverage = check_download_coverage(
-        sample, adj_close, min_coverage=args.min_coverage, label="equity download",
+        sample, adj_close,
+        min_coverage=args.min_coverage,
+        active=current_members(stints),
+        label="equity download",
     )
     if manifest is not None:
         manifest["universe"] = {

@@ -17,7 +17,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-DEFAULT_MIN_COVERAGE = 0.9
+# Applies to *current* index members, which vendors serve reliably; the
+# departed-member gap is reported separately, never gated.
+DEFAULT_MIN_COVERAGE = 0.98
 
 
 class DownloadCoverageError(RuntimeError):
@@ -43,21 +45,41 @@ def sample_tickers(tickers: list[str], max_n: int, *, seed: int) -> list[str]:
     return sorted(picked.tolist())
 
 
+def _preview(names: list[str], n: int = 10) -> str:
+    head = ", ".join(names[:n])
+    return head + (f" (+{len(names) - n} more)" if len(names) > n else "")
+
+
 def check_download_coverage(
     requested: list[str],
     adj_close: pd.DataFrame,
     *,
     min_coverage: float = DEFAULT_MIN_COVERAGE,
+    active: set[str] | None = None,
     label: str = "price download",
 ) -> float:
     """Validate that a wide price frame actually covers the requested tickers.
 
-    A column that is present but entirely NaN counts as missing — Yahoo
-    returns those for symbols it could not serve.
+    A column that is present but entirely NaN counts as missing — vendors
+    return those for symbols they could not serve.
 
-    Returns the coverage fraction.  Raises :class:`DownloadCoverageError`
-    when it falls below *min_coverage*; otherwise prints a warning listing
-    what is missing so a partial universe is never silent.
+    Two failure modes look identical in a flat coverage number but mean
+    opposite things:
+
+    * A **current** index member is missing → the request broke or was
+      throttled. Yahoo serves current members reliably, so this is a fault.
+    * A **departed** member is missing → the symbol was acquired, renamed, or
+      delisted and the vendor no longer carries it. On the real S&P universe
+      that is ~97 of 691 tickers, so a flat 90% gate would block every
+      full-universe run. This is survivorship bias, not a download fault: it
+      flatters backtest results and belongs in a warning, not an exception.
+
+    Pass *active* (see :func:`stock_predictor.pit.current_members`) to apply
+    *min_coverage* to current members only and report the departed gap
+    separately. Without it, *min_coverage* applies to the whole request.
+
+    Returns overall coverage. Raises :class:`DownloadCoverageError` when the
+    gated cohort falls short.
     """
     want = sorted(set(requested))
     if not want:
@@ -72,22 +94,42 @@ def check_download_coverage(
     coverage = len(got) / len(want)
     missing = [t for t in want if t not in got]
 
-    if missing:
-        preview = ", ".join(missing[:10])
-        more = f" (+{len(missing) - 10} more)" if len(missing) > 10 else ""
-        detail = (
-            f"{label}: {len(got)}/{len(want)} tickers returned "
-            f"({coverage:.1%} coverage); missing {len(missing)}: {preview}{more}"
+    gated, gated_label = want, "requested"
+    if active:
+        gated = [t for t in want if t in active]
+        gated_label = "current index members"
+
+    gated_got = [t for t in gated if t in got]
+    gated_missing = [t for t in gated if t not in got]
+    gated_coverage = len(gated_got) / len(gated) if gated else coverage
+
+    if gated_coverage < min_coverage:
+        raise DownloadCoverageError(
+            f"{label}: only {len(gated_got)}/{len(gated)} {gated_label} returned "
+            f"({gated_coverage:.1%}), below the {min_coverage:.0%} threshold.\n"
+            f"Missing: {_preview(gated_missing)}\n"
+            "Vendors serve current members reliably, so this is a broken or "
+            "throttled download, not survivorship. A partial download silently "
+            "changes the traded universe and every cross-sectional feature "
+            "computed from it. Retry, lower --batch-size (Yahoo throttles large "
+            "batches), switch --provider, or lower --min-coverage to accept it."
         )
-        if coverage < min_coverage:
-            raise DownloadCoverageError(
-                f"{detail}\n"
-                f"Coverage is below the {min_coverage:.0%} threshold. A partial "
-                "download silently changes the traded universe and every "
-                "cross-sectional feature computed from it. Retry (Yahoo "
-                "rate-limits large batches), narrow --sample-n, switch "
-                "--provider, or lower --min-coverage to accept this run."
+
+    print(
+        f"  {label}: {len(got)}/{len(want)} tickers ({coverage:.1%} overall)"
+        + (f", {gated_coverage:.1%} of {gated_label}" if active else "")
+    )
+    if active:
+        departed_missing = [t for t in missing if t not in active]
+        if departed_missing:
+            n_departed = len([t for t in want if t not in active])
+            print(
+                f"  Survivorship gap: {len(departed_missing)}/{n_departed} departed "
+                f"index members are unavailable from this vendor and are absent "
+                f"from the panel, which flatters results. "
+                f"Missing: {_preview(departed_missing, 5)}"
             )
-        print(f"  Warning: {detail}")
+    elif missing:
+        print(f"  Warning: missing {len(missing)}: {_preview(missing)}")
 
     return coverage

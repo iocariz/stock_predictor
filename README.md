@@ -239,7 +239,8 @@ These are **not** recommendations—only sensible axes to explore when you stres
 | `--train-end` | 2022-12-31 | Last date in training set |
 | `--test-start` | 2023-01-01 | First date in test / walk-forward region |
 | `--sample-n` | 500 | Cap the universe at N tickers, drawn as a **seeded random sample** (not an alphabetical prefix). Use a large value (e.g. `10000`) for the full universe |
-| `--min-coverage` | 0.9 | Fail the run if the price download returns less than this fraction of the requested tickers (`0` = warn only) |
+| `--min-coverage` | 0.98 | Fail the run if the price download returns less than this fraction of the **current** index members (`0` = warn only). Departed members are reported as a survivorship gap, never gated |
+| `--batch-size` | 100 | Symbols per yfinance request. Lower it if Yahoo throttles a large universe; no effect with `--provider tiingo` |
 | `--horizon` | 10 | Forward return horizon (sessions); also the **purge window** at every split boundary |
 | `--threshold` | 0.05 | Binary label threshold (e.g. 5%) |
 | `--rank-objective` | off | Train LGBMRanker (lambdarank, grouped by date) on per-date forward-return quintile grades instead of the binary classifier; applies to Optuna (NDCG@15), the walk-forward, and the saved model |
@@ -285,7 +286,25 @@ Omit these flags so nothing is disabled: **`--no-optuna`**, **`--skip-earnings`*
 
 Default **`--sample-n` is 500** (caps the universe). The cap draws a **seeded random sample**, so a capped run is still representative of the index; use a **large** value (e.g. `10000`) to include essentially all tickers overlapping your date window.
 
-The run also fails if the price download returns less than **`--min-coverage`** (default 90%) of the requested tickers. Yahoo rate-limits large batches and returns partial data, which would otherwise silently change the traded universe and every cross-sectional feature computed from it.
+Equity downloads are **batched** (`--batch-size`, default 100 symbols per request). One request for the whole universe reliably trips Yahoo's rate limiter, which replies with a *partial frame* rather than an error; each batch is retried with backoff, and symbols still missing get a second pass in smaller chunks.
+
+Coverage is then checked in two tiers, because a flat percentage conflates two opposite situations:
+
+| Cohort | Expectation | On a gap |
+|--------|-------------|----------|
+| **Current** index members | Vendors serve these reliably | **Fails the run** below `--min-coverage` (default 98%) — a broken or throttled download |
+| **Departed** members | Yahoo drops most acquired/renamed/delisted symbols | **Warns only** — this is the documented survivorship bias, not a fault |
+
+A real full-universe run looks like this:
+
+```
+  Union tickers overlapping window: 691
+  equity download: 594/691 tickers (86.0% overall), 100.0% of current index members
+  Survivorship gap: 97/188 departed index members are unavailable from this vendor
+  and are absent from the panel, which flatters results. Missing: ABC, ABMD, ADS, AET, AGN (+92 more)
+```
+
+86% overall would fail a flat 90% gate even though the download was perfect. A Tiingo key recovers most of the departed names.
 
 **Yahoo equities (default), merged macro when FRED is available:**
 
@@ -492,7 +511,8 @@ uv run predict-sp500 --model models/latest.pkl --skip-earnings --confirm
 | `--skip-earnings` | off | Skip earnings feature (must match training) |
 | `--sample-n` | 500 | Cap the universe at N tickers, drawn as a **seeded random sample**. Use the same value as training |
 | `--seed` | from model meta | Seed for the universe sample; defaults to the seed recorded at training time so the live universe matches |
-| `--min-coverage` | 0.9 | Fail if the price download returns less than this fraction of requested tickers (`0` = warn only) |
+| `--min-coverage` | 0.98 | Fail if the price download returns less than this fraction of **current** index members (`0` = warn only) |
+| `--batch-size` | 100 | Symbols per yfinance request; lower it if Yahoo throttles |
 | `--weighting` | equal | `equal` or `probability` (same as backtest; `probability` requires non-negative scores) |
 | `--commission-per-share` | 0 | Per-share fee per buy/sell leg (match `backtest-sp500`) |
 | `--commission-per-order` | 0 | Flat fee per ticker per buy/sell order (match `backtest-sp500`) |

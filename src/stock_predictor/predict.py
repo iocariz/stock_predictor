@@ -19,6 +19,7 @@ import pandas as pd
 from stock_predictor.data_provider import DataProvider, get_provider
 from stock_predictor.pit import (
     SP500_STINTS_URL,
+    current_members,
     load_sp500_stints,
     tickers_overlapping_window,
 )
@@ -342,10 +343,13 @@ def parse_args() -> argparse.Namespace:
                    help="Seed for the universe sample; defaults to the seed "
                         "recorded in the model metadata so the live universe "
                         "matches training")
+    p.add_argument("--batch-size", type=int, default=None, dest="batch_size",
+                   help="Symbols per yfinance request (default 100); lower it "
+                        "if Yahoo throttles a large universe")
     p.add_argument("--min-coverage", type=float, default=DEFAULT_MIN_COVERAGE,
                    dest="min_coverage",
                    help="Fail if the price download returns fewer than this "
-                        "fraction of the requested tickers (0 = warn only)")
+                        "fraction of the CURRENT index members (0 = warn only)")
     p.add_argument(
         "--provider",
         default="yfinance",
@@ -376,7 +380,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    provider = get_provider(args.provider)
+    provider = get_provider(args.provider, batch_size=args.batch_size)
 
     # Load or init state
     if args.init:
@@ -421,7 +425,10 @@ def main() -> None:
     adj_close, volume = download_recent_prices(sample, lookback_days=lookback, provider=provider)
     print(f"  Downloaded: {adj_close.shape[0]} days x {adj_close.shape[1]} tickers")
     check_download_coverage(
-        sample, adj_close, min_coverage=args.min_coverage, label="equity download",
+        sample, adj_close,
+        min_coverage=args.min_coverage,
+        active=current_members(stints),
+        label="equity download",
     )
 
     # Build features

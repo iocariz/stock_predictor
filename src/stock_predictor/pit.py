@@ -48,6 +48,20 @@ def tickers_overlapping_window(
     return sorted(stints.loc[mask, "ticker"].unique().tolist())
 
 
+def current_members(stints: pd.DataFrame) -> set[str]:
+    """Tickers still in the index per the source (latest stint has no end date).
+
+    Useful for judging a price download: vendors reliably serve current
+    members, so a gap there means a broken or throttled request. Departed
+    members are a different matter — Yahoo drops most of them, which is the
+    survivorship bias this project documents rather than a download fault.
+    """
+    if stints.empty:
+        return set()
+    open_stints = stints["end_date"].isna()
+    return set(stints.loc[open_stints, "ticker"].astype(str).unique())
+
+
 def filter_panel_to_pit(
     panel: pd.DataFrame,
     stints: pd.DataFrame,
