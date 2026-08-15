@@ -160,6 +160,30 @@ def held_tickers(state: PortfolioState, as_of: str) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
+def _long_only_weights(probs: np.ndarray, weighting: str) -> np.ndarray:
+    """Non-negative weights summing to 1 (parity with the backtest engine).
+
+    See :func:`stock_predictor.backtest._compute_weights`: normalizing signed
+    lambdarank scores by their sum produces short positions and unbounded
+    leverage, so those inputs are rejected rather than traded.
+    """
+    n = len(probs)
+    if n == 0:
+        return np.zeros(0, dtype=float)
+    if weighting != "probability":
+        return np.ones(n, dtype=float) / n
+    if np.any(probs < 0):
+        raise ValueError(
+            "weighting='probability' requires non-negative scores, got "
+            f"min={float(np.min(probs)):.6g}. Raw lambdarank scores are not "
+            "probabilities — use weighting='equal' with --rank-objective models."
+        )
+    total = float(probs.sum())
+    if not np.isfinite(total) or total <= 0:
+        return np.ones(n, dtype=float) / n
+    return probs / total
+
+
 def generate_orders(
     state: PortfolioState,
     picks: list[dict],
@@ -245,13 +269,11 @@ def generate_orders(
             else None
         )
         if eligible and entry is not None and expiry_iso is not None:
-            n = len(eligible)
             probs = np.array([float(p.get("prob", 1.0)) for p in eligible], dtype=float)
-            if weighting == "equal":
-                wts = np.ones(n, dtype=float) / n
-            else:
-                s = float(probs.sum())
-                wts = probs / s if s > 0 else np.ones(n, dtype=float) / n
+            # Mirrors backtest._compute_weights: signed (lambdarank) scores
+            # would otherwise yield negative dollar targets and, when they
+            # nearly cancel, absurd position sizes.
+            wts = _long_only_weights(probs, weighting)
 
             entry_iso = entry.strftime("%Y-%m-%d")
             for pick, w in zip(eligible, wts, strict=True):

@@ -146,11 +146,12 @@ def print_report(result: BacktestResult) -> None:
             f", comm=${c.commission_per_share:.4f}/sh "
             f"+ ${c.commission_per_order:.2f}/order-leg"
         )
+    floor = f", min_prob={c.min_prob:g}" if c.min_prob is not None else ""
     print(
         f"Config: top_n={c.top_n}, holding={c.holding_days}d, "
         f"rebalance={c.rebalance_day}, weighting={c.weighting}, "
         f"slippage={c.slippage_bps:.0f}bps, max_cohorts={c.max_overlapping_cohorts}"
-        f"{comm}"
+        f"{floor}{comm}"
     )
     print()
     print(f"{'':20s} {'STRATEGY':>{col_w}s}  {bench_hdr:>{col_w}s}")

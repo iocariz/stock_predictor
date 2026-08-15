@@ -19,7 +19,6 @@ import pandas as pd
 from stock_predictor.data_provider import DataProvider, get_provider
 from stock_predictor.pit import (
     SP500_STINTS_URL,
-    filter_panel_to_pit,
     load_sp500_stints,
     tickers_overlapping_window,
 )
@@ -40,6 +39,11 @@ from stock_predictor.training import (
     build_feature_panel,
     model_scores,
     wide_field,
+)
+from stock_predictor.universe import (
+    DEFAULT_MIN_COVERAGE,
+    check_download_coverage,
+    sample_tickers,
 )
 
 
@@ -99,11 +103,16 @@ def build_inference_panel(
     provider_name: str = "yfinance",
     macro_merge: bool = True,
 ) -> tuple[pd.DataFrame, list[str]]:
-    """Build feature panel for scoring (no forward return, no label)."""
+    """Build feature panel for scoring (no forward return, no label).
+
+    *stints* is handed to :func:`build_feature_panel` rather than applied
+    here: rolling features must see each ticker's full contiguous history,
+    and the cross-sectional features must see only in-index names — the same
+    staging the training pipeline uses.
+    """
     long = adj_close.stack(future_stack=True).rename("adj_close").reset_index()
     long.columns = ["date", "ticker", "adj_close"]
     long = long.sort_values(["ticker", "date"])
-    long = filter_panel_to_pit(long, stints)
     return build_feature_panel(
         long, volume,
         start=start, end=end,
@@ -112,6 +121,7 @@ def build_inference_panel(
         provider=provider,
         provider_name=provider_name,
         macro_merge=macro_merge,
+        stints=stints,
     )
 
 
@@ -325,7 +335,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--confirm", action="store_true",
                    help="Update portfolio state with new orders (without this flag: dry run)")
     p.add_argument("--sample-n", type=int, default=500, dest="sample_n",
-                   help="Max tickers to download")
+                   help="Cap the universe at this many tickers, drawn as a "
+                        "seeded RANDOM sample (not an alphabetical prefix). "
+                        "Use the same value as training")
+    p.add_argument("--seed", type=int, default=None,
+                   help="Seed for the universe sample; defaults to the seed "
+                        "recorded in the model metadata so the live universe "
+                        "matches training")
+    p.add_argument("--min-coverage", type=float, default=DEFAULT_MIN_COVERAGE,
+                   dest="min_coverage",
+                   help="Fail if the price download returns fewer than this "
+                        "fraction of the requested tickers (0 = warn only)")
     p.add_argument(
         "--provider",
         default="yfinance",
@@ -385,11 +405,24 @@ def main() -> None:
     lookback = 400
     start_date = (date.today() - timedelta(days=lookback)).isoformat()
     tickers = tickers_overlapping_window(stints, start_date, None)
-    sample = tickers[:args.sample_n]
-    print(f"  Universe: {len(sample)} tickers")
+    # Reuse training's seed so the live universe is the same draw the model
+    # was fitted on; an unrelated sample changes every cross-sectional feature.
+    seed = args.seed if args.seed is not None else int(meta.get("seed", 42))
+    sample = sample_tickers(tickers, args.sample_n, seed=seed)
+    print(f"  Universe: {len(sample)} tickers (seeded sample, seed={seed})")
+    if "sample_n" in meta and meta["sample_n"] != args.sample_n:
+        print(
+            f"  Warning: --sample-n {args.sample_n} differs from training "
+            f"({meta['sample_n']}); the live universe will not match the "
+            "panel the model was trained on.",
+            file=sys.stderr,
+        )
 
     adj_close, volume = download_recent_prices(sample, lookback_days=lookback, provider=provider)
     print(f"  Downloaded: {adj_close.shape[0]} days x {adj_close.shape[1]} tickers")
+    check_download_coverage(
+        sample, adj_close, min_coverage=args.min_coverage, label="equity download",
+    )
 
     # Build features
     print("Computing features...")

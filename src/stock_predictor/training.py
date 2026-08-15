@@ -657,11 +657,20 @@ def monthly_walk_forward(
 
 def build_labeled_panel(
     adj_close: pd.DataFrame,
-    stints: pd.DataFrame,
+    stints: pd.DataFrame | None,
     horizon: int,
     threshold: float,
 ) -> pd.DataFrame:
-    """Stack wide adj_close into long format, compute forward return & label."""
+    """Stack wide adj_close into long format, compute forward return & label.
+
+    *stints* ``None`` leaves the panel unfiltered so that per-ticker rolling
+    features can be computed on each symbol's **full contiguous** price
+    history; the point-in-time membership filter is then applied inside
+    :func:`build_feature_panel`, after the time-series features and before
+    the cross-sectional ones.  Filtering here instead makes rolling windows
+    span index-membership gaps (a re-added symbol's first ``ret_1d`` becomes
+    a multi-year return).
+    """
     long = adj_close.stack(future_stack=True).rename("adj_close").reset_index()
     long.columns = ["date", "ticker", "adj_close"]
     long = long.sort_values(["ticker", "date"])
@@ -670,7 +679,57 @@ def build_labeled_panel(
     )
     long["target_5pct"] = (long["fwd_ret"] >= threshold).astype("int8")
     labeled = long.dropna(subset=["fwd_ret"])
+    if stints is None:
+        return labeled
     return filter_panel_to_pit(labeled, stints)
+
+
+def add_timeseries_features(labeled: pd.DataFrame, volume: pd.DataFrame) -> pd.DataFrame:
+    """Per-ticker price and volume features.
+
+    These are backward-looking rolling/lagged windows, so they must be
+    computed on each ticker's full contiguous history — **before** any
+    point-in-time membership filter removes interior rows.
+    """
+    features = add_price_features(labeled.sort_values(["ticker", "date"]).copy())
+    vol_long = volume.stack(future_stack=True).rename("volume").reset_index()
+    vol_long.columns = ["date", "ticker", "volume"]
+    features = features.merge(vol_long, on=["date", "ticker"], how="left")
+    features = features.sort_values(["ticker", "date"])
+    return add_volume_features(features)
+
+
+def add_cross_sectional_features(
+    features: pd.DataFrame, sector_map: pd.DataFrame,
+) -> pd.DataFrame:
+    """Same-date peer-group features: regime medians, ranks, sector spreads.
+
+    Computed **after** the point-in-time filter so the cross-section is the
+    actual index membership on each date, not every symbol that happens to
+    be in the download.
+    """
+    features = add_regime_features(features)
+    features = add_cross_sectional_ranks(features)
+    features = features.merge(sector_map, on="ticker", how="left")
+    pre = (features["date"] < GICS_2018_CUTOFF) & features["ticker"].isin(_GICS_2018_PRE_SECTOR)
+    features.loc[pre, "sector"] = features.loc[pre, "ticker"].map(_GICS_2018_PRE_SECTOR)
+    features = add_sector_relative_features(features)
+    features["sector"] = features["sector"].astype("category")
+    return features
+
+
+def download_sector_map() -> pd.DataFrame:
+    """Current GICS sector per ticker, scraped from Wikipedia."""
+    headers = {"User-Agent": "stock-predictor/0.1 (Python/pandas; educational research)"}
+    req = urllib.request.Request(SP500_WIKI_URL, headers=headers)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        html = resp.read().decode("utf-8")
+    wiki_constituents = pd.read_html(io.StringIO(html))[0]
+    return (
+        wiki_constituents[["Symbol", "GICS Sector"]]
+        .rename(columns={"Symbol": "ticker", "GICS Sector": "sector"})
+        .assign(ticker=lambda df: df["ticker"].str.replace(".", "-", regex=False))
+    )
 
 
 def _build_macro_panel_yfinance(start: str, end: str | None) -> pd.DataFrame:
@@ -740,11 +799,29 @@ def build_feature_panel(
     provider_name: str = "yfinance",
     macro_merge: bool = True,
     fred_api_key: str | None = None,
+    stints: pd.DataFrame | None = None,
+    sector_map: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Engineer all features and return the panel with the feature column list.
 
+    Stage order matters and is load-bearing:
+
+    1. **Time-series** features on each ticker's full contiguous history.
+    2. **Point-in-time membership filter** (*stints*).
+    3. **Cross-sectional** features on the surviving, in-index cross-section.
+    4. Date-level joins (macro, calendar) and the optional earnings feature.
+
+    Computing (1) after (2) lets rolling windows span index-membership gaps;
+    computing (3) before (2) pollutes ranks and "market" medians with symbols
+    that were not in the index on that date.
+
     Parameters
     ----------
+    stints : pd.DataFrame | None
+        Point-in-time membership table.  ``None`` skips the filter (the panel
+        is assumed to be filtered already).
+    sector_map : pd.DataFrame | None
+        ``ticker`` → ``sector`` frame.  ``None`` scrapes Wikipedia.
     provider : DataProvider | None
         When supplied, equity/macro downloads go through this provider.
         ``None`` falls back to the legacy inline yfinance code.
@@ -759,30 +836,23 @@ def build_feature_panel(
         FRED API key for Yahoo→FRED gap-fill; ``None`` uses ``FRED_API_KEY`` env
         after optional ``python-dotenv`` load.
     """
-    _wiki_headers = {"User-Agent": "stock-predictor/0.1 (Python/pandas; educational research)"}
-    req = urllib.request.Request(SP500_WIKI_URL, headers=_wiki_headers)
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        html = resp.read().decode("utf-8")
-    wiki_constituents = pd.read_html(io.StringIO(html))[0]
+    if sector_map is None:
+        sector_map = download_sector_map()
 
-    features = add_price_features(labeled.copy())
-    vol_long = volume.stack(future_stack=True).rename("volume").reset_index()
-    vol_long.columns = ["date", "ticker", "volume"]
-    features = features.merge(vol_long, on=["date", "ticker"], how="left")
-    features = add_volume_features(features)
-    features = add_regime_features(features)
-    features = add_cross_sectional_ranks(features)
+    # 1. Time-series features on full contiguous per-ticker history.
+    features = add_timeseries_features(labeled, volume)
 
-    sector_map = (
-        wiki_constituents[["Symbol", "GICS Sector"]]
-        .rename(columns={"Symbol": "ticker", "GICS Sector": "sector"})
-        .assign(ticker=lambda df: df["ticker"].str.replace(".", "-", regex=False))
-    )
-    features = features.merge(sector_map, on="ticker", how="left")
-    pre = (features["date"] < GICS_2018_CUTOFF) & features["ticker"].isin(_GICS_2018_PRE_SECTOR)
-    features.loc[pre, "sector"] = features.loc[pre, "ticker"].map(_GICS_2018_PRE_SECTOR)
-    features = add_sector_relative_features(features)
-    features["sector"] = features["sector"].astype("category")
+    # 2. Point-in-time membership filter.
+    if stints is not None:
+        before = len(features)
+        features = filter_panel_to_pit(features, stints)
+        print(
+            f"  PIT filter: {before} → {len(features)} rows "
+            f"({features['ticker'].nunique()} tickers in-index)"
+        )
+
+    # 3. Cross-sectional features on the in-index cross-section.
+    features = add_cross_sectional_features(features, sector_map)
 
     try:
         if provider is not None:

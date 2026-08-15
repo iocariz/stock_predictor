@@ -119,7 +119,7 @@ uv run train-sp500 --no-snapshot
 
 ### Backtest CLI
 
-**Input:** a Parquet or CSV panel from walk-forward scoring (`--wf-scores-path` or the notebook). Required columns: **`date`**, **`ticker`**, **`adj_close`**, and either **`prob`** or **`probability`**. Optional **`vix_percentile`** enables **`--vix-filter`** and the `vix_scale_exposure` config option.
+**Input:** a Parquet or CSV panel from walk-forward scoring (`--wf-scores-path` or the notebook). Required columns: **`date`**, **`ticker`**, **`adj_close`**, and either **`prob`** or **`probability`**. Optional **`vix_percentile`** enables **`--vix-filter`** and the `vix_scale_exposure` config option — and those options now **raise** when the column is absent rather than silently doing nothing.
 
 Two portfolio engines share the same cash-ledger NAV discipline:
 
@@ -152,11 +152,12 @@ Benchmark prices are **reindexed to the strategy’s trading days** (forward-fil
 | `--holding-days` | 10 | Cohort mode: holding period in **trading** days |
 | `--exit-rank` | 40 | Rank-hold mode: sell held names ranked worse than this (must be ≥ top-n) |
 | `--rebalance-day` | Friday | `Monday`–`Friday` or `last` (last session in each ISO week) |
-| `--weighting` | equal | `equal` or `probability` (normalize scores to weights) |
+| `--weighting` | equal | `equal` or `probability` (normalize scores to weights). `probability` **rejects negative scores** — use `equal` with `--rank-objective` models |
 | `--slippage-bps` | 5 | Round-trip modeled as **per-side** basis points |
 | `--capital` | 100000 | Starting notional |
 | `--max-cohorts` | 2 | Cohort mode: overlapping cohorts (cash / free slots per entry) |
-| `--vix-filter` | none | Skip rebalance (cohort) / block buys (rank-hold) when `vix_percentile` exceeds this |
+| `--vix-filter` | none | Skip rebalance (cohort) / block buys (rank-hold) when `vix_percentile` exceeds this. **Errors** if the panel has no `vix_percentile` column |
+| `--min-prob` | none | Score floor: never buy a name scoring below this. Baskets shrink and weights renormalize; a date with no eligible name does not trade |
 | `--benchmark-ticker` | SPY | yfinance symbol for buy-and-hold column |
 | `--no-benchmark` | off | Skip benchmark download (table shows N/A for benchmark) |
 | `--plots-dir` | none | Writes `equity_curve.png`, `drawdown.png`, `monthly_returns.png` |
@@ -217,7 +218,8 @@ The same sweeps run on GitHub Actions in ~30 s via the `train-sp500` workflow's 
 | Idea | What to vary | How to approximate here |
 |------|----------------|---------------------------|
 | **Model A vs model B** | Different WF score files | Train twice (`--output-model` / different seeds or features), export two `--wf-scores-path` panels, compare |
-| **Equal vs probability weights** | Position sizing | Same `wf_scored.parquet`, run backtest twice with `--weighting equal` vs `probability` (no code change to scores) |
+| **Equal vs probability weights** | Position sizing | Same `wf_scored.parquet`, run backtest twice with `--weighting equal` vs `probability`. Classifier panels only — `probability` rejects the signed scores a `--rank-objective` model emits |
+| **Conviction floor** | `min_prob` | Same scores, compare `--min-prob` off vs a floor; fewer, higher-scoring trades at the cost of idle cash |
 | **Concentration** | `top_n` | Same scores, compare `--top-n 5` vs `--top-n 20` (two CLI runs or two configs in a notebook) |
 | **Holding horizon** | `holding_days` vs label horizon | Align `holding_days` to your forward window or try shorter/longer holds on the same scores |
 | **Rebalance rhythm** | `--rebalance-day Friday` vs `last` vs Monday | Same scores, different execution calendar |
@@ -236,7 +238,8 @@ These are **not** recommendations—only sensible axes to explore when you stres
 | `--end` | today | Price download end |
 | `--train-end` | 2022-12-31 | Last date in training set |
 | `--test-start` | 2023-01-01 | First date in test / walk-forward region |
-| `--sample-n` | 500 | Max tickers to download |
+| `--sample-n` | 500 | Cap the universe at N tickers, drawn as a **seeded random sample** (not an alphabetical prefix). Use a large value (e.g. `10000`) for the full universe |
+| `--min-coverage` | 0.9 | Fail the run if the price download returns less than this fraction of the requested tickers (`0` = warn only) |
 | `--horizon` | 10 | Forward return horizon (sessions); also the **purge window** at every split boundary |
 | `--threshold` | 0.05 | Binary label threshold (e.g. 5%) |
 | `--rank-objective` | off | Train LGBMRanker (lambdarank, grouped by date) on per-date forward-return quintile grades instead of the binary classifier; applies to Optuna (NDCG@15), the walk-forward, and the saved model |
@@ -280,7 +283,9 @@ This step assumes your keys are already configured as described in [Production w
 
 Omit these flags so nothing is disabled: **`--no-optuna`**, **`--skip-earnings`**, **`--skip-walk-forward`**, **`--no-snapshot`**, **`--no-macro-merge`**.
 
-Default **`--sample-n` is 500** (caps the universe). Use a **large** value (e.g. `10000`) to include essentially all tickers overlapping your date window.
+Default **`--sample-n` is 500** (caps the universe). The cap draws a **seeded random sample**, so a capped run is still representative of the index; use a **large** value (e.g. `10000`) to include essentially all tickers overlapping your date window.
+
+The run also fails if the price download returns less than **`--min-coverage`** (default 90%) of the requested tickers. Yahoo rate-limits large batches and returns partial data, which would otherwise silently change the traded universe and every cross-sectional feature computed from it.
 
 **Yahoo equities (default), merged macro when FRED is available:**
 
@@ -485,8 +490,10 @@ uv run predict-sp500 --model models/latest.pkl --skip-earnings --confirm
 | `--max-drawdown` | 0.15 | Kill-switch: halt if drawdown exceeds this |
 | `--slippage-bps` | 5 | Slippage per side (basis points) |
 | `--skip-earnings` | off | Skip earnings feature (must match training) |
-| `--sample-n` | 500 | Max tickers to download |
-| `--weighting` | equal | `equal` or `probability` (same as backtest) |
+| `--sample-n` | 500 | Cap the universe at N tickers, drawn as a **seeded random sample**. Use the same value as training |
+| `--seed` | from model meta | Seed for the universe sample; defaults to the seed recorded at training time so the live universe matches |
+| `--min-coverage` | 0.9 | Fail if the price download returns less than this fraction of requested tickers (`0` = warn only) |
+| `--weighting` | equal | `equal` or `probability` (same as backtest; `probability` requires non-negative scores) |
 | `--commission-per-share` | 0 | Per-share fee per buy/sell leg (match `backtest-sp500`) |
 | `--commission-per-order` | 0 | Flat fee per ticker per buy/sell order (match `backtest-sp500`) |
 | `--no-macro-merge` | off | Same as training: skip Yahoo↔FRED macro merge |
@@ -529,7 +536,7 @@ Ensure the repo root or `src` is on `PYTHONPATH`, or run notebooks from an envir
 uv run pytest
 ```
 
-Covers PIT membership, calendar features, reproducibility, training utilities (purged splits, rank labels, both Optuna objectives), both backtest engines (NAV compounding, rank-decay exits, VIX scaling), relative-return metrics, portfolio management (fixed and rank-hold order generation), execution parity, macro merge, data providers, and the inference pipeline (`tests/`, 120+ tests).
+Covers PIT membership, calendar features, reproducibility, training utilities (purged splits, rank labels, both Optuna objectives), both backtest engines (NAV compounding, rank-decay exits, VIX scaling), relative-return metrics, portfolio management (fixed and rank-hold order generation), execution parity, macro merge, data providers, and the inference pipeline (`tests/`, 150+ tests).
 
 ## Reproducibility (snapshots + manifest)
 
@@ -540,7 +547,7 @@ When snapshots are enabled (default), each run writes under `--snapshot-dir` or 
 | `manifest.json` | `run_id`, UTC time, `argv`, git commit / dirty (if available), env hints, **SHA-256** + row/column counts per snapshot |
 | `stints.parquet` | PIT membership table |
 | `equity_prices_long.parquet` | Long-format adjusted close + volume |
-| `labeled_pit.parquet` | Panel after forward return + PIT filter |
+| `labeled.parquet` | Panel after forward return, **before** the PIT filter (the filter now runs mid-way through feature engineering) |
 | `features_clean.parquet` | Feature matrix after NaN-tolerant row selection (label + minimal price history; `--strict-dropna` restores full-row `dropna`) |
 
 With `--output-model`, the manifest also records the pickle path and checksum; the manifest is rewritten at the end of the run.
@@ -551,10 +558,19 @@ With **`--no-snapshot`**, no Parquet files and no `manifest.json` are written (t
 
 ## Pipeline
 
-1. **Universe**: Point-in-time S&P 500 membership via [fja05680/sp500](https://github.com/fja05680/sp500)
+1. **Universe**: Point-in-time S&P 500 membership via [fja05680/sp500](https://github.com/fja05680/sp500); capped by `--sample-n` as a seeded random draw and coverage-checked after download
 2. **Prices**: Daily adjusted close + volume from Yahoo Finance (`yfinance`) or Tiingo
 3. **Labels**: Binary (forward return ≥ `--threshold` over `--horizon` sessions) or, with `--rank-objective`, per-date forward-return quintile grades (market-neutral by construction)
 4. **Features**: Price/volume (15), sector-relative (4), macro (5), regime (2), cross-sectional ranks (3), calendar (6), optional earnings (1)
+
+   **Stage order is load-bearing** (`build_feature_panel`):
+
+   1. *Time-series* features (price, volume) on each ticker's **full contiguous history**
+   2. *Point-in-time membership filter*
+   3. *Cross-sectional* features (regime medians, ranks, sector spreads) on the surviving in-index cross-section
+   4. Date-level joins (macro, calendar) and the optional earnings feature
+
+   Filtering before step 1 lets rolling windows span index-membership gaps — a symbol that left and rejoined the index gets a multi-year move reported as its next `ret_1d`. Running step 3 before the filter pollutes ranks and "market" medians with names that were not in the index that day.
 5. **Tuning**: Optuna over purged, date-grouped expanding CV folds — PR-AUC for the classifier, NDCG@15 for the ranker (optional)
 6. **Training**: LightGBM (classifier or lambdarank ranker) with a purged inner validation split for effective tree count
 7. **Evaluation**: PR-AUC, ROC-AUC, weekly Precision@K (same binary target for both objectives, so they compare directly)
@@ -580,6 +596,7 @@ src/stock_predictor/
   macro_merge.py         Yahoo ↔ FRED macro cross-fill
   data_provider.py       Provider protocol + factory
   providers/             yfinance + Tiingo/FRED implementations
+  universe.py            Seeded ticker sampling + download coverage guard
   repro.py               Run manifests, hashing, Parquet snapshots
 scripts/
   run_pipeline.sh        train-full / backtest / predict orchestration
@@ -588,7 +605,7 @@ train_sp500.py           Thin launcher → cli
 backtest.py              Thin launcher → backtest
 sp500_pit.py             Notebook shim → pit
 calendar_features.py     Notebook shim → calendar_features
-tests/                   pytest suite (120+ tests)
+tests/                   pytest suite (150+ tests)
 notebooks/               Exploration + full pipeline
 ```
 
@@ -602,6 +619,7 @@ notebooks/               Exploration + full pipeline
 
 ## Limitations
 
+- **Stale artifacts.** Any `wf_scored.parquet` or report under `artifacts/` produced before the universe fix was built on an **alphabetically truncated** universe (`--sample-n` used to slice a sorted ticker list, so a 500-cap run covered roughly A–POOL) and with features computed *after* the PIT filter. Regenerate them before drawing any conclusion from the numbers.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
 - **Honest results disclosure:** in our own evaluations on 2019–2026 walk-forward data with this pipeline (purged splits, cost-inclusive NAV, sub-window checks), **no configuration produced statistically significant CAPM alpha vs SPY** (all |t| < 1). The model shows real cross-sectional ranking skill — roughly enough to pay its own trading costs against an equal-weight benchmark — and configurations that beat SPY on raw return did so via higher market beta, not skill. Treat any better-looking result you produce with this repo with the same suspicion: check the alpha t-stat and re-test on a sub-window the configuration has never seen.
 - **Sector labels** are a pragmatic blend of current Wikipedia GICS and a fixed override; they are not a perfect point-in-time sector history for every ticker-date.
