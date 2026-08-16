@@ -573,7 +573,12 @@ Ensure the repo root or `src` is on `PYTHONPATH`, or run notebooks from an envir
 
 ```bash
 uv run pytest
+
+# include the Tiingo/FRED provider tests (otherwise 6 skip on a missing fredapi)
+uv sync --extra dev --extra tiingo && uv run pytest
 ```
+
+**CI** — [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main` and every pull request: pytest on Python 3.12 and 3.13, `ruff check`, and an offline smoke job that exercises every console script and both backtest engines against a synthetic panel. It is deliberately network-free, so a Yahoo outage never reds the build. The long training and sweep workflows stay on `workflow_dispatch` / schedule.
 
 Covers PIT membership, calendar features, reproducibility, training utilities (purged splits, rank labels, both Optuna objectives), both backtest engines (NAV compounding, rank-decay exits, VIX scaling), relative-return metrics, portfolio management (fixed and rank-hold order generation), execution parity, macro merge, data providers, and the inference pipeline (`tests/`, 200+ tests).
 

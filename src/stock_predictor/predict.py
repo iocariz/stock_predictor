@@ -13,17 +13,16 @@ import sys
 from datetime import date, timedelta
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from stock_predictor.data_provider import DataProvider, get_provider
+from stock_predictor.execution_calendar import trading_dates_from_index
 from stock_predictor.pit import (
     SP500_STINTS_URL,
     current_members,
     load_sp500_stints,
     tickers_overlapping_window,
 )
-from stock_predictor.execution_calendar import trading_dates_from_index
 from stock_predictor.portfolio import (
     Order,
     PortfolioState,
@@ -32,21 +31,18 @@ from stock_predictor.portfolio import (
     generate_orders_rank_hold,
     init_state,
     load_state,
-    portfolio_value,
     save_state,
 )
 from stock_predictor.training import (
     MACRO_FEATURE_COLS,
     build_feature_panel,
     model_scores,
-    wide_field,
 )
 from stock_predictor.universe import (
     DEFAULT_MIN_COVERAGE,
     check_download_coverage,
     sample_tickers,
 )
-
 
 # ---------------------------------------------------------------------------
 # Model loading

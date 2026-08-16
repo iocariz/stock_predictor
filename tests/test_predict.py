@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from stock_predictor.predict import build_inference_panel, score_universe
+from stock_predictor.predict import score_universe
 
 
 def _make_stints() -> pd.DataFrame:

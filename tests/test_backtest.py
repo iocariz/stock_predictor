@@ -15,13 +15,13 @@ from stock_predictor.backtest import (
     _get_rebalance_dates,
     run_backtest,
 )
-from stock_predictor.execution_calendar import next_trading_day, offset_trading_days
 from stock_predictor.backtest_reporting import (
     _nav_normalized_overlap,
     _nav_only_metrics,
     print_report,
     print_strategy_comparison,
 )
+from stock_predictor.execution_calendar import next_trading_day, offset_trading_days
 
 
 def test_get_rebalance_dates_friday_unique_weeks() -> None:

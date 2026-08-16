@@ -13,18 +13,13 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd
 
+from stock_predictor import repro
 from stock_predictor.data_provider import get_provider
 from stock_predictor.pit import (
     SP500_STINTS_URL,
     current_members,
     load_sp500_stints,
     tickers_overlapping_window,
-)
-from stock_predictor import repro
-from stock_predictor.universe import (
-    DEFAULT_MIN_COVERAGE,
-    check_download_coverage,
-    sample_tickers,
 )
 from stock_predictor.training import (
     build_feature_panel,
@@ -38,7 +33,11 @@ from stock_predictor.training import (
     select_training_rows,
     train_final_model,
     train_final_rank_model,
-    wide_field,
+)
+from stock_predictor.universe import (
+    DEFAULT_MIN_COVERAGE,
+    check_download_coverage,
+    sample_tickers,
 )
 
 
@@ -350,7 +349,12 @@ def main() -> None:
                 "No walk-forward scores available for backtest. Run without --skip-walk-forward."
             )
         else:
-            from stock_predictor.backtest import BacktestConfig, plot_backtest, print_report, run_backtest
+            from stock_predictor.backtest import (
+                BacktestConfig,
+                plot_backtest,
+                print_report,
+                run_backtest,
+            )
 
             bt_config = BacktestConfig()
             bt_result = run_backtest(wf_scores, bt_config, provider=provider)

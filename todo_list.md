@@ -29,14 +29,16 @@ Persistent list of **remaining** execution-realism and related items (phases 3�
 
 ## Tooling / hygiene
 
-- [ ] **CI**  
-  GitHub Actions: `uv sync --extra dev` + `pytest`.
+- [x] **CI** — `.github/workflows/ci.yml`: pytest on 3.12/3.13 (with the
+  `tiingo` extra so no provider test skips), `ruff check`, and an offline
+  smoke job covering every console script and both backtest engines.
 
-- [ ] **Lint / types (optional)**  
-  Ruff + mypy on `src/`.
+- [x] **Lint** — Ruff configured in `pyproject.toml` (`E4,E7,E9,F,I`) and
+  green across `src/`, `tests/`, `scripts/`; enforced by CI.
+  - [ ] **mypy** still outstanding — untyped pandas surfaces make this a
+    real piece of work rather than a config line.
 
-- [ ] **`pyproject.toml` description**  
-  Replace placeholder with one line aligned to README.
+- [x] **`pyproject.toml` description** — replaced the placeholder.
 
 ---
 

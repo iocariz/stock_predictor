@@ -8,9 +8,8 @@ import pandas as pd
 import pytest
 
 from stock_predictor.portfolio import (
-    Order,
-    Position,
     PortfolioState,
+    Position,
     active_cohort_ids,
     check_kill_switch,
     find_expiring_positions,

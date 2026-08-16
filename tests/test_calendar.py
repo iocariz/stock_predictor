@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 
 from stock_predictor.calendar_features import CALENDAR_FEATURE_COLS, add_calendar_features

@@ -15,6 +15,7 @@ from stock_predictor.execution_calendar import (
     offset_trading_days,
     trading_dates_from_index,
 )
+from stock_predictor.portfolio import PortfolioState, Position, generate_orders
 
 
 def test_exit_iso_matches_backtest_offset() -> None:
@@ -73,12 +74,6 @@ def test_live_entry_matches_backtest_next_day_convention() -> None:
 # ---------------------------------------------------------------------------
 # Capital deployment parity (dollars, not just calendars)
 # ---------------------------------------------------------------------------
-
-from stock_predictor.portfolio import (
-    PortfolioState,
-    Position,
-    generate_orders,
-)
 
 _CAL = pd.bdate_range("2024-01-02", periods=60).to_numpy()
 _PRICES = {f"T{i}": 100.0 for i in range(40)}

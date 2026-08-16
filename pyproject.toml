@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "stock-predictor"
 version = "0.1.0"
-description = "Add your description here"
+description = "LightGBM ranker for S&P 500 equities: PIT universe, purged walk-forward, cash-ledger backtest"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -43,3 +43,22 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# Pyflakes + a pragmatic slice of pycodestyle, plus import sorting.
+# Deliberately not the full default set: the wider rules flag intentional
+# patterns here (broad excepts that keep a download batch from killing a run,
+# matplotlib backend selection before import).
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# matplotlib.use("Agg") must run before pyplot is imported.
+"src/stock_predictor/backtest_reporting.py" = ["E402"]
+"src/stock_predictor/cli.py" = ["E402"]
+# Re-exports so `from stock_predictor.backtest import print_report` keeps working.
+"src/stock_predictor/backtest.py" = ["E402", "F401"]
+"src/stock_predictor/__init__.py" = ["F401"]

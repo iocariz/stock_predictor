@@ -20,7 +20,6 @@ import pandas as pd
 
 from stock_predictor.execution_calendar import next_trading_day, offset_trading_days
 
-
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
