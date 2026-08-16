@@ -51,6 +51,13 @@ class BacktestConfig:
     """Rank-hold mode only (:func:`run_rank_hold_backtest`): sell a held name
     when its cross-sectional rank decays beyond this (or it leaves the scored
     universe). Must be >= top_n; larger values -> lower turnover."""
+    risk_free_rate: float = 0.0
+    """Annualized risk-free rate used for Sharpe and Sortino (0.045 = 4.5%).
+
+    Default 0.0 preserves historical numbers, but a zero funding assumption
+    flatters risk-adjusted metrics over any period when cash actually paid —
+    2023-2026 cash yielded 4-5%. Total return, CAGR and drawdown are
+    unaffected."""
     min_prob: float | None = None
     """Score floor: never buy a name scoring below this, even if it is in the
     top_n. Baskets shrink (weights renormalize over survivors) and a date with
@@ -78,6 +85,10 @@ class BacktestConfig:
             raise ValueError(f"rebalance_day must be one of {valid_days}, got {self.rebalance_day!r}")
         if self.commission_per_share < 0 or self.commission_per_order < 0:
             raise ValueError("commission_per_share and commission_per_order must be >= 0")
+        if not np.isfinite(self.risk_free_rate) or not -0.01 <= self.risk_free_rate <= 1.0:
+            raise ValueError(
+                f"risk_free_rate must be an annual rate in [-0.01, 1.0], got {self.risk_free_rate!r}"
+            )
         if self.min_prob is not None and not np.isfinite(self.min_prob):
             raise ValueError(f"min_prob must be a finite number or None, got {self.min_prob!r}")
 
@@ -343,9 +354,23 @@ def _build_daily_nav(
 # ---------------------------------------------------------------------------
 
 
+# Below this, a return series is constant to floating-point precision and
+# risk-adjusted ratios are noise amplification rather than signal.
+_FLAT_EPS = 1e-12
+
+
+def daily_risk_free(annual_rate: float) -> float:
+    """Compounded daily equivalent of an annualized rate."""
+    if not annual_rate:
+        return 0.0
+    return (1.0 + annual_rate) ** (1.0 / 252.0) - 1.0
+
+
 def _compute_metrics(
     nav: pd.Series,
     cohorts: list[Cohort],
+    *,
+    risk_free_rate: float = 0.0,
 ) -> dict[str, float]:
     daily_ret = nav.pct_change().dropna()
     n_days = len(daily_ret)
@@ -353,11 +378,14 @@ def _compute_metrics(
         return {}
     total_ret = nav.iloc[-1] / nav.iloc[0] - 1
     cagr = (nav.iloc[-1] / nav.iloc[0]) ** (252 / max(n_days, 1)) - 1
-    mean_r = daily_ret.mean()
-    std_r = daily_ret.std()
-    sharpe = (mean_r / std_r * np.sqrt(252)) if std_r > 0 else float("nan")
-    downside = daily_ret[daily_ret < 0].std()
-    sortino = (mean_r / downside * np.sqrt(252)) if downside > 0 else float("nan")
+    # Sharpe and Sortino are excess-return statistics; total return, CAGR and
+    # drawdown deliberately stay on raw returns.
+    excess = daily_ret - daily_risk_free(risk_free_rate)
+    mean_r = excess.mean()
+    std_r = excess.std()
+    sharpe = (mean_r / std_r * np.sqrt(252)) if std_r > _FLAT_EPS else float("nan")
+    downside = excess[excess < 0].std()
+    sortino = (mean_r / downside * np.sqrt(252)) if downside > _FLAT_EPS else float("nan")
     drawdown = nav / nav.cummax() - 1
     max_dd = drawdown.min()
     calmar = (cagr / abs(max_dd)) if max_dd < 0 else float("nan")
@@ -547,7 +575,10 @@ def _benchmark_leg(
         )
     spy_nav = _align_benchmark_to_nav(raw_nav, daily_nav.index, config.initial_capital)
     spy_ret = spy_nav.pct_change().dropna()
-    spy_metrics = _compute_metrics(spy_nav, []) if len(spy_nav) > 1 else {}
+    spy_metrics = (
+        _compute_metrics(spy_nav, [], risk_free_rate=config.risk_free_rate)
+        if len(spy_nav) > 1 else {}
+    )
     if not spy_metrics:
         usable = int(spy_nav.notna().sum()) if len(spy_nav) else 0
         if not raw_nav.empty and usable == 0:
@@ -621,7 +652,7 @@ def run_backtest(
     daily_returns = daily_nav.pct_change().dropna()
 
     # Metrics
-    metrics = _compute_metrics(daily_nav, cohorts)
+    metrics = _compute_metrics(daily_nav, cohorts, risk_free_rate=config.risk_free_rate)
 
     start_date = pd.Timestamp(trading_dates[0])
     end_date = pd.Timestamp(trading_dates[-1])
@@ -805,7 +836,7 @@ def run_rank_hold_backtest(
     daily_nav = pd.Series(cash_series + invested, index=nav_index, dtype=float)
     daily_returns = daily_nav.pct_change().dropna()
 
-    metrics = _compute_metrics(daily_nav, closed)
+    metrics = _compute_metrics(daily_nav, closed, risk_free_rate=config.risk_free_rate)
     metrics["total_costs"] = total_costs  # include open positions' entry costs
     metrics["n_open_positions"] = float(len(open_pos))
 
@@ -896,6 +927,15 @@ def main() -> None:
         "Compared against the panel's raw 'prob' column, which is uncalibrated "
         "for classifiers and unbounded for --rank-objective models",
     )
+    p.add_argument(
+        "--rf-rate",
+        type=float,
+        default=0.0,
+        dest="rf_rate",
+        help="Annualized risk-free rate for Sharpe/Sortino (e.g. 0.045). "
+        "Default 0 keeps historical numbers, but overstates risk-adjusted "
+        "performance over periods when cash actually paid",
+    )
     p.add_argument("--capital", type=float, default=100_000.0)
     p.add_argument("--max-cohorts", type=int, default=2)
     p.add_argument("--vix-filter", type=float, default=None, help="Skip rebalance if VIX pct > this")
@@ -958,6 +998,7 @@ def main() -> None:
         commission_per_order=args.commission_per_order,
         exit_rank=args.exit_rank,
         min_prob=args.min_prob,
+        risk_free_rate=args.rf_rate,
     )
     backtest_fn = run_rank_hold_backtest if args.mode == "rank-hold" else run_backtest
     result = backtest_fn(scored, config, provider=bt_provider)

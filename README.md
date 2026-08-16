@@ -140,7 +140,9 @@ uv run backtest-sp500 scores.parquet --no-benchmark --rebalance-day last
 uv run backtest-sp500 scores.parquet --benchmark-ticker RSP --plots-dir artifacts/plots
 ```
 
-Benchmark prices are **reindexed to the strategy’s trading days** (forward-filled) so strategy vs buy-and-hold metrics use the **same calendar**. When a benchmark is present, the report also prints an **ACTIVE vs benchmark** section: annualized active return, tracking error, information ratio, CAPM beta/alpha with its **t-statistic**, up/down capture, and the equity of a dollar-neutral long-strategy/short-benchmark overlay. Comparing against **`--benchmark-ticker RSP`** (equal-weight S&P 500) isolates stock-selection skill from the equal-weight-vs-cap-weight effect.
+Benchmark prices are **reindexed to the strategy’s trading days** (forward-filled) so strategy vs buy-and-hold metrics use the **same calendar**. When a benchmark is present, the report also prints an **ACTIVE vs benchmark** section: annualized active return, tracking error, information ratio, CAPM beta/alpha with its **t-statistic**, up/down capture, and the equity of a dollar-neutral long-strategy/short-benchmark overlay.
+
+The alpha t-statistic is **Newey–West (HAC)**, with the lag window set to at least the holding period. A cohort strategy holding positions for `--holding-days` sessions produces strongly autocorrelated daily returns, and an i.i.d. standard error is not valid on that series. The naive statistic is printed underneath as `vs naive i.i.d. t-stat` — the correction moves the t-stat in **either** direction depending on the sign of the residual autocorrelation, so it is a correction, not a haircut. Comparing against **`--benchmark-ticker RSP`** (equal-weight S&P 500) isolates stock-selection skill from the equal-weight-vs-cap-weight effect.
 
 #### Backtest flags
 
@@ -158,6 +160,7 @@ Benchmark prices are **reindexed to the strategy’s trading days** (forward-fil
 | `--max-cohorts` | 2 | Cohort mode: overlapping cohorts (cash / free slots per entry) |
 | `--vix-filter` | none | Skip rebalance (cohort) / block buys (rank-hold) when `vix_percentile` exceeds this. **Errors** if the panel has no `vix_percentile` column |
 | `--min-prob` | none | Score floor: never buy a name scoring below this. Baskets shrink and weights renormalize; a date with no eligible name does not trade |
+| `--rf-rate` | 0 | Annualized risk-free rate for Sharpe/Sortino (e.g. `0.045`). Default 0 keeps historical numbers but overstates risk-adjusted performance over any period when cash actually paid |
 | `--benchmark-ticker` | SPY | yfinance symbol for buy-and-hold column |
 | `--no-benchmark` | off | Skip benchmark download (table shows N/A for benchmark) |
 | `--plots-dir` | none | Writes `equity_curve.png`, `drawdown.png`, `monthly_returns.png` |
@@ -175,7 +178,8 @@ Benchmark prices are **reindexed to the strategy’s trading days** (forward-fil
 - **Backtest:** Signal on date *T* → **entry** on the next session in that calendar → **exit** after `--holding-days` trading sessions (cohort mode) or on rank decay (rank-hold mode). Cohort returns are **fractional** weights; slippage is applied to historical **adj. close** bars.
 - **NAV accounting:** the daily NAV is a **cash ledger** — capital is debited at entry and credited back at exit as `capital × (1 + net_return)`, so realized P&L, exit slippage, and commissions all compound through cash. Total return, Sharpe, and drawdown reflect costs.
 - **predict-sp500:** entry is the first session **strictly after** *today* (same next-day convention as the backtest); fixed mode expiries use the same trading-day count as the backtest, rank mode positions carry an open-ended expiry sentinel and close on rank decay. Orders use **integer shares** (lot sizes differ from a fractional simulation).
-- **Parity:** Use the same `--weighting`, `--slippage-bps`, `--holding-days` / `--exit-rank`, and commission flags in both CLIs when comparing research simulation to generated orders. Do **not** switch `--hold-mode` on an existing state file.
+- **Position sizing:** both paths fund a new cohort with `free_cash / free_slots`. (Live previously divided by `max_cohorts`, so a portfolio with one of two slots open deployed half its free cash and the remainder never got invested.)
+- **Parity:** Use the same `--weighting`, `--slippage-bps`, `--holding-days` / `--exit-rank`, and commission flags in both CLIs when comparing research simulation to generated orders. Add `--allow-duplicate-holdings` for exact cohort parity — the backtest lets a persistently top-ranked name sit in two overlapping cohorts at double weight, while live defaults to one lot per ticker. Do **not** switch `--hold-mode` on an existing state file.
 
 #### Comparing two strategies
 
@@ -517,6 +521,7 @@ uv run predict-sp500 --model models/latest.pkl --skip-earnings --confirm
 | `--commission-per-share` | 0 | Per-share fee per buy/sell leg (match `backtest-sp500`) |
 | `--commission-per-order` | 0 | Flat fee per ticker per buy/sell order (match `backtest-sp500`) |
 | `--no-macro-merge` | off | Same as training: skip Yahoo↔FRED macro merge |
+| `--allow-duplicate-holdings` | off | Fixed mode: allow buying a name already held in another cohort — exact parity with `backtest-sp500 --mode cohort`, which permits a persistent name in overlapping cohorts at double weight |
 | `--confirm` | off | Update portfolio state (without: dry run) |
 
 #### Kill-switch

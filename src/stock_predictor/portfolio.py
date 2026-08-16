@@ -199,6 +199,7 @@ def generate_orders(
     commission_per_share: float = 0.0,
     commission_per_order: float = 0.0,
     allow_buys: bool = True,
+    allow_duplicate_holdings: bool = False,
 ) -> tuple[tuple[Order, ...], PortfolioState]:
     """
     Sell expired positions, then open a new cohort if a slot is free.
@@ -211,12 +212,19 @@ def generate_orders(
       trading sessions after that day (same offset as the backtest exit).
       *trading_dates* ends at the current session, so the calendar is extended
       with future business days to place entry and expiry.
+    - The new cohort is funded with ``free_cash / free_slots``, the same rule
+      the backtest uses, so a portfolio with one of two slots open deploys all
+      of its free cash rather than half of it.
     - *weighting* ``equal`` or ``probability`` matches cohort weights; lots use
       integer shares so dollar weights are approximate vs a fractional backtest.
     -     *trading_dates* should be the sorted unique session dates from the price
       index used for scoring (see :func:`stock_predictor.execution_calendar.trading_dates_from_index`).
     *allow_buys* — set False when a risk kill-switch is active so expiries still
       liquidate but no new cohort opens (avoids persisting buys while halted).
+    *allow_duplicate_holdings* — the backtest lets a persistently top-ranked
+      name sit in two overlapping cohorts at double weight. Live defaults to
+      one lot per ticker (``False``); set ``True`` for exact cohort parity,
+      accepting the concentration that implies.
     """
     if weighting not in ("equal", "probability"):
         raise ValueError(f"weighting must be 'equal' or 'probability', got {weighting!r}")
@@ -253,11 +261,16 @@ def generate_orders(
 
     if available_slots > 0 and allow_buys:
         capital_available = state.cash + cash_from_sells
-        cap_per_cohort = capital_available / max_cohorts
+        # Divide by *free* slots, matching the backtest's `cash / free_slots`.
+        # Dividing by max_cohorts under-deploys whenever a slot is occupied —
+        # at steady state one always is, so the shortfall never gets invested.
+        cap_per_cohort = capital_available / available_slots
         cohort_id = uuid.uuid4().hex[:8]
 
-        # Filter picks: exclude already-held tickers, take top_n
-        eligible = [p for p in picks if p["ticker"] not in already_held][:top_n]
+        eligible = list(picks)
+        if not allow_duplicate_holdings:
+            eligible = [p for p in eligible if p["ticker"] not in already_held]
+        eligible = eligible[:top_n]
         # Extend the calendar past the last downloaded session so entry (next
         # trading day after as_of) and expiry (holding_days sessions later)
         # always exist — the raw price calendar ends "today".
