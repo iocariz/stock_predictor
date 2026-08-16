@@ -217,6 +217,20 @@ uv run python scripts/backtest_sweep.py artifacts/wf_scored.parquet \
 
 The same sweeps run on GitHub Actions in ~30 s via the `train-sp500` workflow's `sweep_run_id` + `sweep_args` inputs (reuses a previous run's `wf_scored.parquet` artifact — no retraining). **Discipline note:** a grid's best cell is a hypothesis, not a result — re-test it on a sub-window it has never seen (`--from-date` / `--until-date`) and check the alpha t-stat before believing it.
 
+#### Signal diagnostics (before you tune anything)
+
+A backtest conflates ranking skill with market beta, costs, and sizing. [`scripts/signal_depth.py`](scripts/signal_depth.py) asks the narrower question — sort each date's universe by score, and see what the top *k* names actually returned:
+
+```bash
+uv run python scripts/signal_depth.py artifacts/wf_scored.parquet
+
+# fair benchmark for an equal-weighted strategy, on an unseen sub-window
+uv run python scripts/signal_depth.py artifacts/wf_scored.parquet \
+  --benchmark-ticker RSP --until-date 2025-06-30
+```
+
+It prints forward return by selection depth, the rank IC, and CAPM alpha across a `--top-n` ladder, all with HAC t-statistics. **Read the shape, not the level.** A ranker with usable skill puts its best forward returns at the tightest bucket and *gains* alpha as you concentrate; the script fails a shape check and says so when a deeper bucket wins, which means the edge is not where a top-N strategy trades.
+
 #### Strategy ideas to try (research / educational)
 
 | Idea | What to vary | How to approximate here |
@@ -561,7 +575,7 @@ Ensure the repo root or `src` is on `PYTHONPATH`, or run notebooks from an envir
 uv run pytest
 ```
 
-Covers PIT membership, calendar features, reproducibility, training utilities (purged splits, rank labels, both Optuna objectives), both backtest engines (NAV compounding, rank-decay exits, VIX scaling), relative-return metrics, portfolio management (fixed and rank-hold order generation), execution parity, macro merge, data providers, and the inference pipeline (`tests/`, 150+ tests).
+Covers PIT membership, calendar features, reproducibility, training utilities (purged splits, rank labels, both Optuna objectives), both backtest engines (NAV compounding, rank-decay exits, VIX scaling), relative-return metrics, portfolio management (fixed and rank-hold order generation), execution parity, macro merge, data providers, and the inference pipeline (`tests/`, 200+ tests).
 
 ## Reproducibility (snapshots + manifest)
 
@@ -622,15 +636,19 @@ src/stock_predictor/
   data_provider.py       Provider protocol + factory
   providers/             yfinance + Tiingo/FRED implementations
   universe.py            Seeded ticker sampling + download coverage guard
+  signal_depth.py        Selection-depth diagnostics (does the top of the ranking work?)
+  stats.py               HAC / Newey-West helpers
   repro.py               Run manifests, hashing, Parquet snapshots
 scripts/
   run_pipeline.sh        train-full / backtest / predict orchestration
   backtest_sweep.py      Variant grids (default / vix / hold) + relative tables
+  grid_search_sharpe.py  Config grid ranked by Sharpe, with alpha t-stats
+  signal_depth.py        Selection-depth / rank-IC / alpha-ladder diagnostics
 train_sp500.py           Thin launcher → cli
 backtest.py              Thin launcher → backtest
 sp500_pit.py             Notebook shim → pit
 calendar_features.py     Notebook shim → calendar_features
-tests/                   pytest suite (150+ tests)
+tests/                   pytest suite (200+ tests)
 notebooks/               Exploration + full pipeline
 ```
 
@@ -644,9 +662,40 @@ notebooks/               Exploration + full pipeline
 
 ## Limitations
 
-- **Stale artifacts.** Any `wf_scored.parquet` or report under `artifacts/` produced before the universe fix was built on an **alphabetically truncated** universe (`--sample-n` used to slice a sorted ticker list, so a 500-cap run covered roughly A–POOL) and with features computed *after* the PIT filter. Regenerate them before drawing any conclusion from the numbers.
+- **Stale artifacts.** Any `wf_scored.parquet` or report produced before the universe fix was built on an **alphabetically truncated** universe (`--sample-n` sliced a sorted ticker list, so a 500-cap run covered roughly A–POOL) with features computed *after* the PIT filter. Those panels are not comparable to current ones — on the same rules, the truncated panel showed +76.6% and Sharpe 1.05 where the corrected panel shows +22.2% and Sharpe 0.16. Regenerate before drawing any conclusion.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
-- **Honest results disclosure:** in our own evaluations on 2019–2026 walk-forward data with this pipeline (purged splits, cost-inclusive NAV, sub-window checks), **no configuration produced statistically significant CAPM alpha vs SPY** (all |t| < 1). The model shows real cross-sectional ranking skill — roughly enough to pay its own trading costs against an equal-weight benchmark — and configurations that beat SPY on raw return did so via higher market beta, not skill. Treat any better-looking result you produce with this repo with the same suspicion: check the alpha t-stat and re-test on a sub-window the configuration has never seen.
+- **Honest results disclosure.** On a corrected 2023–2026 walk-forward panel (544 tickers spanning the full alphabet, 100% of current index members, features staged before the PIT filter, purged splits, cost-inclusive NAV, HAC alpha t-stats, `--rf-rate 0.045`), **this model has no demonstrable stock-selection skill at the top of its ranking — the only part the strategy trades.**
+
+  Baseline `--top-n 15`: total return **+22.2%** against **+105.2%** for SPY and **+61.5%** for equal-weight RSP over the same sessions; Sharpe **0.16**; max drawdown **−27.7%**. CAPM alpha is **−12.6% (HAC t = −1.64)** vs SPY and **−7.5% (t = −0.97)** vs RSP. Against the equal-weight benchmark — the fair comparison for an equal-weighted strategy, especially across a mega-cap-dominated tape — that is statistically indistinguishable from zero. It is *no skill*, not proven harm.
+
+  The diagnostic that matters is how alpha responds to conviction. A ranker with skill earns more alpha as you concentrate. This one earns less:
+
+  | `--top-n` | CAPM alpha vs SPY | HAC t |
+  |---|---|---|
+  | 5 | −23.6% | −2.11 |
+  | 10 | −17.9% | −2.09 |
+  | 15 | −12.6% | −1.64 |
+  | 25 | −10.0% | −1.51 |
+  | 50 | −6.1% | −1.12 |
+
+  Mean 10-day forward return by selection depth (equal-weighted, before costs) shows why — the extreme top of the ranking is the worst part of it:
+
+  | Bucket | Mean 10d fwd return | vs universe | HAC t |
+  |---|---|---|---|
+  | top 5 | −0.2393% | −0.81% | −1.57 |
+  | top 10 | +0.2931% | −0.28% | −0.65 |
+  | top 15 | +0.4423% | −0.13% | −0.34 |
+  | top 25 | +0.5703% | −0.00% | −0.01 |
+  | top 50 | +0.7176% | +0.14% | +0.61 |
+  | top 100 | +0.6892% | +0.12% | +0.67 |
+  | bottom 100 | +0.4072% | −0.17% | −1.25 |
+  | universe | +0.5730% | — | — |
+
+  No single bucket clears |t| = 2 on its own, so read the *ordering*, not any one row: forward return rises monotonically from the top of the list down to the top-50 band, then falls away again. Rank IC is **+0.0082 (HAC t = +0.49)** — indistinguishable from noise. The earlier claim that this model showed "real cross-sectional ranking skill, roughly enough to pay its own trading costs" did not survive the universe and feature-staging fixes.
+
+  Reproduce all of the above on any panel with [`scripts/signal_depth.py`](scripts/signal_depth.py) — this disclosure is meant to be re-derived, not trusted.
+
+  Configurations that look good still get there through beta. `--mode rank-hold --exit-rank 100` returns **+97%** (Sharpe 0.65) with **beta 1.40** and alpha **−6.7%** — leverage, not selection. Treat any better-looking result you produce here with the same suspicion: read the HAC alpha t-stat and the beta column, compare against RSP as well as SPY, and re-test on a sub-window the configuration has never seen.
 - **Sector labels** are a pragmatic blend of current Wikipedia GICS and a fixed override; they are not a perfect point-in-time sector history for every ticker-date.
 - **Earnings** come from Yahoo as-of download time; the feature is not a fully audited point-in-time fundamental database.
 - **Delisted tickers**: Yahoo no longer serves many departed S&P members (~90–140 depending on the window), so even with PIT membership the price panel has survivorship bias that flatters results. A Tiingo key recovers most of them.

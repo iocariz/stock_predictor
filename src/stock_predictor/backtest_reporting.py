@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 
 from stock_predictor.backtest import BacktestResult, daily_risk_free
+from stock_predictor.stats import auto_hac_lags as _auto_hac_lags
+from stock_predictor.stats import hac_ols as _hac_ols
 
 # ---------------------------------------------------------------------------
 # Formatting helpers
@@ -39,33 +41,6 @@ def _fmt_dollar(v: float) -> str:
 # ---------------------------------------------------------------------------
 # Relative-return (active vs benchmark) metrics
 # ---------------------------------------------------------------------------
-
-
-def _auto_hac_lags(n: int) -> int:
-    """Newey–West's rule of thumb: floor(4 * (n/100)^(2/9))."""
-    if n < 2:
-        return 0
-    return int(np.floor(4.0 * (n / 100.0) ** (2.0 / 9.0)))
-
-
-def _hac_ols(y: np.ndarray, X: np.ndarray, lags: int) -> tuple[np.ndarray, np.ndarray]:
-    """OLS coefficients with a Newey–West HAC covariance matrix.
-
-    *X* must already include an intercept column. The Bartlett kernel weights
-    autocovariance j by ``1 - j/(lags+1)``, which keeps the estimate positive
-    semi-definite.
-    """
-    n, k = X.shape
-    xtx_inv = np.linalg.pinv(X.T @ X)
-    beta = xtx_inv @ X.T @ y
-    resid = y - X @ beta
-
-    xe = X * resid[:, None]
-    s = xe.T @ xe
-    for j in range(1, min(lags, n - 1) + 1):
-        gamma = xe[j:].T @ xe[:-j]
-        s = s + (1.0 - j / (lags + 1.0)) * (gamma + gamma.T)
-    return beta, xtx_inv @ s @ xtx_inv
 
 
 def relative_metrics(
