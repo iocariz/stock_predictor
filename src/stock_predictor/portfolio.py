@@ -160,6 +160,30 @@ def held_tickers(state: PortfolioState, as_of: str) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
+def _long_only_weights(probs: np.ndarray, weighting: str) -> np.ndarray:
+    """Non-negative weights summing to 1 (parity with the backtest engine).
+
+    See :func:`stock_predictor.backtest._compute_weights`: normalizing signed
+    lambdarank scores by their sum produces short positions and unbounded
+    leverage, so those inputs are rejected rather than traded.
+    """
+    n = len(probs)
+    if n == 0:
+        return np.zeros(0, dtype=float)
+    if weighting != "probability":
+        return np.ones(n, dtype=float) / n
+    if np.any(probs < 0):
+        raise ValueError(
+            "weighting='probability' requires non-negative scores, got "
+            f"min={float(np.min(probs)):.6g}. Raw lambdarank scores are not "
+            "probabilities — use weighting='equal' with --rank-objective models."
+        )
+    total = float(probs.sum())
+    if not np.isfinite(total) or total <= 0:
+        return np.ones(n, dtype=float) / n
+    return probs / total
+
+
 def generate_orders(
     state: PortfolioState,
     picks: list[dict],
@@ -175,6 +199,7 @@ def generate_orders(
     commission_per_share: float = 0.0,
     commission_per_order: float = 0.0,
     allow_buys: bool = True,
+    allow_duplicate_holdings: bool = True,
 ) -> tuple[tuple[Order, ...], PortfolioState]:
     """
     Sell expired positions, then open a new cohort if a slot is free.
@@ -187,12 +212,20 @@ def generate_orders(
       trading sessions after that day (same offset as the backtest exit).
       *trading_dates* ends at the current session, so the calendar is extended
       with future business days to place entry and expiry.
+    - The new cohort is funded with ``free_cash / free_slots``, the same rule
+      the backtest uses, so a portfolio with one of two slots open deploys all
+      of its free cash rather than half of it.
     - *weighting* ``equal`` or ``probability`` matches cohort weights; lots use
       integer shares so dollar weights are approximate vs a fractional backtest.
     -     *trading_dates* should be the sorted unique session dates from the price
       index used for scoring (see :func:`stock_predictor.execution_calendar.trading_dates_from_index`).
     *allow_buys* — set False when a risk kill-switch is active so expiries still
       liquidate but no new cohort opens (avoids persisting buys while halted).
+    *allow_duplicate_holdings* — defaults to ``True`` for parity with the
+      cohort backtest, which lets a persistently top-ranked name sit in two
+      overlapping cohorts at double weight. Set ``False`` to cap each ticker
+      at one lot, accepting that live will then under-weight names the
+      simulation kept buying.
     """
     if weighting not in ("equal", "probability"):
         raise ValueError(f"weighting must be 'equal' or 'probability', got {weighting!r}")
@@ -229,11 +262,16 @@ def generate_orders(
 
     if available_slots > 0 and allow_buys:
         capital_available = state.cash + cash_from_sells
-        cap_per_cohort = capital_available / max_cohorts
+        # Divide by *free* slots, matching the backtest's `cash / free_slots`.
+        # Dividing by max_cohorts under-deploys whenever a slot is occupied —
+        # at steady state one always is, so the shortfall never gets invested.
+        cap_per_cohort = capital_available / available_slots
         cohort_id = uuid.uuid4().hex[:8]
 
-        # Filter picks: exclude already-held tickers, take top_n
-        eligible = [p for p in picks if p["ticker"] not in already_held][:top_n]
+        eligible = list(picks)
+        if not allow_duplicate_holdings:
+            eligible = [p for p in eligible if p["ticker"] not in already_held]
+        eligible = eligible[:top_n]
         # Extend the calendar past the last downloaded session so entry (next
         # trading day after as_of) and expiry (holding_days sessions later)
         # always exist — the raw price calendar ends "today".
@@ -245,13 +283,11 @@ def generate_orders(
             else None
         )
         if eligible and entry is not None and expiry_iso is not None:
-            n = len(eligible)
             probs = np.array([float(p.get("prob", 1.0)) for p in eligible], dtype=float)
-            if weighting == "equal":
-                wts = np.ones(n, dtype=float) / n
-            else:
-                s = float(probs.sum())
-                wts = probs / s if s > 0 else np.ones(n, dtype=float) / n
+            # Mirrors backtest._compute_weights: signed (lambdarank) scores
+            # would otherwise yield negative dollar targets and, when they
+            # nearly cancel, absurd position sizes.
+            wts = _long_only_weights(probs, weighting)
 
             entry_iso = entry.strftime("%Y-%m-%d")
             for pick, w in zip(eligible, wts, strict=True):

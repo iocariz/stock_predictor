@@ -20,10 +20,14 @@ import pandas as pd
 
 from stock_predictor.execution_calendar import next_trading_day, offset_trading_days
 
-
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+
+
+# US cash proxy used when a panel carries no realized rate. Chosen as a
+# round mid-2020s short-rate level; pass --rf-rate explicitly for other eras.
+DEFAULT_RISK_FREE_RATE = 0.045
 
 
 @dataclass(frozen=True)
@@ -51,6 +55,31 @@ class BacktestConfig:
     """Rank-hold mode only (:func:`run_rank_hold_backtest`): sell a held name
     when its cross-sectional rank decays beyond this (or it leaves the scored
     universe). Must be >= top_n; larger values -> lower turnover."""
+    risk_free_rate: float | None = None
+    """Annualized risk-free rate for Sharpe and Sortino, or ``None`` to infer.
+
+    A zero funding assumption flatters every risk-adjusted metric, so funding
+    costs are on by default. Resolution order:
+
+    1. An explicit float here always wins (``0.0`` switches funding off).
+    2. Otherwise the panel's realized ``irx_yield`` (13-week T-bill, quoted in
+       percent) is charged per date — correct across regimes, and what
+       walk-forward panels carry.
+    3. Otherwise :data:`DEFAULT_RISK_FREE_RATE`, a US cash proxy.
+
+    Total return, CAGR and drawdown are unaffected. The rate actually applied
+    is printed in the report header and returned as
+    ``metrics["risk_free_rate_used"]``."""
+    min_prob: float | None = None
+    """Score floor: never buy a name scoring below this, even if it is in the
+    top_n. Baskets shrink (weights renormalize over survivors) and a date with
+    no eligible name simply does not trade. ``None`` disables the floor.
+
+    The floor is compared against the panel's raw ``prob`` column. For a
+    classifier that is a probability, but ``scale_pos_weight`` leaves it
+    uncalibrated, and for ``--rank-objective`` it is an unbounded lambdarank
+    score — so a threshold is only comparable across runs of the same model
+    family and configuration."""
 
     def __post_init__(self) -> None:
         if self.weighting not in ("equal", "probability"):
@@ -68,6 +97,15 @@ class BacktestConfig:
             raise ValueError(f"rebalance_day must be one of {valid_days}, got {self.rebalance_day!r}")
         if self.commission_per_share < 0 or self.commission_per_order < 0:
             raise ValueError("commission_per_share and commission_per_order must be >= 0")
+        if self.risk_free_rate is not None and (
+            not np.isfinite(self.risk_free_rate) or not -0.01 <= self.risk_free_rate <= 1.0
+        ):
+            raise ValueError(
+                f"risk_free_rate must be None or an annual rate in [-0.01, 1.0], "
+                f"got {self.risk_free_rate!r}"
+            )
+        if self.min_prob is not None and not np.isfinite(self.min_prob):
+            raise ValueError(f"min_prob must be a finite number or None, got {self.min_prob!r}")
 
 
 @dataclass(frozen=True)
@@ -130,12 +168,31 @@ def _get_rebalance_dates(
 
 
 def _compute_weights(probs: np.ndarray, weighting: str) -> np.ndarray:
-    if weighting == "probability":
-        total = probs.sum()
-        if total > 0:
-            return probs / total
-        return np.ones(len(probs)) / len(probs)
-    return np.ones(len(probs)) / len(probs)
+    """Long-only portfolio weights summing to 1.
+
+    ``probability`` weighting normalizes scores by their sum, which is only
+    meaningful for non-negative scores. Raw lambdarank output straddles zero:
+    ``p / sum(p)`` then yields negative weights (an implicit short in a
+    long-only book) and, when the scores nearly cancel, unbounded leverage —
+    e.g. ``[1.0, -0.99, 0.01]`` produced ``[50.0, -49.5, 0.5]``. Reject those
+    inputs instead of silently trading them.
+    """
+    n = len(probs)
+    if n == 0:
+        return np.zeros(0)
+    if weighting != "probability":
+        return np.ones(n) / n
+    if np.any(probs < 0):
+        raise ValueError(
+            "weighting='probability' requires non-negative scores, got "
+            f"min={float(np.min(probs)):.6g}. Raw lambdarank scores are not "
+            "probabilities — use weighting='equal' with --rank-objective "
+            "models, or a classifier whose scores are in [0, 1]."
+        )
+    total = float(probs.sum())
+    if not np.isfinite(total) or total <= 0:
+        return np.ones(n) / n
+    return probs / total
 
 
 def _apply_slippage(price: float, slippage_bps: float, direction: int) -> float:
@@ -180,6 +237,8 @@ def _build_cohort(
     if exit_date is None:
         return None
 
+    if config.min_prob is not None:
+        scored_day = scored_day[scored_day["prob"] >= config.min_prob]
     top = scored_day.nlargest(config.top_n, "prob")
     if len(top) == 0:
         return None
@@ -310,9 +369,46 @@ def _build_daily_nav(
 # ---------------------------------------------------------------------------
 
 
+# Below this, a return series is constant to floating-point precision and
+# risk-adjusted ratios are noise amplification rather than signal.
+_FLAT_EPS = 1e-12
+
+
+def daily_risk_free(annual_rate: float) -> float:
+    """Compounded daily equivalent of an annualized rate."""
+    if not annual_rate:
+        return 0.0
+    return (1.0 + annual_rate) ** (1.0 / 252.0) - 1.0
+
+
+def _panel_risk_free(df: pd.DataFrame) -> pd.Series | None:
+    """Realized annualized cash rate per date, from a carried ``irx_yield``.
+
+    yfinance and FRED both quote the 13-week bill in percent (4.5 = 4.5%).
+    Returns ``None`` when the panel has no usable rate column.
+    """
+    if "irx_yield" not in df.columns:
+        return None
+    by_date = df.groupby("date", sort=True)["irx_yield"].first().astype(float)
+    by_date = by_date.ffill().bfill()
+    if by_date.isna().all():
+        return None
+    return by_date / 100.0
+
+
+def _daily_excess(daily_ret: pd.Series, risk_free: float | pd.Series) -> pd.Series:
+    """Return series net of the funding charge (scalar or per-date rate)."""
+    if isinstance(risk_free, pd.Series):
+        rf = risk_free.reindex(daily_ret.index).ffill().bfill().fillna(0.0)
+        return daily_ret - ((1.0 + rf) ** (1.0 / 252.0) - 1.0)
+    return daily_ret - daily_risk_free(risk_free)
+
+
 def _compute_metrics(
     nav: pd.Series,
     cohorts: list[Cohort],
+    *,
+    risk_free_rate: float | pd.Series = 0.0,
 ) -> dict[str, float]:
     daily_ret = nav.pct_change().dropna()
     n_days = len(daily_ret)
@@ -320,11 +416,14 @@ def _compute_metrics(
         return {}
     total_ret = nav.iloc[-1] / nav.iloc[0] - 1
     cagr = (nav.iloc[-1] / nav.iloc[0]) ** (252 / max(n_days, 1)) - 1
-    mean_r = daily_ret.mean()
-    std_r = daily_ret.std()
-    sharpe = (mean_r / std_r * np.sqrt(252)) if std_r > 0 else float("nan")
-    downside = daily_ret[daily_ret < 0].std()
-    sortino = (mean_r / downside * np.sqrt(252)) if downside > 0 else float("nan")
+    # Sharpe and Sortino are excess-return statistics; total return, CAGR and
+    # drawdown deliberately stay on raw returns.
+    excess = _daily_excess(daily_ret, risk_free_rate)
+    mean_r = excess.mean()
+    std_r = excess.std()
+    sharpe = (mean_r / std_r * np.sqrt(252)) if std_r > _FLAT_EPS else float("nan")
+    downside = excess[excess < 0].std()
+    sortino = (mean_r / downside * np.sqrt(252)) if downside > _FLAT_EPS else float("nan")
     drawdown = nav / nav.cummax() - 1
     max_dd = drawdown.min()
     calmar = (cagr / abs(max_dd)) if max_dd < 0 else float("nan")
@@ -333,7 +432,13 @@ def _compute_metrics(
     n_cohorts = len(cohorts)
     win_rate = wins / n_cohorts if n_cohorts > 0 else float("nan")
 
+    rate_used = (
+        float(risk_free_rate.reindex(daily_ret.index).ffill().bfill().mean())
+        if isinstance(risk_free_rate, pd.Series)
+        else float(risk_free_rate)
+    )
     return {
+        "risk_free_rate_used": rate_used,
         "total_return": total_ret,
         "cagr": cagr,
         "sharpe": sharpe,
@@ -430,12 +535,51 @@ def _prepare_scored(
 
 
 def _vix_percentile_by_date(df: pd.DataFrame, config: BacktestConfig) -> pd.Series | None:
-    """Per-date VIX percentile when the config uses regime filtering/scaling."""
-    if "vix_percentile" in df.columns and (
-        config.vix_filter_percentile is not None or config.vix_scale_exposure
-    ):
-        return df.groupby("date", sort=False)["vix_percentile"].first()
-    return None
+    """Per-date VIX percentile when the config uses regime filtering/scaling.
+
+    Raises when a regime option is requested but the panel cannot support it.
+    Returning ``None`` here used to make ``--vix-filter`` and
+    ``vix_scale_exposure`` silent no-ops: a sweep over VIX thresholds printed
+    a table of identical rows, inviting the conclusion that regime filtering
+    does not help when in fact it never ran.
+    """
+    wants_vix = config.vix_filter_percentile is not None or config.vix_scale_exposure
+    if not wants_vix:
+        return None
+    if "vix_percentile" not in df.columns:
+        requested = []
+        if config.vix_filter_percentile is not None:
+            requested.append(f"vix_filter_percentile={config.vix_filter_percentile}")
+        if config.vix_scale_exposure:
+            requested.append("vix_scale_exposure=True")
+        raise ValueError(
+            f"{' and '.join(requested)} requires a 'vix_percentile' column, but "
+            f"the scored panel has none (columns: {sorted(df.columns)}). "
+            "Re-export the walk-forward panel from a training run whose macro "
+            "features loaded, or drop the VIX options."
+        )
+    by_date = df.groupby("date", sort=False)["vix_percentile"].first()
+    if by_date.isna().all():
+        raise ValueError(
+            "'vix_percentile' column is present but entirely NaN, so the VIX "
+            "regime options would have no effect. Check the macro merge in the "
+            "training run that produced this panel."
+        )
+    return by_date
+
+
+def _validate_weighting(df: pd.DataFrame, config: BacktestConfig) -> None:
+    """Reject probability weighting on a panel of signed (ranker) scores."""
+    if config.weighting != "probability":
+        return
+    worst = float(df["prob"].min())
+    if worst < 0:
+        raise ValueError(
+            f"weighting='probability' requires non-negative scores, but the "
+            f"panel's 'prob' column reaches {worst:.6g}. This looks like a "
+            "lambdarank model (--rank-objective), whose raw scores are not "
+            "probabilities. Use weighting='equal' instead."
+        )
 
 
 def _vix_exposure_scale(
@@ -450,12 +594,21 @@ def _vix_exposure_scale(
     return min(1.0, max(0.0, 2.0 * (1.0 - v)))
 
 
+def _resolve_risk_free(df: pd.DataFrame, config: BacktestConfig) -> float | pd.Series:
+    """An explicit rate wins; else the panel's realized rate; else the default."""
+    if config.risk_free_rate is not None:
+        return config.risk_free_rate
+    series = _panel_risk_free(df)
+    return DEFAULT_RISK_FREE_RATE if series is None else series
+
+
 def _benchmark_leg(
     config: BacktestConfig,
     daily_nav: pd.Series,
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
     provider: object | None,
+    risk_free: float | pd.Series = 0.0,
 ) -> tuple[pd.Series, pd.Series, dict[str, float]]:
     """Download, align, and score the buy-and-hold benchmark leg."""
     spy_nav = pd.Series(dtype=float)
@@ -475,7 +628,10 @@ def _benchmark_leg(
         )
     spy_nav = _align_benchmark_to_nav(raw_nav, daily_nav.index, config.initial_capital)
     spy_ret = spy_nav.pct_change().dropna()
-    spy_metrics = _compute_metrics(spy_nav, []) if len(spy_nav) > 1 else {}
+    spy_metrics = (
+        _compute_metrics(spy_nav, [], risk_free_rate=risk_free)
+        if len(spy_nav) > 1 else {}
+    )
     if not spy_metrics:
         usable = int(spy_nav.notna().sum()) if len(spy_nav) else 0
         if not raw_nav.empty and usable == 0:
@@ -500,6 +656,8 @@ def run_backtest(
 ) -> BacktestResult:
     """Run the weekly-rebalance cohort backtest on walk-forward scored data."""
     df, trading_dates, price_panel = _prepare_scored(scored_df)
+    _validate_weighting(df, config)
+    risk_free = _resolve_risk_free(df, config)
 
     rebalance_dates = _get_rebalance_dates(trading_dates, config.rebalance_day)
     vix_by_date = _vix_percentile_by_date(df, config)
@@ -548,12 +706,12 @@ def run_backtest(
     daily_returns = daily_nav.pct_change().dropna()
 
     # Metrics
-    metrics = _compute_metrics(daily_nav, cohorts)
+    metrics = _compute_metrics(daily_nav, cohorts, risk_free_rate=risk_free)
 
     start_date = pd.Timestamp(trading_dates[0])
     end_date = pd.Timestamp(trading_dates[-1])
     spy_nav, spy_ret, spy_metrics = _benchmark_leg(
-        config, daily_nav, start_date, end_date, provider,
+        config, daily_nav, start_date, end_date, provider, risk_free,
     )
 
     return BacktestResult(
@@ -600,6 +758,8 @@ def run_rank_hold_backtest(
     includes entry costs of positions still open at the end.
     """
     df, trading_dates, price_panel = _prepare_scored(scored_df)
+    _validate_weighting(df, config)
+    risk_free = _resolve_risk_free(df, config)
     n_days = len(trading_dates)
     nav_index = pd.DatetimeIndex(trading_dates)
     rebalance_dates = _get_rebalance_dates(trading_dates, config.rebalance_day)
@@ -675,7 +835,15 @@ def run_rank_hold_backtest(
             continue
         per = budget / slots
         bought = 0
-        for t in ranked_tickers:
+        # The score floor gates *buys* only; exits stay governed by exit_rank
+        # so a held name is never stranded by a threshold change.
+        buy_candidates = ranked_tickers
+        if config.min_prob is not None:
+            eligible = set(
+                scored_day.loc[scored_day["prob"] >= config.min_prob, "ticker"]
+            )
+            buy_candidates = [t for t in ranked_tickers if t in eligible]
+        for t in buy_candidates:
             if bought >= slots:
                 break
             if t in open_pos or t not in price_panel.columns:
@@ -723,14 +891,14 @@ def run_rank_hold_backtest(
     daily_nav = pd.Series(cash_series + invested, index=nav_index, dtype=float)
     daily_returns = daily_nav.pct_change().dropna()
 
-    metrics = _compute_metrics(daily_nav, closed)
+    metrics = _compute_metrics(daily_nav, closed, risk_free_rate=risk_free)
     metrics["total_costs"] = total_costs  # include open positions' entry costs
     metrics["n_open_positions"] = float(len(open_pos))
 
     start_date = pd.Timestamp(trading_dates[0])
     end_date = pd.Timestamp(trading_dates[-1])
     spy_nav, spy_ret, spy_metrics = _benchmark_leg(
-        config, daily_nav, start_date, end_date, provider,
+        config, daily_nav, start_date, end_date, provider, risk_free,
     )
 
     return BacktestResult(
@@ -805,6 +973,24 @@ def main() -> None:
         default=0.0,
         help="Flat commission per ticker per buy or sell order (0=off)",
     )
+    p.add_argument(
+        "--min-prob",
+        type=float,
+        default=None,
+        dest="min_prob",
+        help="Score floor: never buy a name scoring below this (default: off). "
+        "Compared against the panel's raw 'prob' column, which is uncalibrated "
+        "for classifiers and unbounded for --rank-objective models",
+    )
+    p.add_argument(
+        "--rf-rate",
+        type=float,
+        default=None,
+        dest="rf_rate",
+        help="Annualized risk-free rate for Sharpe/Sortino (e.g. 0.045). "
+        "Default: charge the panel's realized irx_yield per date when present, "
+        "else 4.5%%. Pass 0 to switch funding costs off",
+    )
     p.add_argument("--capital", type=float, default=100_000.0)
     p.add_argument("--max-cohorts", type=int, default=2)
     p.add_argument("--vix-filter", type=float, default=None, help="Skip rebalance if VIX pct > this")
@@ -866,6 +1052,8 @@ def main() -> None:
         commission_per_share=args.commission_per_share,
         commission_per_order=args.commission_per_order,
         exit_rank=args.exit_rank,
+        min_prob=args.min_prob,
+        risk_free_rate=args.rf_rate,
     )
     backtest_fn = run_rank_hold_backtest if args.mode == "rank-hold" else run_backtest
     result = backtest_fn(scored, config, provider=bt_provider)

@@ -30,3 +30,6 @@ portfolio_state.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Stray output from `nohup ... &` runs
+nohup.out

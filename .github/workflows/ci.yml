@@ -1,0 +1,129 @@
+# Fast checks on every push and pull request.
+#
+# Deliberately network-free: the test suite stubs every data provider, so CI
+# never depends on Yahoo, FRED, or Wikipedia being up. The long-running
+# training and sweep workflows stay on workflow_dispatch / schedule.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch supersedes an in-flight run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.9.9"
+  RUFF_VERSION: "0.16.3"
+
+jobs:
+  test:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # requires-python is >=3.12; 3.13 catches deprecations early.
+        python-version: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync dependencies
+        # --extra tiingo installs fredapi so the Tiingo/FRED provider tests
+        # actually run instead of skipping.
+        run: uv sync --frozen --extra dev --extra tiingo --python ${{ matrix.python-version }}
+
+      - name: Run tests
+        run: uv run --python ${{ matrix.python-version }} pytest -q --durations=10
+
+  lint:
+    name: ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Lint
+        run: uvx ruff@${{ env.RUFF_VERSION }} check src/ tests/ scripts/
+
+      - name: Check formatting drift (advisory)
+        continue-on-error: true
+        run: uvx ruff@${{ env.RUFF_VERSION }} format --diff src/ tests/ scripts/
+
+  smoke:
+    name: pipeline smoke (offline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Sync dependencies
+        run: uv sync --frozen --extra dev
+
+      # Catches the class of breakage that shipped twice in this repo: a
+      # script referencing config fields that do not exist. --help alone
+      # imports the module and builds the parser, which is enough.
+      - name: CLI entry points import and parse
+        run: |
+          uv run train-sp500 --help > /dev/null
+          uv run backtest-sp500 --help > /dev/null
+          uv run predict-sp500 --help > /dev/null
+          uv run python scripts/backtest_sweep.py --help > /dev/null
+          uv run python scripts/grid_search_sharpe.py --help > /dev/null
+          uv run python scripts/signal_depth.py --help > /dev/null
+
+      - name: Backtest and diagnostics on a synthetic panel
+        run: |
+          uv run python - <<'PY'
+          import numpy as np, pandas as pd
+          dates = pd.bdate_range("2024-01-01", periods=120)
+          rng = np.random.default_rng(0)
+          n = 40
+          px = 100 * np.exp(np.cumsum(rng.normal(0.0004, 0.012, (len(dates), n)), axis=0))
+          rows = [
+              {
+                  "date": d, "ticker": f"T{i:02d}",
+                  "prob": float(rng.random()),
+                  "adj_close": float(px[di, i]),
+                  "fwd_ret": float(rng.normal(0.004, 0.03)),
+                  "vix_percentile": 0.4,
+              }
+              for di, d in enumerate(dates)
+              for i in range(n)
+          ]
+          pd.DataFrame(rows).to_parquet("ci_panel.parquet", index=False)
+          PY
+          uv run backtest-sp500 ci_panel.parquet --no-benchmark --rf-rate 0.045
+          uv run backtest-sp500 ci_panel.parquet --no-benchmark --mode rank-hold --exit-rank 25
+          uv run backtest-sp500 ci_panel.parquet --no-benchmark --min-prob 0.6
+          uv run python scripts/signal_depth.py ci_panel.parquet --no-benchmark --buckets 5,15

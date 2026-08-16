@@ -6,9 +6,9 @@ import pytest
 
 from stock_predictor.training import (
     _inner_train_val_split,
+    add_cross_sectional_ranks,
     add_price_features,
     add_regime_features,
-    add_cross_sectional_ranks,
     build_labeled_panel,
     monthly_walk_forward,
     precision_at_k,

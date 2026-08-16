@@ -8,9 +8,8 @@ import pandas as pd
 import pytest
 
 from stock_predictor.portfolio import (
-    Order,
-    Position,
     PortfolioState,
+    Position,
     active_cohort_ids,
     check_kill_switch,
     find_expiring_positions,
@@ -158,7 +157,13 @@ def test_generate_orders_no_buys_when_slots_full() -> None:
     assert len(buys) == 0  # both slots occupied, no expirations
 
 
-def test_generate_orders_excludes_held_tickers() -> None:
+def test_generate_orders_excludes_held_tickers_when_capped() -> None:
+    """With --one-lot-per-ticker the live path skips a name already held.
+
+    The default is the opposite (parity with the cohort backtest, which lets a
+    persistently top-ranked name sit in two overlapping cohorts) — see
+    tests/test_execution_parity.py.
+    """
     p1 = Position("NVDA", 10, 100.0, "2024-01-15", "2024-01-30", "active_cohort")
     state = PortfolioState(
         initial_capital=100_000.0,
@@ -174,7 +179,7 @@ def test_generate_orders_excludes_held_tickers() -> None:
     orders, _ = generate_orders(
         state, picks, prices,
         top_n=1, max_cohorts=2, holding_days=10, slippage_bps=5.0, as_of="2024-01-20",
-        trading_dates=_TD,
+        trading_dates=_TD, allow_duplicate_holdings=False,
     )
     buys = [o for o in orders if o.action == "BUY"]
     buy_tickers = {o.ticker for o in buys}

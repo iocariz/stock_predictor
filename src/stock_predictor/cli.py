@@ -13,9 +13,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd
 
-from stock_predictor.data_provider import get_provider
-from stock_predictor.pit import SP500_STINTS_URL, load_sp500_stints, tickers_overlapping_window
 from stock_predictor import repro
+from stock_predictor.data_provider import get_provider
+from stock_predictor.pit import (
+    SP500_STINTS_URL,
+    current_members,
+    load_sp500_stints,
+    tickers_overlapping_window,
+)
 from stock_predictor.training import (
     build_feature_panel,
     build_labeled_panel,
@@ -28,7 +33,11 @@ from stock_predictor.training import (
     select_training_rows,
     train_final_model,
     train_final_rank_model,
-    wide_field,
+)
+from stock_predictor.universe import (
+    DEFAULT_MIN_COVERAGE,
+    check_download_coverage,
+    sample_tickers,
 )
 
 
@@ -38,7 +47,33 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--end", default=None, help="Price download end (YYYY-MM-DD); default: today")
     p.add_argument("--train-end", default="2022-12-31", dest="train_end")
     p.add_argument("--test-start", default="2023-01-01", dest="test_start")
-    p.add_argument("--sample-n", type=int, default=500, dest="sample_n")
+    p.add_argument(
+        "--sample-n",
+        type=int,
+        default=500,
+        dest="sample_n",
+        help="Cap the universe at this many tickers, drawn as a seeded RANDOM "
+        "sample (not an alphabetical prefix). Use a large value (e.g. 10000) "
+        "for the full universe",
+    )
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        dest="batch_size",
+        help="Symbols per yfinance request (default 100). Lower it if Yahoo "
+        "throttles a large universe; no effect with --provider tiingo",
+    )
+    p.add_argument(
+        "--min-coverage",
+        type=float,
+        default=DEFAULT_MIN_COVERAGE,
+        dest="min_coverage",
+        help="Fail the run if the price download returns fewer than this "
+        "fraction of the CURRENT index members. Departed members that the "
+        "vendor no longer serves are reported as a survivorship gap, not "
+        "gated (0 = never fail, warn only)",
+    )
     p.add_argument("--horizon", type=int, default=10)
     p.add_argument("--threshold", type=float, default=0.05)
     p.add_argument("--no-optuna", action="store_true", help="Skip Optuna hyperparameter search")
@@ -101,7 +136,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    provider = get_provider(args.provider)
+    provider = get_provider(args.provider, batch_size=args.batch_size)
     start, end = args.start, args.end
     train_end, test_start = args.train_end, args.test_start
     horizon, threshold = args.horizon, args.threshold
@@ -123,6 +158,7 @@ def main() -> None:
                 "train_end": train_end,
                 "test_start": test_start,
                 "sample_n": args.sample_n,
+                "min_coverage": args.min_coverage,
                 "horizon": horizon,
                 "threshold": threshold,
                 "skip_earnings": args.skip_earnings,
@@ -139,8 +175,14 @@ def main() -> None:
     stints = load_sp500_stints(SP500_STINTS_URL)
     tickers = tickers_overlapping_window(stints, start, end)
     print(f"  Union tickers overlapping window: {len(tickers)}")
-    sample = tickers[: args.sample_n]
-    print(f"  Downloading {len(sample)} tickers (sample-n cap)…")
+    sample = sample_tickers(tickers, args.sample_n, seed=args.seed)
+    if len(sample) < len(tickers):
+        print(
+            f"  Downloading {len(sample)} tickers "
+            f"(seeded random sample, seed={args.seed})…"
+        )
+    else:
+        print(f"  Downloading all {len(sample)} tickers…")
 
     if manifest is not None and snapshot_root is not None:
         meta = repro.snapshot_parquet(stints, snapshot_root / "stints.parquet")
@@ -149,6 +191,18 @@ def main() -> None:
 
     adj_close, volume = provider.download_equity_ohlcv(sample, start, end)
     print(f"  adj_close shape: {adj_close.shape}")
+    coverage = check_download_coverage(
+        sample, adj_close,
+        min_coverage=args.min_coverage,
+        active=current_members(stints),
+        label="equity download",
+    )
+    if manifest is not None:
+        manifest["universe"] = {
+            "requested": len(sample),
+            "union_overlapping_window": len(tickers),
+            "coverage": coverage,
+        }
 
     if manifest is not None and snapshot_root is not None:
         long_px = repro.wide_prices_to_long(adj_close, volume)
@@ -156,12 +210,16 @@ def main() -> None:
         repro.register_snapshot(manifest, "equity_prices_long", meta)
         repro.write_manifest(snapshot_root / "manifest.json", manifest)
 
-    labeled = build_labeled_panel(adj_close, stints, horizon, threshold)
+    # PIT filtering is deferred to build_feature_panel so per-ticker rolling
+    # features see each symbol's full contiguous history first.
+    labeled = build_labeled_panel(adj_close, None, horizon, threshold)
     print(f"  Positive rate: {labeled['target_5pct'].mean():.4%}")
 
     if manifest is not None and snapshot_root is not None:
-        meta = repro.snapshot_parquet(labeled, snapshot_root / "labeled_pit.parquet")
-        repro.register_snapshot(manifest, "labeled_pit", meta)
+        # Pre-PIT: the filter now runs inside build_feature_panel, so this
+        # snapshot is the labeled panel over the full downloaded history.
+        meta = repro.snapshot_parquet(labeled, snapshot_root / "labeled.parquet")
+        repro.register_snapshot(manifest, "labeled", meta)
         repro.write_manifest(snapshot_root / "manifest.json", manifest)
 
     features, feature_cols = build_feature_panel(
@@ -174,6 +232,7 @@ def main() -> None:
         provider=provider,
         provider_name=args.provider,
         macro_merge=not args.no_macro_merge,
+        stints=stints,
     )
 
     features_clean = select_training_rows(
@@ -290,7 +349,12 @@ def main() -> None:
                 "No walk-forward scores available for backtest. Run without --skip-walk-forward."
             )
         else:
-            from stock_predictor.backtest import BacktestConfig, plot_backtest, print_report, run_backtest
+            from stock_predictor.backtest import (
+                BacktestConfig,
+                plot_backtest,
+                print_report,
+                run_backtest,
+            )
 
             bt_config = BacktestConfig()
             bt_result = run_backtest(wf_scores, bt_config, provider=provider)
@@ -309,6 +373,7 @@ def main() -> None:
             "train_end": train_end,
             "test_start": test_start,
             "sample_n": args.sample_n,
+            "seed": args.seed,
             "skip_earnings": args.skip_earnings,
             "optuna_best": optuna_best,
             "manual_params": manual_params,

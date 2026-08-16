@@ -119,7 +119,7 @@ uv run train-sp500 --no-snapshot
 
 ### Backtest CLI
 
-**Input:** a Parquet or CSV panel from walk-forward scoring (`--wf-scores-path` or the notebook). Required columns: **`date`**, **`ticker`**, **`adj_close`**, and either **`prob`** or **`probability`**. Optional **`vix_percentile`** enables **`--vix-filter`** and the `vix_scale_exposure` config option.
+**Input:** a Parquet or CSV panel from walk-forward scoring (`--wf-scores-path` or the notebook). Required columns: **`date`**, **`ticker`**, **`adj_close`**, and either **`prob`** or **`probability`**. Optional **`vix_percentile`** enables **`--vix-filter`** and the `vix_scale_exposure` config option — and those options now **raise** when the column is absent rather than silently doing nothing.
 
 Two portfolio engines share the same cash-ledger NAV discipline:
 
@@ -140,7 +140,9 @@ uv run backtest-sp500 scores.parquet --no-benchmark --rebalance-day last
 uv run backtest-sp500 scores.parquet --benchmark-ticker RSP --plots-dir artifacts/plots
 ```
 
-Benchmark prices are **reindexed to the strategy’s trading days** (forward-filled) so strategy vs buy-and-hold metrics use the **same calendar**. When a benchmark is present, the report also prints an **ACTIVE vs benchmark** section: annualized active return, tracking error, information ratio, CAPM beta/alpha with its **t-statistic**, up/down capture, and the equity of a dollar-neutral long-strategy/short-benchmark overlay. Comparing against **`--benchmark-ticker RSP`** (equal-weight S&P 500) isolates stock-selection skill from the equal-weight-vs-cap-weight effect.
+Benchmark prices are **reindexed to the strategy’s trading days** (forward-filled) so strategy vs buy-and-hold metrics use the **same calendar**. When a benchmark is present, the report also prints an **ACTIVE vs benchmark** section: annualized active return, tracking error, information ratio, CAPM beta/alpha with its **t-statistic**, up/down capture, and the equity of a dollar-neutral long-strategy/short-benchmark overlay.
+
+The alpha t-statistic is **Newey–West (HAC)**, with the lag window set to at least the holding period. A cohort strategy holding positions for `--holding-days` sessions produces strongly autocorrelated daily returns, and an i.i.d. standard error is not valid on that series. The naive statistic is printed underneath as `vs naive i.i.d. t-stat` — the correction moves the t-stat in **either** direction depending on the sign of the residual autocorrelation, so it is a correction, not a haircut. Comparing against **`--benchmark-ticker RSP`** (equal-weight S&P 500) isolates stock-selection skill from the equal-weight-vs-cap-weight effect.
 
 #### Backtest flags
 
@@ -152,11 +154,13 @@ Benchmark prices are **reindexed to the strategy’s trading days** (forward-fil
 | `--holding-days` | 10 | Cohort mode: holding period in **trading** days |
 | `--exit-rank` | 40 | Rank-hold mode: sell held names ranked worse than this (must be ≥ top-n) |
 | `--rebalance-day` | Friday | `Monday`–`Friday` or `last` (last session in each ISO week) |
-| `--weighting` | equal | `equal` or `probability` (normalize scores to weights) |
+| `--weighting` | equal | `equal` or `probability` (normalize scores to weights). `probability` **rejects negative scores** — use `equal` with `--rank-objective` models |
 | `--slippage-bps` | 5 | Round-trip modeled as **per-side** basis points |
 | `--capital` | 100000 | Starting notional |
 | `--max-cohorts` | 2 | Cohort mode: overlapping cohorts (cash / free slots per entry) |
-| `--vix-filter` | none | Skip rebalance (cohort) / block buys (rank-hold) when `vix_percentile` exceeds this |
+| `--vix-filter` | none | Skip rebalance (cohort) / block buys (rank-hold) when `vix_percentile` exceeds this. **Errors** if the panel has no `vix_percentile` column |
+| `--min-prob` | none | Score floor: never buy a name scoring below this. Baskets shrink and weights renormalize; a date with no eligible name does not trade |
+| `--rf-rate` | inferred | Annualized risk-free rate for Sharpe/Sortino. **Funding costs are on by default**: the panel's realized `irx_yield` (13-week T-bill) is charged per date when present, else a 4.5% cash proxy. Pass `0` to switch it off. The rate applied is printed in the report header |
 | `--benchmark-ticker` | SPY | yfinance symbol for buy-and-hold column |
 | `--no-benchmark` | off | Skip benchmark download (table shows N/A for benchmark) |
 | `--plots-dir` | none | Writes `equity_curve.png`, `drawdown.png`, `monthly_returns.png` |
@@ -172,8 +176,11 @@ Benchmark prices are **reindexed to the strategy’s trading days** (forward-fil
 
 - **Calendar:** Both paths use the **union of session dates present in the data** (scored panel for the backtest; downloaded OHLC index for `predict-sp500`, extended with future business days for entry/expiry placement), not a full exchange holiday calendar.
 - **Backtest:** Signal on date *T* → **entry** on the next session in that calendar → **exit** after `--holding-days` trading sessions (cohort mode) or on rank decay (rank-hold mode). Cohort returns are **fractional** weights; slippage is applied to historical **adj. close** bars.
+- **Funding:** Sharpe and Sortino are excess-return statistics, charged at the panel's realized 13-week T-bill rate (or 4.5% when a panel predates that column). Total return, CAGR and drawdown stay on raw returns.
 - **NAV accounting:** the daily NAV is a **cash ledger** — capital is debited at entry and credited back at exit as `capital × (1 + net_return)`, so realized P&L, exit slippage, and commissions all compound through cash. Total return, Sharpe, and drawdown reflect costs.
 - **predict-sp500:** entry is the first session **strictly after** *today* (same next-day convention as the backtest); fixed mode expiries use the same trading-day count as the backtest, rank mode positions carry an open-ended expiry sentinel and close on rank decay. Orders use **integer shares** (lot sizes differ from a fractional simulation).
+- **Position sizing:** both paths fund a new cohort with `free_cash / free_slots`. (Live previously divided by `max_cohorts`, so a portfolio with one of two slots open deployed half its free cash and the remainder never got invested.)
+- **Duplicate holdings:** both paths allow a persistently top-ranked name in two overlapping cohorts at double weight. Pass `--one-lot-per-ticker` to cap live at one lot, accepting that it will then under-weight names the simulation kept buying.
 - **Parity:** Use the same `--weighting`, `--slippage-bps`, `--holding-days` / `--exit-rank`, and commission flags in both CLIs when comparing research simulation to generated orders. Do **not** switch `--hold-mode` on an existing state file.
 
 #### Comparing two strategies
@@ -212,12 +219,27 @@ uv run python scripts/backtest_sweep.py artifacts/wf_scored.parquet \
 
 The same sweeps run on GitHub Actions in ~30 s via the `train-sp500` workflow's `sweep_run_id` + `sweep_args` inputs (reuses a previous run's `wf_scored.parquet` artifact — no retraining). **Discipline note:** a grid's best cell is a hypothesis, not a result — re-test it on a sub-window it has never seen (`--from-date` / `--until-date`) and check the alpha t-stat before believing it.
 
+#### Signal diagnostics (before you tune anything)
+
+A backtest conflates ranking skill with market beta, costs, and sizing. [`scripts/signal_depth.py`](scripts/signal_depth.py) asks the narrower question — sort each date's universe by score, and see what the top *k* names actually returned:
+
+```bash
+uv run python scripts/signal_depth.py artifacts/wf_scored.parquet
+
+# fair benchmark for an equal-weighted strategy, on an unseen sub-window
+uv run python scripts/signal_depth.py artifacts/wf_scored.parquet \
+  --benchmark-ticker RSP --until-date 2025-06-30
+```
+
+It prints forward return by selection depth, the rank IC, and CAPM alpha across a `--top-n` ladder, all with HAC t-statistics. **Read the shape, not the level.** A ranker with usable skill puts its best forward returns at the tightest bucket and *gains* alpha as you concentrate; the script fails a shape check and says so when a deeper bucket wins, which means the edge is not where a top-N strategy trades.
+
 #### Strategy ideas to try (research / educational)
 
 | Idea | What to vary | How to approximate here |
 |------|----------------|---------------------------|
 | **Model A vs model B** | Different WF score files | Train twice (`--output-model` / different seeds or features), export two `--wf-scores-path` panels, compare |
-| **Equal vs probability weights** | Position sizing | Same `wf_scored.parquet`, run backtest twice with `--weighting equal` vs `probability` (no code change to scores) |
+| **Equal vs probability weights** | Position sizing | Same `wf_scored.parquet`, run backtest twice with `--weighting equal` vs `probability`. Classifier panels only — `probability` rejects the signed scores a `--rank-objective` model emits |
+| **Conviction floor** | `min_prob` | Same scores, compare `--min-prob` off vs a floor; fewer, higher-scoring trades at the cost of idle cash |
 | **Concentration** | `top_n` | Same scores, compare `--top-n 5` vs `--top-n 20` (two CLI runs or two configs in a notebook) |
 | **Holding horizon** | `holding_days` vs label horizon | Align `holding_days` to your forward window or try shorter/longer holds on the same scores |
 | **Rebalance rhythm** | `--rebalance-day Friday` vs `last` vs Monday | Same scores, different execution calendar |
@@ -236,7 +258,9 @@ These are **not** recommendations—only sensible axes to explore when you stres
 | `--end` | today | Price download end |
 | `--train-end` | 2022-12-31 | Last date in training set |
 | `--test-start` | 2023-01-01 | First date in test / walk-forward region |
-| `--sample-n` | 500 | Max tickers to download |
+| `--sample-n` | 500 | Cap the universe at N tickers, drawn as a **seeded random sample** (not an alphabetical prefix). Use a large value (e.g. `10000`) for the full universe |
+| `--min-coverage` | 0.98 | Fail the run if the price download returns less than this fraction of the **current** index members (`0` = warn only). Departed members are reported as a survivorship gap, never gated |
+| `--batch-size` | 100 | Symbols per yfinance request. Lower it if Yahoo throttles a large universe; no effect with `--provider tiingo` |
 | `--horizon` | 10 | Forward return horizon (sessions); also the **purge window** at every split boundary |
 | `--threshold` | 0.05 | Binary label threshold (e.g. 5%) |
 | `--rank-objective` | off | Train LGBMRanker (lambdarank, grouped by date) on per-date forward-return quintile grades instead of the binary classifier; applies to Optuna (NDCG@15), the walk-forward, and the saved model |
@@ -280,7 +304,27 @@ This step assumes your keys are already configured as described in [Production w
 
 Omit these flags so nothing is disabled: **`--no-optuna`**, **`--skip-earnings`**, **`--skip-walk-forward`**, **`--no-snapshot`**, **`--no-macro-merge`**.
 
-Default **`--sample-n` is 500** (caps the universe). Use a **large** value (e.g. `10000`) to include essentially all tickers overlapping your date window.
+Default **`--sample-n` is 500** (caps the universe). The cap draws a **seeded random sample**, so a capped run is still representative of the index; use a **large** value (e.g. `10000`) to include essentially all tickers overlapping your date window.
+
+Equity downloads are **batched** (`--batch-size`, default 100 symbols per request). One request for the whole universe reliably trips Yahoo's rate limiter, which replies with a *partial frame* rather than an error; each batch is retried with backoff, and symbols still missing get a second pass in smaller chunks.
+
+Coverage is then checked in two tiers, because a flat percentage conflates two opposite situations:
+
+| Cohort | Expectation | On a gap |
+|--------|-------------|----------|
+| **Current** index members | Vendors serve these reliably | **Fails the run** below `--min-coverage` (default 98%) — a broken or throttled download |
+| **Departed** members | Yahoo drops most acquired/renamed/delisted symbols | **Warns only** — this is the documented survivorship bias, not a fault |
+
+A real full-universe run looks like this:
+
+```
+  Union tickers overlapping window: 691
+  equity download: 594/691 tickers (86.0% overall), 100.0% of current index members
+  Survivorship gap: 97/188 departed index members are unavailable from this vendor
+  and are absent from the panel, which flatters results. Missing: ABC, ABMD, ADS, AET, AGN (+92 more)
+```
+
+86% overall would fail a flat 90% gate even though the download was perfect. A Tiingo key recovers most of the departed names.
 
 **Yahoo equities (default), merged macro when FRED is available:**
 
@@ -485,11 +529,15 @@ uv run predict-sp500 --model models/latest.pkl --skip-earnings --confirm
 | `--max-drawdown` | 0.15 | Kill-switch: halt if drawdown exceeds this |
 | `--slippage-bps` | 5 | Slippage per side (basis points) |
 | `--skip-earnings` | off | Skip earnings feature (must match training) |
-| `--sample-n` | 500 | Max tickers to download |
-| `--weighting` | equal | `equal` or `probability` (same as backtest) |
+| `--sample-n` | 500 | Cap the universe at N tickers, drawn as a **seeded random sample**. Use the same value as training |
+| `--seed` | from model meta | Seed for the universe sample; defaults to the seed recorded at training time so the live universe matches |
+| `--min-coverage` | 0.98 | Fail if the price download returns less than this fraction of **current** index members (`0` = warn only) |
+| `--batch-size` | 100 | Symbols per yfinance request; lower it if Yahoo throttles |
+| `--weighting` | equal | `equal` or `probability` (same as backtest; `probability` requires non-negative scores) |
 | `--commission-per-share` | 0 | Per-share fee per buy/sell leg (match `backtest-sp500`) |
 | `--commission-per-order` | 0 | Flat fee per ticker per buy/sell order (match `backtest-sp500`) |
 | `--no-macro-merge` | off | Same as training: skip Yahoo↔FRED macro merge |
+| `--one-lot-per-ticker` | off | Fixed mode: cap each ticker at one lot. **Default is cohort parity** — a persistently top-ranked name may sit in overlapping cohorts at double weight, exactly as `backtest-sp500 --mode cohort` models it |
 | `--confirm` | off | Update portfolio state (without: dry run) |
 
 #### Kill-switch
@@ -527,9 +575,14 @@ Ensure the repo root or `src` is on `PYTHONPATH`, or run notebooks from an envir
 
 ```bash
 uv run pytest
+
+# include the Tiingo/FRED provider tests (otherwise 6 skip on a missing fredapi)
+uv sync --extra dev --extra tiingo && uv run pytest
 ```
 
-Covers PIT membership, calendar features, reproducibility, training utilities (purged splits, rank labels, both Optuna objectives), both backtest engines (NAV compounding, rank-decay exits, VIX scaling), relative-return metrics, portfolio management (fixed and rank-hold order generation), execution parity, macro merge, data providers, and the inference pipeline (`tests/`, 120+ tests).
+**CI** — [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main` and every pull request: pytest on Python 3.12 and 3.13, `ruff check`, and an offline smoke job that exercises every console script and both backtest engines against a synthetic panel. It is deliberately network-free, so a Yahoo outage never reds the build. The long training and sweep workflows stay on `workflow_dispatch` / schedule.
+
+Covers PIT membership, calendar features, reproducibility, training utilities (purged splits, rank labels, both Optuna objectives), both backtest engines (NAV compounding, rank-decay exits, VIX scaling), relative-return metrics, portfolio management (fixed and rank-hold order generation), execution parity, macro merge, data providers, and the inference pipeline (`tests/`, 200+ tests).
 
 ## Reproducibility (snapshots + manifest)
 
@@ -540,7 +593,7 @@ When snapshots are enabled (default), each run writes under `--snapshot-dir` or 
 | `manifest.json` | `run_id`, UTC time, `argv`, git commit / dirty (if available), env hints, **SHA-256** + row/column counts per snapshot |
 | `stints.parquet` | PIT membership table |
 | `equity_prices_long.parquet` | Long-format adjusted close + volume |
-| `labeled_pit.parquet` | Panel after forward return + PIT filter |
+| `labeled.parquet` | Panel after forward return, **before** the PIT filter (the filter now runs mid-way through feature engineering) |
 | `features_clean.parquet` | Feature matrix after NaN-tolerant row selection (label + minimal price history; `--strict-dropna` restores full-row `dropna`) |
 
 With `--output-model`, the manifest also records the pickle path and checksum; the manifest is rewritten at the end of the run.
@@ -551,10 +604,19 @@ With **`--no-snapshot`**, no Parquet files and no `manifest.json` are written (t
 
 ## Pipeline
 
-1. **Universe**: Point-in-time S&P 500 membership via [fja05680/sp500](https://github.com/fja05680/sp500)
+1. **Universe**: Point-in-time S&P 500 membership via [fja05680/sp500](https://github.com/fja05680/sp500); capped by `--sample-n` as a seeded random draw and coverage-checked after download
 2. **Prices**: Daily adjusted close + volume from Yahoo Finance (`yfinance`) or Tiingo
 3. **Labels**: Binary (forward return ≥ `--threshold` over `--horizon` sessions) or, with `--rank-objective`, per-date forward-return quintile grades (market-neutral by construction)
 4. **Features**: Price/volume (15), sector-relative (4), macro (5), regime (2), cross-sectional ranks (3), calendar (6), optional earnings (1)
+
+   **Stage order is load-bearing** (`build_feature_panel`):
+
+   1. *Time-series* features (price, volume) on each ticker's **full contiguous history**
+   2. *Point-in-time membership filter*
+   3. *Cross-sectional* features (regime medians, ranks, sector spreads) on the surviving in-index cross-section
+   4. Date-level joins (macro, calendar) and the optional earnings feature
+
+   Filtering before step 1 lets rolling windows span index-membership gaps — a symbol that left and rejoined the index gets a multi-year move reported as its next `ret_1d`. Running step 3 before the filter pollutes ranks and "market" medians with names that were not in the index that day.
 5. **Tuning**: Optuna over purged, date-grouped expanding CV folds — PR-AUC for the classifier, NDCG@15 for the ranker (optional)
 6. **Training**: LightGBM (classifier or lambdarank ranker) with a purged inner validation split for effective tree count
 7. **Evaluation**: PR-AUC, ROC-AUC, weekly Precision@K (same binary target for both objectives, so they compare directly)
@@ -580,15 +642,20 @@ src/stock_predictor/
   macro_merge.py         Yahoo ↔ FRED macro cross-fill
   data_provider.py       Provider protocol + factory
   providers/             yfinance + Tiingo/FRED implementations
+  universe.py            Seeded ticker sampling + download coverage guard
+  signal_depth.py        Selection-depth diagnostics (does the top of the ranking work?)
+  stats.py               HAC / Newey-West helpers
   repro.py               Run manifests, hashing, Parquet snapshots
 scripts/
   run_pipeline.sh        train-full / backtest / predict orchestration
   backtest_sweep.py      Variant grids (default / vix / hold) + relative tables
+  grid_search_sharpe.py  Config grid ranked by Sharpe, with alpha t-stats
+  signal_depth.py        Selection-depth / rank-IC / alpha-ladder diagnostics
 train_sp500.py           Thin launcher → cli
 backtest.py              Thin launcher → backtest
 sp500_pit.py             Notebook shim → pit
 calendar_features.py     Notebook shim → calendar_features
-tests/                   pytest suite (120+ tests)
+tests/                   pytest suite (200+ tests)
 notebooks/               Exploration + full pipeline
 ```
 
@@ -602,8 +669,40 @@ notebooks/               Exploration + full pipeline
 
 ## Limitations
 
+- **Stale artifacts.** Any `wf_scored.parquet` or report produced before the universe fix was built on an **alphabetically truncated** universe (`--sample-n` sliced a sorted ticker list, so a 500-cap run covered roughly A–POOL) with features computed *after* the PIT filter. Those panels are not comparable to current ones — on the same rules, the truncated panel showed +76.6% and Sharpe 1.05 where the corrected panel shows +22.2% and Sharpe 0.16. Regenerate before drawing any conclusion.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
-- **Honest results disclosure:** in our own evaluations on 2019–2026 walk-forward data with this pipeline (purged splits, cost-inclusive NAV, sub-window checks), **no configuration produced statistically significant CAPM alpha vs SPY** (all |t| < 1). The model shows real cross-sectional ranking skill — roughly enough to pay its own trading costs against an equal-weight benchmark — and configurations that beat SPY on raw return did so via higher market beta, not skill. Treat any better-looking result you produce with this repo with the same suspicion: check the alpha t-stat and re-test on a sub-window the configuration has never seen.
+- **Honest results disclosure.** On a corrected 2023–2026 walk-forward panel (544 tickers spanning the full alphabet, 100% of current index members, features staged before the PIT filter, purged splits, cost-inclusive NAV, HAC alpha t-stats, `--rf-rate 0.045`), **this model has no demonstrable stock-selection skill at the top of its ranking — the only part the strategy trades.**
+
+  Baseline `--top-n 15`: total return **+22.2%** against **+105.2%** for SPY and **+61.5%** for equal-weight RSP over the same sessions; Sharpe **0.16**; max drawdown **−27.7%**. CAPM alpha is **−12.6% (HAC t = −1.64)** vs SPY and **−7.5% (t = −0.97)** vs RSP. Against the equal-weight benchmark — the fair comparison for an equal-weighted strategy, especially across a mega-cap-dominated tape — that is statistically indistinguishable from zero. It is *no skill*, not proven harm.
+
+  The diagnostic that matters is how alpha responds to conviction. A ranker with skill earns more alpha as you concentrate. This one earns less:
+
+  | `--top-n` | CAPM alpha vs SPY | HAC t |
+  |---|---|---|
+  | 5 | −23.6% | −2.11 |
+  | 10 | −17.9% | −2.09 |
+  | 15 | −12.6% | −1.64 |
+  | 25 | −10.0% | −1.51 |
+  | 50 | −6.1% | −1.12 |
+
+  Mean 10-day forward return by selection depth (equal-weighted, before costs) shows why — the extreme top of the ranking is the worst part of it:
+
+  | Bucket | Mean 10d fwd return | vs universe | HAC t |
+  |---|---|---|---|
+  | top 5 | −0.2393% | −0.81% | −1.57 |
+  | top 10 | +0.2931% | −0.28% | −0.65 |
+  | top 15 | +0.4423% | −0.13% | −0.34 |
+  | top 25 | +0.5703% | −0.00% | −0.01 |
+  | top 50 | +0.7176% | +0.14% | +0.61 |
+  | top 100 | +0.6892% | +0.12% | +0.67 |
+  | bottom 100 | +0.4072% | −0.17% | −1.25 |
+  | universe | +0.5730% | — | — |
+
+  No single bucket clears |t| = 2 on its own, so read the *ordering*, not any one row: forward return rises monotonically from the top of the list down to the top-50 band, then falls away again. Rank IC is **+0.0082 (HAC t = +0.49)** — indistinguishable from noise. The earlier claim that this model showed "real cross-sectional ranking skill, roughly enough to pay its own trading costs" did not survive the universe and feature-staging fixes.
+
+  Reproduce all of the above on any panel with [`scripts/signal_depth.py`](scripts/signal_depth.py) — this disclosure is meant to be re-derived, not trusted.
+
+  Configurations that look good still get there through beta. `--mode rank-hold --exit-rank 100` returns **+97%** (Sharpe 0.65) with **beta 1.40** and alpha **−6.7%** — leverage, not selection. Treat any better-looking result you produce here with the same suspicion: read the HAC alpha t-stat and the beta column, compare against RSP as well as SPY, and re-test on a sub-window the configuration has never seen.
 - **Sector labels** are a pragmatic blend of current Wikipedia GICS and a fixed override; they are not a perfect point-in-time sector history for every ticker-date.
 - **Earnings** come from Yahoo as-of download time; the feature is not a fully audited point-in-time fundamental database.
 - **Delisted tickers**: Yahoo no longer serves many departed S&P members (~90–140 depending on the window), so even with PIT membership the price panel has survivorship bias that flatters results. A Tiingo key recovers most of them.

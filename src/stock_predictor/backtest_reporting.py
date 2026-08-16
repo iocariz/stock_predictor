@@ -6,17 +6,25 @@ import calendar
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import matplotlib.ticker as mticker
 import numpy as np
 import pandas as pd
 
-from stock_predictor.backtest import BacktestResult
+from stock_predictor.backtest import BacktestResult, daily_risk_free
+from stock_predictor.stats import auto_hac_lags as _auto_hac_lags
+from stock_predictor.stats import hac_ols as _hac_ols
 
 # ---------------------------------------------------------------------------
 # Formatting helpers
 # ---------------------------------------------------------------------------
+
+
+# Below this, a return series is constant to floating-point precision and
+# risk-adjusted ratios are noise amplification rather than signal.
+_FLAT_EPS = 1e-12
 
 
 def _fmt_pct(v: float) -> str:
@@ -36,7 +44,12 @@ def _fmt_dollar(v: float) -> str:
 # ---------------------------------------------------------------------------
 
 
-def relative_metrics(strategy_nav: pd.Series, bench_nav: pd.Series) -> dict[str, float]:
+def relative_metrics(
+    strategy_nav: pd.Series,
+    bench_nav: pd.Series,
+    *,
+    overlap_days: int = 1,
+) -> dict[str, float]:
     """Active-return statistics of a strategy vs a benchmark.
 
     Frames the strategy as an overlay on the benchmark: daily active return
@@ -44,6 +57,13 @@ def relative_metrics(strategy_nav: pd.Series, bench_nav: pd.Series) -> dict[str,
     book, rebalanced daily). Returns annualized active return, tracking
     error, information ratio, CAPM beta/alpha, up/down capture, and the
     overlay equity's total return and max drawdown.
+
+    ``alpha_t`` is a **Newey–West HAC** t-statistic. A cohort strategy holding
+    positions for *overlap_days* sessions produces strongly autocorrelated
+    daily returns, and an i.i.d. standard error overstates significance on
+    exactly the series this project cares about. Pass *overlap_days* (the
+    holding period) so the lag window covers the overlap; the naive statistic
+    is still returned as ``alpha_t_iid`` for comparison.
     """
     if strategy_nav is None or bench_nav is None:
         return {}
@@ -64,19 +84,30 @@ def relative_metrics(strategy_nav: pd.Series, bench_nav: pd.Series) -> dict[str,
 
     var_b = float(rb.var())
     beta = float(rs.cov(rb) / var_b) if var_b > 0 else float("nan")
-    alpha_ann = (
-        float((rs.mean() - beta * rb.mean()) * 252) if beta == beta else float("nan")
-    )
-    # t-stat of daily CAPM alpha: mean/std of regression residuals * sqrt(n).
+
+    # CAPM regression with a HAC covariance: r_s = alpha + beta * r_b + e.
     # |t| >= ~2 is the usual bar for "not noise".
+    alpha_ann = float("nan")
     alpha_t = float("nan")
-    if beta == beta:
-        resid = rs - beta * rb
-        rstd = float(resid.std())
+    alpha_t_iid = float("nan")
+    lags = max(_auto_hac_lags(len(rs)), max(int(overlap_days), 1) - 1)
+    y = rs.to_numpy(dtype=float)
+    x = np.column_stack([np.ones(len(rb)), rb.to_numpy(dtype=float)])
+    if var_b > 0 and len(y) > 2:
+        coef, cov = _hac_ols(y, x, lags)
+        alpha_daily = float(coef[0])
+        alpha_ann = alpha_daily * 252
+        se = float(np.sqrt(cov[0, 0])) if cov[0, 0] > 0 else float("nan")
+        resid = y - x @ coef
+        rstd = float(resid.std(ddof=1))
         # Epsilon guard: identical series leave ~1e-17 float noise in the
         # residuals, whose mean/std ratio is a spurious t-stat.
-        if rstd > 1e-12:
-            alpha_t = float(resid.mean() / rstd * np.sqrt(len(resid)))
+        # Zero residual variance (e.g. a series regressed on itself) leaves
+        # alpha_t as 0/0 — undefined, not zero. Both stay NaN.
+        if rstd > _FLAT_EPS:
+            if se == se and se > 0:
+                alpha_t = alpha_daily / se
+            alpha_t_iid = float(alpha_daily / rstd * np.sqrt(len(resid)))
 
     up = rb > 0
     down = rb < 0
@@ -96,6 +127,8 @@ def relative_metrics(strategy_nav: pd.Series, bench_nav: pd.Series) -> dict[str,
         "beta": beta,
         "alpha_ann": alpha_ann,
         "alpha_t": alpha_t,
+        "alpha_t_iid": alpha_t_iid,
+        "hac_lags": float(lags),
         "up_capture": up_capture,
         "down_capture": down_capture,
         "overlay_total_return": overlay_total,
@@ -103,9 +136,15 @@ def relative_metrics(strategy_nav: pd.Series, bench_nav: pd.Series) -> dict[str,
     }
 
 
-def print_relative_report(strategy_nav: pd.Series, bench_nav: pd.Series, bench_label: str) -> None:
+def print_relative_report(
+    strategy_nav: pd.Series,
+    bench_nav: pd.Series,
+    bench_label: str,
+    *,
+    overlap_days: int = 1,
+) -> None:
     """Print the active-vs-benchmark section (no-op if series don't overlap)."""
-    rm = relative_metrics(strategy_nav, bench_nav)
+    rm = relative_metrics(strategy_nav, bench_nav, overlap_days=overlap_days)
     if not rm:
         return
     print(f"ACTIVE vs {bench_label} (long strategy / short benchmark, daily rebalance)")
@@ -115,7 +154,9 @@ def print_relative_report(strategy_nav: pd.Series, bench_nav: pd.Series, bench_l
     print(f"{'Information ratio':28s} {_fmt_f(rm['information_ratio']):>10s}")
     print(f"{'Beta vs benchmark':28s} {_fmt_f(rm['beta']):>10s}")
     print(f"{'CAPM alpha (ann)':28s} {_fmt_pct(rm['alpha_ann']):>10s}")
-    print(f"{'Alpha t-stat':28s} {_fmt_f(rm['alpha_t']):>10s}")
+    lags = int(rm.get("hac_lags", 0))
+    print(f"{f'Alpha t-stat (HAC, {lags}L)':28s} {_fmt_f(rm['alpha_t']):>10s}")
+    print(f"{'  vs naive i.i.d. t-stat':28s} {_fmt_f(rm['alpha_t_iid']):>10s}")
     print(f"{'Up capture':28s} {_fmt_f(rm['up_capture']):>10s}")
     print(f"{'Down capture':28s} {_fmt_f(rm['down_capture']):>10s}")
     print(f"{'Overlay total return':28s} {_fmt_pct(rm['overlay_total_return']):>10s}")
@@ -146,11 +187,15 @@ def print_report(result: BacktestResult) -> None:
             f", comm=${c.commission_per_share:.4f}/sh "
             f"+ ${c.commission_per_order:.2f}/order-leg"
         )
+    floor = f", min_prob={c.min_prob:g}" if c.min_prob is not None else ""
+    rf_used = float(m.get("risk_free_rate_used", 0.0) or 0.0)
+    rf_src = "panel" if c.risk_free_rate is None and rf_used else "set"
+    rf = f", rf={rf_used:.2%} ({rf_src})" if rf_used else ""
     print(
         f"Config: top_n={c.top_n}, holding={c.holding_days}d, "
         f"rebalance={c.rebalance_day}, weighting={c.weighting}, "
         f"slippage={c.slippage_bps:.0f}bps, max_cohorts={c.max_overlapping_cohorts}"
-        f"{comm}"
+        f"{floor}{rf}{comm}"
     )
     print()
     print(f"{'':20s} {'STRATEGY':>{col_w}s}  {bench_hdr:>{col_w}s}")
@@ -160,7 +205,7 @@ def print_report(result: BacktestResult) -> None:
          _fmt_pct(s.get("total_return", float("nan"))) if has_bench else "N/A"),
         ("CAGR", _fmt_pct(m.get("cagr", float("nan"))),
          _fmt_pct(s.get("cagr", float("nan"))) if has_bench else "N/A"),
-        ("Sharpe", _fmt_f(m.get("sharpe", float("nan"))),
+        (f"Sharpe (rf={rf_used:.1%})", _fmt_f(m.get("sharpe", float("nan"))),
          _fmt_f(s.get("sharpe", float("nan"))) if has_bench else "N/A"),
         ("Sortino", _fmt_f(m.get("sortino", float("nan"))),
          _fmt_f(s.get("sortino", float("nan"))) if has_bench else "N/A"),
@@ -180,6 +225,7 @@ def print_report(result: BacktestResult) -> None:
     if has_bench and len(result.spy_daily_nav) > 1:
         print_relative_report(
             result.daily_nav, result.spy_daily_nav, c.benchmark_ticker or "benchmark",
+            overlap_days=c.holding_days,
         )
 
 
@@ -188,7 +234,7 @@ def print_report(result: BacktestResult) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _nav_only_metrics(nav: pd.Series) -> dict[str, float]:
+def _nav_only_metrics(nav: pd.Series, *, risk_free_rate: float = 0.0) -> dict[str, float]:
     """Risk/return stats from a NAV series alone (no cohort breakdown)."""
     nav = nav.astype(float).dropna()
     if len(nav) < 2:
@@ -200,12 +246,13 @@ def _nav_only_metrics(nav: pd.Series) -> dict[str, float]:
     cagr = (
         float((nav.iloc[-1] / nav.iloc[0]) ** (1 / years) - 1) if years > 0 else float("nan")
     )
-    mean_r = float(daily_ret.mean())
-    std_r = float(daily_ret.std())
-    sharpe = (mean_r / std_r * np.sqrt(252)) if std_r > 0 else float("nan")
-    neg = daily_ret[daily_ret < 0]
+    excess = daily_ret - daily_risk_free(risk_free_rate)
+    mean_r = float(excess.mean())
+    std_r = float(excess.std())
+    sharpe = (mean_r / std_r * np.sqrt(252)) if std_r > _FLAT_EPS else float("nan")
+    neg = excess[excess < 0]
     downside = float(neg.std()) if len(neg) > 0 else float("nan")
-    sortino = (mean_r / downside * np.sqrt(252)) if downside > 0 else float("nan")
+    sortino = (mean_r / downside * np.sqrt(252)) if downside > _FLAT_EPS else float("nan")
     drawdown = nav / nav.cummax() - 1
     max_dd = float(drawdown.min())
     calmar = (cagr / abs(max_dd)) if max_dd < 0 else float("nan")
@@ -243,8 +290,8 @@ def print_strategy_comparison(
 ) -> None:
     """Print side-by-side metrics on the overlapping trading-day window."""
     a_n, b_n, idx = _nav_normalized_overlap(result_a.daily_nav, result_b.daily_nav)
-    m_a = _nav_only_metrics(a_n)
-    m_b = _nav_only_metrics(b_n)
+    m_a = _nav_only_metrics(a_n, risk_free_rate=result_a.metrics.get("risk_free_rate_used", 0.0))
+    m_b = _nav_only_metrics(b_n, risk_free_rate=result_b.metrics.get("risk_free_rate_used", 0.0))
     w = max(len(label_a), len(label_b), 10)
     print()
     print("=" * (24 + w * 2 + 4))
