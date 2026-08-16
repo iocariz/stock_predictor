@@ -159,27 +159,34 @@ def test_expiring_cohort_frees_its_slot_before_sizing() -> None:
     assert _deployed(orders) == pytest.approx(60_000.0, rel=0.01)
 
 
-def test_duplicate_holdings_opt_in_matches_backtest_basket() -> None:
-    """The backtest lets a persistent name sit in two overlapping cohorts;
-    live excludes held names by default, which under-weights winners."""
+def test_duplicate_holdings_are_allowed_by_default() -> None:
+    """Live now matches the backtest: a persistently top-ranked name may sit
+    in two overlapping cohorts, at the double weight the backtest models."""
     held = _open_cohort("coh1", range(10), "2124-01-25")
     state = PortfolioState(
         initial_capital=100_000.0, cash=50_000.0,
         high_watermark=100_000.0, positions=held,
     )
-    common = dict(
+    orders, _ = generate_orders(
+        state, _picks(start=0, n=10), _PRICES,
         top_n=10, max_cohorts=2, holding_days=10,
         slippage_bps=0.0, as_of="2024-02-01", trading_dates=_CAL,
     )
-    # Same 10 names the existing cohort holds are top of the ranking.
-    picks = _picks(start=0, n=10)
-
-    excluded, _ = generate_orders(state, picks, _PRICES, **common)
-    assert [o.ticker for o in excluded if o.action == "BUY"] == []
-
-    duplicated, _ = generate_orders(
-        state, picks, _PRICES, allow_duplicate_holdings=True, **common,
-    )
-    bought = [o.ticker for o in duplicated if o.action == "BUY"]
+    bought = [o.ticker for o in orders if o.action == "BUY"]
     assert bought == [f"T{i}" for i in range(10)]
-    assert _deployed(duplicated) == pytest.approx(50_000.0, rel=0.01)
+    assert _deployed(orders) == pytest.approx(50_000.0, rel=0.01)
+
+
+def test_duplicate_holdings_can_be_opted_out() -> None:
+    held = _open_cohort("coh1", range(10), "2124-01-25")
+    state = PortfolioState(
+        initial_capital=100_000.0, cash=50_000.0,
+        high_watermark=100_000.0, positions=held,
+    )
+    orders, _ = generate_orders(
+        state, _picks(start=0, n=10), _PRICES,
+        top_n=10, max_cohorts=2, holding_days=10,
+        slippage_bps=0.0, as_of="2024-02-01", trading_dates=_CAL,
+        allow_duplicate_holdings=False,
+    )
+    assert [o.ticker for o in orders if o.action == "BUY"] == []

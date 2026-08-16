@@ -615,9 +615,11 @@ def monthly_walk_forward(
         scored = test_df.assign(prob=prob)
         if return_scores:
             score_cols = [date_col, "ticker", "prob", "adj_close", "fwd_ret", target_col]
-            # Carry vix_percentile so the backtest --vix-filter can act on it.
-            if "vix_percentile" in scored.columns:
-                score_cols.append("vix_percentile")
+            # Carry the regime column (--vix-filter) and the realized cash
+            # rate (Sharpe/Sortino funding) through to the backtest.
+            for extra in ("vix_percentile", "irx_yield"):
+                if extra in scored.columns:
+                    score_cols.append(extra)
             scored_panels.append(scored[score_cols].copy())
         weekly_p = (
             scored.assign(week=lambda x: x[date_col].dt.to_period("W"))
@@ -782,8 +784,13 @@ def _derive_macro_features(mdf: pd.DataFrame) -> pd.DataFrame:
     mdf["vix_percentile"] = mdf["vix"].rolling(252, min_periods=60).apply(
         lambda w: (w[-1] >= w[:-1]).mean(), raw=True,
     )
+    # irx_yield is carried but deliberately absent from MACRO_FEATURE_COLS:
+    # it is not a model input, it is the cash rate the backtest funds at.
     return mdf[
-        ["date", "vix", "vix_ret_5d", "tnx_yield", "yield_curve_spread", "vix_percentile"]
+        [
+            "date", "vix", "vix_ret_5d", "tnx_yield", "irx_yield",
+            "yield_curve_spread", "vix_percentile",
+        ]
     ].copy()
 
 
@@ -875,7 +882,10 @@ def build_feature_panel(
     except Exception as exc:
         print("Macro download failed:", exc)
         macro_panel = pd.DataFrame(
-            columns=["date", "vix", "vix_ret_5d", "tnx_yield", "yield_curve_spread", "vix_percentile"]
+            columns=[
+                "date", "vix", "vix_ret_5d", "tnx_yield", "irx_yield",
+                "yield_curve_spread", "vix_percentile",
+            ]
         )
 
     features["date"] = pd.to_datetime(features["date"]).dt.normalize()
@@ -883,7 +893,10 @@ def build_feature_panel(
         macro_panel["date"] = pd.to_datetime(macro_panel["date"]).dt.normalize()
     else:
         # Empty DataFrame: add NaN macro columns directly to avoid dtype mismatch on merge
-        for col in ["vix", "vix_ret_5d", "tnx_yield", "yield_curve_spread", "vix_percentile"]:
+        for col in [
+            "vix", "vix_ret_5d", "tnx_yield", "irx_yield",
+            "yield_curve_spread", "vix_percentile",
+        ]:
             features[col] = np.nan
         macro_panel = None
     if macro_panel is not None:

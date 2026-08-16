@@ -72,7 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-benchmark", action="store_true",
         help="Skip the alpha ladder (no network)",
     )
-    p.add_argument("--rf-rate", type=float, default=0.045, dest="rf_rate")
+    p.add_argument("--rf-rate", type=float, default=None, dest="rf_rate",
+                   help="Pin the funding rate; default infers it from the panel's "
+                        "irx_yield, else the 4.5%% cash proxy")
     p.add_argument("--output-csv", type=Path, default=None, help="Write the depth table here")
     return p
 
@@ -165,7 +167,8 @@ def main() -> None:
     if ladder and not args.no_benchmark:
         print()
         print("=" * 62)
-        print(f"CAPM ALPHA BY CONCENTRATION (vs {args.benchmark_ticker}, rf={args.rf_rate:.1%})")
+        rf_label = "panel/default" if args.rf_rate is None else f"{args.rf_rate:.1%}"
+        print(f"CAPM ALPHA BY CONCENTRATION (vs {args.benchmark_ticker}, rf={rf_label})")
         print("=" * 62)
         _alpha_ladder(panel, ladder, args.benchmark_ticker, args.rf_rate)
 

@@ -25,6 +25,11 @@ from stock_predictor.execution_calendar import next_trading_day, offset_trading_
 # ---------------------------------------------------------------------------
 
 
+# US cash proxy used when a panel carries no realized rate. Chosen as a
+# round mid-2020s short-rate level; pass --rf-rate explicitly for other eras.
+DEFAULT_RISK_FREE_RATE = 0.045
+
+
 @dataclass(frozen=True)
 class BacktestConfig:
     top_n: int = 15
@@ -50,13 +55,21 @@ class BacktestConfig:
     """Rank-hold mode only (:func:`run_rank_hold_backtest`): sell a held name
     when its cross-sectional rank decays beyond this (or it leaves the scored
     universe). Must be >= top_n; larger values -> lower turnover."""
-    risk_free_rate: float = 0.0
-    """Annualized risk-free rate used for Sharpe and Sortino (0.045 = 4.5%).
+    risk_free_rate: float | None = None
+    """Annualized risk-free rate for Sharpe and Sortino, or ``None`` to infer.
 
-    Default 0.0 preserves historical numbers, but a zero funding assumption
-    flatters risk-adjusted metrics over any period when cash actually paid —
-    2023-2026 cash yielded 4-5%. Total return, CAGR and drawdown are
-    unaffected."""
+    A zero funding assumption flatters every risk-adjusted metric, so funding
+    costs are on by default. Resolution order:
+
+    1. An explicit float here always wins (``0.0`` switches funding off).
+    2. Otherwise the panel's realized ``irx_yield`` (13-week T-bill, quoted in
+       percent) is charged per date — correct across regimes, and what
+       walk-forward panels carry.
+    3. Otherwise :data:`DEFAULT_RISK_FREE_RATE`, a US cash proxy.
+
+    Total return, CAGR and drawdown are unaffected. The rate actually applied
+    is printed in the report header and returned as
+    ``metrics["risk_free_rate_used"]``."""
     min_prob: float | None = None
     """Score floor: never buy a name scoring below this, even if it is in the
     top_n. Baskets shrink (weights renormalize over survivors) and a date with
@@ -84,9 +97,12 @@ class BacktestConfig:
             raise ValueError(f"rebalance_day must be one of {valid_days}, got {self.rebalance_day!r}")
         if self.commission_per_share < 0 or self.commission_per_order < 0:
             raise ValueError("commission_per_share and commission_per_order must be >= 0")
-        if not np.isfinite(self.risk_free_rate) or not -0.01 <= self.risk_free_rate <= 1.0:
+        if self.risk_free_rate is not None and (
+            not np.isfinite(self.risk_free_rate) or not -0.01 <= self.risk_free_rate <= 1.0
+        ):
             raise ValueError(
-                f"risk_free_rate must be an annual rate in [-0.01, 1.0], got {self.risk_free_rate!r}"
+                f"risk_free_rate must be None or an annual rate in [-0.01, 1.0], "
+                f"got {self.risk_free_rate!r}"
             )
         if self.min_prob is not None and not np.isfinite(self.min_prob):
             raise ValueError(f"min_prob must be a finite number or None, got {self.min_prob!r}")
@@ -365,11 +381,34 @@ def daily_risk_free(annual_rate: float) -> float:
     return (1.0 + annual_rate) ** (1.0 / 252.0) - 1.0
 
 
+def _panel_risk_free(df: pd.DataFrame) -> pd.Series | None:
+    """Realized annualized cash rate per date, from a carried ``irx_yield``.
+
+    yfinance and FRED both quote the 13-week bill in percent (4.5 = 4.5%).
+    Returns ``None`` when the panel has no usable rate column.
+    """
+    if "irx_yield" not in df.columns:
+        return None
+    by_date = df.groupby("date", sort=True)["irx_yield"].first().astype(float)
+    by_date = by_date.ffill().bfill()
+    if by_date.isna().all():
+        return None
+    return by_date / 100.0
+
+
+def _daily_excess(daily_ret: pd.Series, risk_free: float | pd.Series) -> pd.Series:
+    """Return series net of the funding charge (scalar or per-date rate)."""
+    if isinstance(risk_free, pd.Series):
+        rf = risk_free.reindex(daily_ret.index).ffill().bfill().fillna(0.0)
+        return daily_ret - ((1.0 + rf) ** (1.0 / 252.0) - 1.0)
+    return daily_ret - daily_risk_free(risk_free)
+
+
 def _compute_metrics(
     nav: pd.Series,
     cohorts: list[Cohort],
     *,
-    risk_free_rate: float = 0.0,
+    risk_free_rate: float | pd.Series = 0.0,
 ) -> dict[str, float]:
     daily_ret = nav.pct_change().dropna()
     n_days = len(daily_ret)
@@ -379,7 +418,7 @@ def _compute_metrics(
     cagr = (nav.iloc[-1] / nav.iloc[0]) ** (252 / max(n_days, 1)) - 1
     # Sharpe and Sortino are excess-return statistics; total return, CAGR and
     # drawdown deliberately stay on raw returns.
-    excess = daily_ret - daily_risk_free(risk_free_rate)
+    excess = _daily_excess(daily_ret, risk_free_rate)
     mean_r = excess.mean()
     std_r = excess.std()
     sharpe = (mean_r / std_r * np.sqrt(252)) if std_r > _FLAT_EPS else float("nan")
@@ -393,7 +432,13 @@ def _compute_metrics(
     n_cohorts = len(cohorts)
     win_rate = wins / n_cohorts if n_cohorts > 0 else float("nan")
 
+    rate_used = (
+        float(risk_free_rate.reindex(daily_ret.index).ffill().bfill().mean())
+        if isinstance(risk_free_rate, pd.Series)
+        else float(risk_free_rate)
+    )
     return {
+        "risk_free_rate_used": rate_used,
         "total_return": total_ret,
         "cagr": cagr,
         "sharpe": sharpe,
@@ -549,12 +594,21 @@ def _vix_exposure_scale(
     return min(1.0, max(0.0, 2.0 * (1.0 - v)))
 
 
+def _resolve_risk_free(df: pd.DataFrame, config: BacktestConfig) -> float | pd.Series:
+    """An explicit rate wins; else the panel's realized rate; else the default."""
+    if config.risk_free_rate is not None:
+        return config.risk_free_rate
+    series = _panel_risk_free(df)
+    return DEFAULT_RISK_FREE_RATE if series is None else series
+
+
 def _benchmark_leg(
     config: BacktestConfig,
     daily_nav: pd.Series,
     start_date: pd.Timestamp,
     end_date: pd.Timestamp,
     provider: object | None,
+    risk_free: float | pd.Series = 0.0,
 ) -> tuple[pd.Series, pd.Series, dict[str, float]]:
     """Download, align, and score the buy-and-hold benchmark leg."""
     spy_nav = pd.Series(dtype=float)
@@ -575,7 +629,7 @@ def _benchmark_leg(
     spy_nav = _align_benchmark_to_nav(raw_nav, daily_nav.index, config.initial_capital)
     spy_ret = spy_nav.pct_change().dropna()
     spy_metrics = (
-        _compute_metrics(spy_nav, [], risk_free_rate=config.risk_free_rate)
+        _compute_metrics(spy_nav, [], risk_free_rate=risk_free)
         if len(spy_nav) > 1 else {}
     )
     if not spy_metrics:
@@ -603,6 +657,7 @@ def run_backtest(
     """Run the weekly-rebalance cohort backtest on walk-forward scored data."""
     df, trading_dates, price_panel = _prepare_scored(scored_df)
     _validate_weighting(df, config)
+    risk_free = _resolve_risk_free(df, config)
 
     rebalance_dates = _get_rebalance_dates(trading_dates, config.rebalance_day)
     vix_by_date = _vix_percentile_by_date(df, config)
@@ -651,12 +706,12 @@ def run_backtest(
     daily_returns = daily_nav.pct_change().dropna()
 
     # Metrics
-    metrics = _compute_metrics(daily_nav, cohorts, risk_free_rate=config.risk_free_rate)
+    metrics = _compute_metrics(daily_nav, cohorts, risk_free_rate=risk_free)
 
     start_date = pd.Timestamp(trading_dates[0])
     end_date = pd.Timestamp(trading_dates[-1])
     spy_nav, spy_ret, spy_metrics = _benchmark_leg(
-        config, daily_nav, start_date, end_date, provider,
+        config, daily_nav, start_date, end_date, provider, risk_free,
     )
 
     return BacktestResult(
@@ -704,6 +759,7 @@ def run_rank_hold_backtest(
     """
     df, trading_dates, price_panel = _prepare_scored(scored_df)
     _validate_weighting(df, config)
+    risk_free = _resolve_risk_free(df, config)
     n_days = len(trading_dates)
     nav_index = pd.DatetimeIndex(trading_dates)
     rebalance_dates = _get_rebalance_dates(trading_dates, config.rebalance_day)
@@ -835,14 +891,14 @@ def run_rank_hold_backtest(
     daily_nav = pd.Series(cash_series + invested, index=nav_index, dtype=float)
     daily_returns = daily_nav.pct_change().dropna()
 
-    metrics = _compute_metrics(daily_nav, closed, risk_free_rate=config.risk_free_rate)
+    metrics = _compute_metrics(daily_nav, closed, risk_free_rate=risk_free)
     metrics["total_costs"] = total_costs  # include open positions' entry costs
     metrics["n_open_positions"] = float(len(open_pos))
 
     start_date = pd.Timestamp(trading_dates[0])
     end_date = pd.Timestamp(trading_dates[-1])
     spy_nav, spy_ret, spy_metrics = _benchmark_leg(
-        config, daily_nav, start_date, end_date, provider,
+        config, daily_nav, start_date, end_date, provider, risk_free,
     )
 
     return BacktestResult(
@@ -929,11 +985,11 @@ def main() -> None:
     p.add_argument(
         "--rf-rate",
         type=float,
-        default=0.0,
+        default=None,
         dest="rf_rate",
         help="Annualized risk-free rate for Sharpe/Sortino (e.g. 0.045). "
-        "Default 0 keeps historical numbers, but overstates risk-adjusted "
-        "performance over periods when cash actually paid",
+        "Default: charge the panel's realized irx_yield per date when present, "
+        "else 4.5%%. Pass 0 to switch funding costs off",
     )
     p.add_argument("--capital", type=float, default=100_000.0)
     p.add_argument("--max-cohorts", type=int, default=2)

@@ -94,10 +94,6 @@ def test_identical_series_still_yield_no_spurious_tstat() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_risk_free_rate_defaults_to_zero() -> None:
-    assert BacktestConfig().risk_free_rate == 0.0
-
-
 def test_positive_risk_free_rate_lowers_sharpe() -> None:
     rng = np.random.default_rng(5)
     nav = _nav_from_returns(rng.normal(0.0006, 0.01, 800))
@@ -131,3 +127,65 @@ def test_nav_only_metrics_accepts_risk_free_rate() -> None:
 def test_config_rejects_absurd_risk_free_rate() -> None:
     with pytest.raises(ValueError, match="risk_free_rate"):
         BacktestConfig(risk_free_rate=-0.5)
+
+
+# ---------------------------------------------------------------------------
+# Defaults: funding costs are on, and live matches the backtest
+# ---------------------------------------------------------------------------
+
+
+def test_funding_costs_are_charged_by_default() -> None:
+    """A zero funding assumption flatters every risk-adjusted metric, so a
+    panel with no realized rate still gets charged the cash proxy."""
+    from stock_predictor.backtest import DEFAULT_RISK_FREE_RATE, run_backtest
+
+    dates = pd.bdate_range("2024-01-01", periods=90)
+    panel = pd.DataFrame([
+        {"date": d, "ticker": f"T{i:02d}", "prob": 0.5 + i / 100,
+         "adj_close": 100.0 + i + 0.05 * di}
+        for di, d in enumerate(dates) for i in range(20)
+    ])
+    assert "irx_yield" not in panel.columns
+
+    default = run_backtest(panel, BacktestConfig(benchmark_ticker=None))
+    unfunded = run_backtest(
+        panel, BacktestConfig(benchmark_ticker=None, risk_free_rate=0.0),
+    )
+    assert default.metrics["risk_free_rate_used"] == pytest.approx(DEFAULT_RISK_FREE_RATE)
+    assert unfunded.metrics["risk_free_rate_used"] == 0.0
+    assert default.metrics["sharpe"] < unfunded.metrics["sharpe"]
+
+
+def test_panel_rate_overrides_the_scalar_default() -> None:
+    """When the scored panel carries `irx_yield` (13-week T-bill, percent),
+    the realized per-date series is used instead of the constant — correct
+    across regimes rather than only the window the default was chosen for."""
+    from stock_predictor.backtest import run_backtest
+
+    dates = pd.bdate_range("2024-01-01", periods=90)
+    rows = []
+    for di, d in enumerate(dates):
+        for i in range(20):
+            rows.append({
+                "date": d, "ticker": f"T{i:02d}", "prob": 0.5 + i / 100,
+                "adj_close": 100.0 + i + 0.05 * di,
+                "irx_yield": 0.10,  # 0.10% annual: near-ZIRP, unlike the 4.5% default
+            })
+    panel = pd.DataFrame(rows)
+
+    with_panel_rate = run_backtest(panel, BacktestConfig(benchmark_ticker=None))
+    pinned_high = run_backtest(
+        panel, BacktestConfig(benchmark_ticker=None, risk_free_rate=0.045),
+    )
+    # Near-zero funding leaves more excess return than a 4.5% charge.
+    assert with_panel_rate.metrics["sharpe"] > pinned_high.metrics["sharpe"]
+    assert with_panel_rate.metrics["risk_free_rate_used"] == pytest.approx(0.001, abs=2e-4)
+
+
+def test_explicit_zero_still_disables_the_funding_charge() -> None:
+    rng = np.random.default_rng(5)
+    nav = _nav_from_returns(rng.normal(0.0006, 0.01, 400))
+    assert (
+        _compute_metrics(nav, [], risk_free_rate=0.0)["sharpe"]
+        > _compute_metrics(nav, [], risk_free_rate=0.045)["sharpe"]
+    )

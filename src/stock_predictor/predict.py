@@ -367,12 +367,12 @@ def parse_args() -> argparse.Namespace:
         help="Flat commission per ticker per buy/sell order (same as backtest-sp500)",
     )
     p.add_argument(
-        "--allow-duplicate-holdings",
+        "--one-lot-per-ticker",
         action="store_true",
-        dest="allow_duplicate_holdings",
-        help="Fixed mode: let a name already held in another cohort be bought "
-        "again (exact parity with backtest-sp500 --mode cohort, which allows "
-        "a top-ranked name in overlapping cohorts at double weight)",
+        dest="one_lot_per_ticker",
+        help="Cap each ticker at a single lot. Default matches "
+        "backtest-sp500 --mode cohort, which lets a persistently top-ranked "
+        "name sit in overlapping cohorts at double weight",
     )
     p.add_argument(
         "--no-macro-merge",
@@ -494,7 +494,7 @@ def main() -> None:
             commission_per_share=args.commission_per_share,
             commission_per_order=args.commission_per_order,
             allow_buys=not halted,
-            allow_duplicate_holdings=args.allow_duplicate_holdings,
+            allow_duplicate_holdings=not args.one_lot_per_ticker,
         )
 
     print_signal_report(

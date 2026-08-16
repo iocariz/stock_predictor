@@ -188,7 +188,9 @@ def print_report(result: BacktestResult) -> None:
             f"+ ${c.commission_per_order:.2f}/order-leg"
         )
     floor = f", min_prob={c.min_prob:g}" if c.min_prob is not None else ""
-    rf = f", rf={c.risk_free_rate:.2%}" if c.risk_free_rate else ""
+    rf_used = float(m.get("risk_free_rate_used", 0.0) or 0.0)
+    rf_src = "panel" if c.risk_free_rate is None and rf_used else "set"
+    rf = f", rf={rf_used:.2%} ({rf_src})" if rf_used else ""
     print(
         f"Config: top_n={c.top_n}, holding={c.holding_days}d, "
         f"rebalance={c.rebalance_day}, weighting={c.weighting}, "
@@ -203,7 +205,7 @@ def print_report(result: BacktestResult) -> None:
          _fmt_pct(s.get("total_return", float("nan"))) if has_bench else "N/A"),
         ("CAGR", _fmt_pct(m.get("cagr", float("nan"))),
          _fmt_pct(s.get("cagr", float("nan"))) if has_bench else "N/A"),
-        (f"Sharpe (rf={c.risk_free_rate:.1%})", _fmt_f(m.get("sharpe", float("nan"))),
+        (f"Sharpe (rf={rf_used:.1%})", _fmt_f(m.get("sharpe", float("nan"))),
          _fmt_f(s.get("sharpe", float("nan"))) if has_bench else "N/A"),
         ("Sortino", _fmt_f(m.get("sortino", float("nan"))),
          _fmt_f(s.get("sortino", float("nan"))) if has_bench else "N/A"),
@@ -288,8 +290,8 @@ def print_strategy_comparison(
 ) -> None:
     """Print side-by-side metrics on the overlapping trading-day window."""
     a_n, b_n, idx = _nav_normalized_overlap(result_a.daily_nav, result_b.daily_nav)
-    m_a = _nav_only_metrics(a_n, risk_free_rate=result_a.config.risk_free_rate)
-    m_b = _nav_only_metrics(b_n, risk_free_rate=result_b.config.risk_free_rate)
+    m_a = _nav_only_metrics(a_n, risk_free_rate=result_a.metrics.get("risk_free_rate_used", 0.0))
+    m_b = _nav_only_metrics(b_n, risk_free_rate=result_b.metrics.get("risk_free_rate_used", 0.0))
     w = max(len(label_a), len(label_b), 10)
     print()
     print("=" * (24 + w * 2 + 4))

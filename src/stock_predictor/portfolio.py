@@ -199,7 +199,7 @@ def generate_orders(
     commission_per_share: float = 0.0,
     commission_per_order: float = 0.0,
     allow_buys: bool = True,
-    allow_duplicate_holdings: bool = False,
+    allow_duplicate_holdings: bool = True,
 ) -> tuple[tuple[Order, ...], PortfolioState]:
     """
     Sell expired positions, then open a new cohort if a slot is free.
@@ -221,10 +221,11 @@ def generate_orders(
       index used for scoring (see :func:`stock_predictor.execution_calendar.trading_dates_from_index`).
     *allow_buys* — set False when a risk kill-switch is active so expiries still
       liquidate but no new cohort opens (avoids persisting buys while halted).
-    *allow_duplicate_holdings* — the backtest lets a persistently top-ranked
-      name sit in two overlapping cohorts at double weight. Live defaults to
-      one lot per ticker (``False``); set ``True`` for exact cohort parity,
-      accepting the concentration that implies.
+    *allow_duplicate_holdings* — defaults to ``True`` for parity with the
+      cohort backtest, which lets a persistently top-ranked name sit in two
+      overlapping cohorts at double weight. Set ``False`` to cap each ticker
+      at one lot, accepting that live will then under-weight names the
+      simulation kept buying.
     """
     if weighting not in ("equal", "probability"):
         raise ValueError(f"weighting must be 'equal' or 'probability', got {weighting!r}")
