@@ -706,6 +706,24 @@ notebooks/               Exploration + full pipeline
 
   Reproduce all of the above on any panel with [`scripts/signal_depth.py`](scripts/signal_depth.py) — this disclosure is meant to be re-derived, not trusted.
 
+  **The label mattered; tuning did not.** Switching to the rank objective is
+  the one change that improved the traded end of the ranking and held its sign
+  across a 2023-24 / 2025+ split. Optuna on NDCG@15 did not add to it:
+
+  | config | top-5 excess (2023-24) | (2025+) | alpha vs RSP (2023-24) | (2025+) |
+  |---|---|---|---|---|
+  | binary +5% | −1.35% (t −2.42) | −0.13% | −14.8% | +1.2% |
+  | rank, untuned | **+0.71%** (t +1.24) | **+1.17%** (t +1.43) | −8.3% | +3.5% |
+  | rank, Optuna-tuned | −0.24% (t −0.41) | +0.97% (t +1.03) | −7.2% | −1.5% |
+
+  Tuning flattened the top of the list — the tuned depth profile is nearly
+  uniform (0.86% / 0.82% / 0.85% / 0.81% across top 5 / 15 / 50 / 100) and its
+  in-sample top-5 excess turns slightly negative. NDCG@15 over ~600 names
+  scored on quintile grades rewards broad ordering, and the search settled on
+  a heavily regularized 74-tree model; maximizing it is not the same as
+  maximizing the top-15 basket's return. `--no-optuna` is a defensible default
+  for the rank objective until the tuning metric matches the trading rule.
+
   Configurations that look good still get there through beta. `--mode rank-hold --exit-rank 100` returns **+97%** (Sharpe 0.65) with **beta 1.40** and alpha **−6.7%** — leverage, not selection. Treat any better-looking result you produce here with the same suspicion: read the HAC alpha t-stat and the beta column, compare against RSP as well as SPY, and re-test on a sub-window the configuration has never seen.
 - **Sector labels** are a pragmatic blend of current Wikipedia GICS and a fixed override; they are not a perfect point-in-time sector history for every ticker-date.
 - **Earnings** come from Yahoo as-of download time; the feature is not a fully audited point-in-time fundamental database.
