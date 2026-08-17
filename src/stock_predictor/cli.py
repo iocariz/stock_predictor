@@ -24,6 +24,7 @@ from stock_predictor.pit import (
 from stock_predictor.training import (
     LABEL_TARGETS,
     OPTUNA_METRICS,
+    resolve_optuna_metric,
     build_feature_panel,
     build_labeled_panel,
     evaluate_test_set,
@@ -183,6 +184,7 @@ def resolve_objective(args: argparse.Namespace) -> str:
 def main() -> None:
     args = parse_args()
     objective = resolve_objective(args)
+    tune_metric = resolve_optuna_metric(args.optuna_metric, objective)
     provider = get_provider(args.provider, batch_size=args.batch_size)
     start, end = args.start, args.end
     train_end, test_start = args.train_end, args.test_start
@@ -214,7 +216,7 @@ def main() -> None:
                 "strict_dropna": args.strict_dropna,
                 "objective": objective,
                 "label_target": args.label_target,
-                "optuna_metric": args.optuna_metric,
+                "optuna_metric": tune_metric,
                 "seed": args.seed,
             },
         )
@@ -312,7 +314,7 @@ def main() -> None:
             purge_days=horizon,
             objective=objective,
             label_target=args.label_target,
-            optuna_metric=args.optuna_metric,
+            optuna_metric=tune_metric,
             rank_eval_k=args.wf_top_k,
         )
 
@@ -330,11 +332,13 @@ def main() -> None:
     if objective == "rank":
         model, n_trees = train_final_rank_model(
             train, feature_cols, manual_params, args.seed, purge_days=horizon,
-            label_target=args.label_target,
+            label_target=args.label_target, metric=tune_metric,
+            eval_k=args.wf_top_k,
         )
     else:
         model, n_trees = train_final_model(
             train, feature_cols, manual_params, args.seed, purge_days=horizon,
+            metric=tune_metric, eval_k=args.wf_top_k,
         )
     pr_auc, roc_auc, weekly_precision = evaluate_test_set(model, test, feature_cols)
 
@@ -365,6 +369,7 @@ def main() -> None:
             purge_days=horizon,
             objective=objective,
             label_target=args.label_target,
+            metric=tune_metric,
         )
         if need_scores:
             wf_results, wf_scores = wf_out
@@ -420,7 +425,7 @@ def main() -> None:
             "feature_cols": feature_cols,
             "objective": objective,
             "label_target": args.label_target,
-            "optuna_metric": args.optuna_metric,
+            "optuna_metric": tune_metric,
             "horizon": horizon,
             "threshold": threshold,
             "start": start,

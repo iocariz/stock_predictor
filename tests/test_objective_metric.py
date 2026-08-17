@@ -115,6 +115,7 @@ def _training_panel(n_dates: int = 40, n_names: int = 30):
         for i in range(n_names):
             rows.append({
                 "date": d, "ticker": f"T{i:02d}",
+                "adj_close": 100.0 + i,
                 "ret_1d": float(signal[i]), "vol_21d": 0.02,
                 "fwd_ret": float(fwd[i]),
                 "target_5pct": int(fwd[i] >= 0.05),
@@ -153,3 +154,62 @@ def test_aligned_metric_requires_forward_returns() -> None:
             panel, ["ret_1d"], ts_cv_splits=2, n_trials=1, seed=0,
             purge_days=1, objective="binary", optuna_metric="topn_excess",
         )
+
+
+# ---------------------------------------------------------------------------
+# Early stopping must use the same metric Optuna maximizes
+# ---------------------------------------------------------------------------
+
+
+def test_walk_forward_early_stops_on_the_aligned_metric() -> None:
+    """Regression: Optuna selected hyperparameters by top-N excess while the
+    models that produced the scored panel still early-stopped on NDCG. One
+    tuned run collapsed the final ranker to 2 trees."""
+    from stock_predictor.training import monthly_walk_forward
+
+    panel = _training_panel(n_dates=90, n_names=25)
+    metrics, scores = monthly_walk_forward(
+        panel, ["ret_1d"], "target_5pct", "date", "2024-03-01",
+        {"n_estimators": 60, "learning_rate": 0.1},
+        inner_val_frac=0.2, min_train_rows=50, top_k=5, random_state=0,
+        return_scores=True, purge_days=1, objective="rank",
+        metric="topn_excess",
+    )
+    assert len(metrics) > 0
+    assert len(scores) > 0
+    # Models that stop at one or two trees are untrained, not tuned.
+    assert metrics["n_trees"].min() >= 3, metrics["n_trees"].tolist()
+
+
+def test_final_rank_model_early_stops_on_the_aligned_metric() -> None:
+    from stock_predictor.training import train_final_rank_model
+
+    panel = _training_panel(n_dates=60, n_names=25)
+    model, n_trees = train_final_rank_model(
+        panel, ["ret_1d"], {"n_estimators": 60, "learning_rate": 0.1}, seed=0,
+        purge_days=1, eval_k=5, metric="topn_excess",
+    )
+    assert n_trees >= 3
+    assert model.n_estimators == n_trees
+
+
+def test_aligned_early_stopping_requires_forward_returns() -> None:
+    from stock_predictor.training import train_final_rank_model
+
+    panel = _training_panel(n_dates=40).drop(columns=["fwd_ret"])
+    with pytest.raises(ValueError, match="fwd_ret"):
+        train_final_rank_model(
+            panel, ["ret_1d"], {"n_estimators": 20}, seed=0,
+            eval_k=5, metric="topn_excess",
+        )
+
+
+def test_ndcg_remains_selectable_for_comparison() -> None:
+    from stock_predictor.training import train_final_rank_model
+
+    panel = _training_panel(n_dates=60, n_names=25)
+    _, n_trees = train_final_rank_model(
+        panel, ["ret_1d"], {"n_estimators": 60, "learning_rate": 0.1}, seed=0,
+        purge_days=1, eval_k=5, metric="ndcg",
+    )
+    assert n_trees >= 1

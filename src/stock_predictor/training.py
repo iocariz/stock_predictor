@@ -450,6 +450,33 @@ def _make_topn_feval(
     return feval
 
 
+def _es_eval_kwargs(
+    val_df: pd.DataFrame, metric: str, top_n: int, date_col: str = "date",
+) -> tuple[str, dict]:
+    """(lgb metric name, fit kwargs) so early stopping uses *metric*.
+
+    Optuna selecting hyperparameters by top-N excess while the models that
+    produce the scored panel early-stop on NDCG leaves the misalignment in
+    place — one such run collapsed the final ranker to 2 trees. Returning
+    ``metric="None"`` plus a custom eval callable keeps tree count on the
+    same quantity being maximized.
+    """
+    if metric not in ("topn_excess", "topn_ir"):
+        return ("ndcg" if metric == "ndcg" else "average_precision"), {}
+    if "fwd_ret" not in val_df.columns:
+        raise ValueError(
+            f"metric={metric!r} early-stops on realized basket return and needs "
+            "a 'fwd_ret' column on the validation rows"
+        )
+    feval = _make_topn_feval(
+        pd.to_datetime(val_df[date_col]).to_numpy(),
+        val_df["fwd_ret"].to_numpy(dtype=float),
+        top_n,
+        risk_adjusted=metric == "topn_ir",
+    )
+    return "None", {"eval_metric": feval}
+
+
 def make_rank_objective(
     X: pd.DataFrame,
     grades: np.ndarray,
@@ -628,6 +655,7 @@ def monthly_walk_forward(
     purge_days: int = 0,
     objective: str = "binary",
     label_target: str = "raw",
+    metric: str = "auto",
 ) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
     """Walk forward month by month.
 
@@ -644,6 +672,7 @@ def monthly_walk_forward(
     """
     if objective not in ("binary", "rank"):
         raise ValueError(f"objective must be 'binary' or 'rank', got {objective!r}")
+    metric = resolve_optuna_metric(metric, objective)
     d = df.copy()
     d[date_col] = pd.to_datetime(d[date_col])
     if objective == "rank":
@@ -678,10 +707,11 @@ def monthly_walk_forward(
                 continue
             g_tr = tr_in.groupby(date_col).size().to_numpy()
             g_va = va_in.groupby(date_col).size().to_numpy()
+            lgb_metric, es_kw = _es_eval_kwargs(va_in, metric, top_k, date_col)
             es_model = lgb.LGBMRanker(
                 **lgb_core,
                 n_estimators=es_cap,
-                metric="ndcg",
+                metric=lgb_metric,
                 eval_at=[top_k],
                 random_state=random_state,
                 n_jobs=-1,
@@ -697,6 +727,7 @@ def monthly_walk_forward(
                     lgb.early_stopping(80, verbose=False, first_metric_only=True),
                     lgb.log_evaluation(0),
                 ],
+                **es_kw,
             )
             bi = es_model.best_iteration_
             n_trees = int(bi) + 1 if bi is not None else int(es_model.n_estimators_)
@@ -722,12 +753,12 @@ def monthly_walk_forward(
             if neg == 0 or pos == 0:
                 continue
             spw = neg / pos
+            lgb_metric, es_kw = _es_eval_kwargs(va_in, metric, top_k, date_col)
             clf = lgb.LGBMClassifier(
                 **lgb_core,
                 n_estimators=es_cap,
                 scale_pos_weight=spw,
-                metric="average_precision",
-                eval_metric="average_precision",
+                metric=lgb_metric,
                 random_state=random_state,
                 n_jobs=-1,
                 verbosity=-1,
@@ -740,6 +771,7 @@ def monthly_walk_forward(
                     lgb.early_stopping(80, verbose=False, first_metric_only=True),
                     lgb.log_evaluation(0),
                 ],
+                **({"eval_metric": "average_precision"} if not es_kw else es_kw),
             )
             bi = clf.best_iteration_
             if bi is None:
@@ -1194,6 +1226,8 @@ def train_final_model(
     params: dict,
     seed: int,
     purge_days: int = 0,
+    metric: str = "auto",
+    eval_k: int = 15,
 ) -> tuple[lgb.LGBMClassifier, int]:
     """Find n_trees via early stopping on a val split, then retrain on full train."""
     train_inner, val_inner = _inner_train_val_split(
@@ -1206,11 +1240,12 @@ def train_final_model(
 
     neg_inner, pos_inner = int((y_tr_inner == 0).sum()), int((y_tr_inner == 1).sum())
     spw_inner = neg_inner / pos_inner
+    metric = resolve_optuna_metric(metric, "binary")
+    lgb_metric, es_kw = _es_eval_kwargs(val_inner, metric, eval_k)
     es_model = lgb.LGBMClassifier(
         **params,
         scale_pos_weight=spw_inner,
-        metric="average_precision",
-        eval_metric="average_precision",
+        metric=lgb_metric,
         random_state=seed,
         n_jobs=-1,
     )
@@ -1221,6 +1256,7 @@ def train_final_model(
             lgb.early_stopping(50, verbose=False, first_metric_only=True),
             lgb.log_evaluation(100),
         ],
+        **({"eval_metric": "average_precision"} if not es_kw else es_kw),
     )
     best_iter = es_model.best_iteration_
     n_trees = int(best_iter) + 1 if best_iter is not None else params.get("n_estimators", 500)
@@ -1252,6 +1288,7 @@ def train_final_rank_model(
     purge_days: int = 0,
     eval_k: int = 15,
     label_target: str = "raw",
+    metric: str = "auto",
 ) -> tuple[lgb.LGBMRanker, int]:
     """Lambdarank final model: n_trees via NDCG early stopping, retrain on full train.
 
@@ -1259,6 +1296,7 @@ def train_final_rank_model(
     date on per-date forward-return quintile grades (see
     :func:`add_rank_labels`).  *train* must contain ``fwd_ret``.
     """
+    metric = resolve_optuna_metric(metric, "rank")
     graded = add_rank_labels(train, label_target=label_target)
     train_inner, val_inner = _inner_train_val_split(
         graded, "date", val_frac=0.15, purge_days=purge_days,
@@ -1266,9 +1304,10 @@ def train_final_rank_model(
     train_inner = train_inner.sort_values("date", kind="stable")
     val_inner = val_inner.sort_values("date", kind="stable")
 
+    lgb_metric, es_kw = _es_eval_kwargs(val_inner, metric, eval_k)
     es_model = lgb.LGBMRanker(
         **params,
-        metric="ndcg",
+        metric=lgb_metric,
         eval_at=[eval_k],
         random_state=seed,
         n_jobs=-1,
@@ -1283,10 +1322,13 @@ def train_final_rank_model(
             lgb.early_stopping(50, verbose=False, first_metric_only=True),
             lgb.log_evaluation(100),
         ],
+        **es_kw,
     )
     best_iter = es_model.best_iteration_
     n_trees = int(best_iter) + 1 if best_iter is not None else int(es_model.n_estimators_)
-    print(f"Best iteration (from val split, NDCG@{eval_k}): {n_trees}")
+    label = {"ndcg": f"NDCG@{eval_k}", "topn_excess": f"top-{eval_k} excess",
+             "topn_ir": f"top-{eval_k} excess IR"}[metric]
+    print(f"Best iteration (from val split, {label}): {n_trees}")
 
     graded = graded.sort_values("date", kind="stable")
     final_params = {k: v for k, v in params.items() if k != "n_estimators"}
