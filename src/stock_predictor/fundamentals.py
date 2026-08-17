@@ -375,6 +375,19 @@ def trailing_twelve_months(fund: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True)
 
 
+_MERGE_UNIT = "datetime64[ns]"
+
+
+def _as_merge_key(series: pd.Series) -> pd.Series:
+    """Datetimes pinned to one resolution.
+
+    pandas >= 3.0 keeps whatever unit it inferred, and merge_asof refuses to
+    join ``M8[s]`` against ``M8[us]``. Panel dates and EDGAR filing dates
+    routinely land on different units, so both keys are pinned here.
+    """
+    return pd.to_datetime(series).astype(_MERGE_UNIT)
+
+
 def asof_join_fundamentals(
     panel: pd.DataFrame,
     fund: pd.DataFrame,
@@ -392,8 +405,10 @@ def asof_join_fundamentals(
 
     wide_cols: dict[str, pd.Series] = {}
     out = panel.copy()
-    out[date_col] = pd.to_datetime(out[date_col])
+    # Pin the merge key locally only: rewriting the caller's date column would
+    # silently change its dtype for every downstream stage.
     left = out[[date_col, ticker_col]].reset_index(drop=True)
+    left[date_col] = _as_merge_key(left[date_col])
     # merge_asof requires identical `by` dtypes; parquet round-trips can hand
     # back StringDtype on one side and object on the other.
     left[ticker_col] = left[ticker_col].astype(str)
@@ -401,7 +416,7 @@ def asof_join_fundamentals(
 
     for concept, grp in fund.groupby("concept", sort=False):
         g = grp.copy()
-        g["filed"] = pd.to_datetime(g["filed"])
+        g["filed"] = _as_merge_key(g["filed"])
         # A flow concept is *only* ever its TTM sum, never a bare quarter.
         # Falling back to the single period would make the column mean
         # "one quarter" early in a company's history and "twelve months"

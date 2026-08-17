@@ -344,3 +344,29 @@ def test_importances_empty_for_a_model_without_a_booster() -> None:
     from stock_predictor.training import feature_importances
 
     assert feature_importances(object(), ["a", "b"]) == {}
+
+
+def test_join_survives_mismatched_datetime_resolutions() -> None:
+    """Regression: pandas >= 3.0 keeps inferred datetime units, and merge_asof
+    refuses M8[s] against M8[us]. A real run failed here after the unit tests
+    passed, because the synthetic fixtures happened to agree on units."""
+    fund = trailing_twelve_months(extract_concepts(_stock_facts(), "AAA"))
+    fund["filed"] = fund["filed"].astype("datetime64[us]")
+
+    panel = _panel(["2024-06-03"])
+    panel["date"] = panel["date"].astype("datetime64[s]")
+    assert panel["date"].dtype != fund["filed"].dtype, "fixture must mismatch"
+
+    joined = asof_join_fundamentals(panel, fund)
+    assert joined["raw_assets"].iloc[0] == 1000.0
+
+
+def test_join_handles_every_common_resolution_pair() -> None:
+    for panel_unit in ("datetime64[s]", "datetime64[ms]", "datetime64[us]", "datetime64[ns]"):
+        for fund_unit in ("datetime64[s]", "datetime64[us]", "datetime64[ns]"):
+            fund = trailing_twelve_months(extract_concepts(_stock_facts(), "AAA"))
+            fund["filed"] = fund["filed"].astype(fund_unit)
+            panel = _panel(["2024-06-03"])
+            panel["date"] = panel["date"].astype(panel_unit)
+            out = asof_join_fundamentals(panel, fund)
+            assert out["raw_assets"].iloc[0] == 1000.0, (panel_unit, fund_unit)
