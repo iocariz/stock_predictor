@@ -23,6 +23,7 @@ from stock_predictor.calendar_features import CALENDAR_FEATURE_COLS, add_calenda
 from stock_predictor.data_provider import _load_dotenv
 from stock_predictor.macro_merge import download_macro_fred, merge_macro_panels
 from stock_predictor.pit import filter_panel_to_pit
+from stock_predictor.signal_depth import top_n_excess_score
 
 SP500_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 MACRO_YF = ["^VIX", "^TNX", "^IRX"]
@@ -400,6 +401,82 @@ def _date_group_sizes(dates: np.ndarray) -> np.ndarray:
     return np.unique(dates, return_counts=True)[1]
 
 
+OPTUNA_METRICS: tuple[str, ...] = ("auto", "pr_auc", "ndcg", "topn_excess", "topn_ir")
+"""Tuning objectives.
+
+``topn_excess`` / ``topn_ir`` measure the rule the strategy trades: the mean
+per-date excess forward return of the top-N basket (``topn_ir`` divides by its
+standard deviation). ``pr_auc`` and ``ndcg`` are classification / full-list
+ranking metrics and only proxy that.
+
+The distinction is not academic. Tuning NDCG@15 over ~600 names graded into
+quintiles rewards arranging the whole tail correctly and *flattened the traded
+end*: the tuned depth profile came out near-uniform across the top 5/15/50/100
+and its in-sample top-5 excess turned negative. ``auto`` therefore selects
+``topn_excess`` for the ranker and ``pr_auc`` for the classifier.
+"""
+
+
+def resolve_optuna_metric(metric: str, objective: str) -> str:
+    """Expand ``auto`` and reject metrics that the objective cannot produce."""
+    if metric not in OPTUNA_METRICS:
+        raise ValueError(f"optuna_metric must be one of {OPTUNA_METRICS}, got {metric!r}")
+    if metric == "auto":
+        return "topn_excess" if objective == "rank" else "pr_auc"
+    if metric == "ndcg" and objective != "rank":
+        raise ValueError("optuna_metric='ndcg' requires objective='rank'")
+    if metric == "pr_auc" and objective != "binary":
+        raise ValueError("optuna_metric='pr_auc' requires objective='binary'")
+    return metric
+
+
+def _make_topn_feval(
+    dates_val: np.ndarray, fwd_val: np.ndarray, top_n: int, *, risk_adjusted: bool,
+):
+    """LightGBM eval callable so early stopping uses the traded-rule metric too.
+
+    Closes over the validation fold's dates and forward returns; the eval set
+    must be exactly that fold, in the same row order.
+    """
+    name = "topn_ir" if risk_adjusted else "topn_excess"
+
+    def feval(y_true, y_pred):  # noqa: ARG001 - grades unused; the metric needs fwd_ret
+        score = top_n_excess_score(
+            dates_val, np.asarray(y_pred, dtype=float), fwd_val, top_n,
+            risk_adjusted=risk_adjusted,
+        )
+        return name, score, True
+
+    return feval
+
+
+def _es_eval_kwargs(
+    val_df: pd.DataFrame, metric: str, top_n: int, date_col: str = "date",
+) -> tuple[str, dict]:
+    """(lgb metric name, fit kwargs) so early stopping uses *metric*.
+
+    Optuna selecting hyperparameters by top-N excess while the models that
+    produce the scored panel early-stop on NDCG leaves the misalignment in
+    place — one such run collapsed the final ranker to 2 trees. Returning
+    ``metric="None"`` plus a custom eval callable keeps tree count on the
+    same quantity being maximized.
+    """
+    if metric not in ("topn_excess", "topn_ir"):
+        return ("ndcg" if metric == "ndcg" else "average_precision"), {}
+    if "fwd_ret" not in val_df.columns:
+        raise ValueError(
+            f"metric={metric!r} early-stops on realized basket return and needs "
+            "a 'fwd_ret' column on the validation rows"
+        )
+    feval = _make_topn_feval(
+        pd.to_datetime(val_df[date_col]).to_numpy(),
+        val_df["fwd_ret"].to_numpy(dtype=float),
+        top_n,
+        risk_adjusted=metric == "topn_ir",
+    )
+    return "None", {"eval_metric": feval}
+
+
 def make_rank_objective(
     X: pd.DataFrame,
     grades: np.ndarray,
@@ -407,8 +484,17 @@ def make_rank_objective(
     splits: list[tuple[np.ndarray, np.ndarray]],
     seed: int,
     eval_k: int,
+    fwd_ret: np.ndarray | None = None,
+    metric: str = "topn_excess",
 ):
-    """Optuna objective for lambdarank: mean validation NDCG@eval_k across folds."""
+    """Optuna objective for lambdarank, scored on *metric* across folds.
+
+    ``topn_excess`` / ``topn_ir`` need *fwd_ret* (aligned to X) because they
+    measure realized basket return, not grade agreement.
+    """
+    if metric in ("topn_excess", "topn_ir") and fwd_ret is None:
+        raise ValueError(f"metric={metric!r} requires fwd_ret aligned to X")
+    risk_adjusted = metric == "topn_ir"
 
     def objective(trial: optuna.Trial) -> float:
         params = {
@@ -425,14 +511,21 @@ def make_rank_objective(
         }
         fold_scores: list[float] = []
         for train_idx, val_idx in splits:
+            aligned = metric in ("topn_excess", "topn_ir")
             rk = lgb.LGBMRanker(
                 **params,
-                metric="ndcg",
+                metric="None" if aligned else "ndcg",
                 eval_at=[eval_k],
                 random_state=seed,
                 n_jobs=-1,
                 verbosity=-1,
             )
+            fit_kw = {}
+            if aligned:
+                fit_kw["eval_metric"] = _make_topn_feval(
+                    dates[val_idx], np.asarray(fwd_ret)[val_idx], eval_k,
+                    risk_adjusted=risk_adjusted,
+                )
             rk.fit(
                 X.iloc[train_idx],
                 grades[train_idx],
@@ -443,8 +536,10 @@ def make_rank_objective(
                     lgb.early_stopping(80, verbose=False, first_metric_only=True),
                     lgb.log_evaluation(0),
                 ],
+                **fit_kw,
             )
-            fold_scores.append(float(rk.best_score_["valid_0"][f"ndcg@{eval_k}"]))
+            key = ("topn_ir" if risk_adjusted else "topn_excess") if aligned else f"ndcg@{eval_k}"
+            fold_scores.append(float(rk.best_score_["valid_0"][key]))
         return float(np.mean(fold_scores))
 
     return objective
@@ -456,7 +551,20 @@ def make_objective(
     spw: float,
     splits: list[tuple[np.ndarray, np.ndarray]],
     seed: int,
+    dates: np.ndarray | None = None,
+    fwd_ret: np.ndarray | None = None,
+    metric: str = "pr_auc",
+    eval_k: int = 15,
 ):
+    """Optuna objective for the classifier, scored on *metric* across folds.
+
+    ``pr_auc`` is the historical choice; ``topn_excess`` / ``topn_ir`` score
+    the traded rule instead and need *dates* and *fwd_ret* aligned to X.
+    """
+    aligned = metric in ("topn_excess", "topn_ir")
+    if aligned and (dates is None or fwd_ret is None):
+        raise ValueError(f"metric={metric!r} requires dates and fwd_ret aligned to X")
+    risk_adjusted = metric == "topn_ir"
     def objective(trial: optuna.Trial) -> float:
         params = {
             "n_estimators": trial.suggest_int("n_estimators", 200, 1200),
@@ -477,12 +585,17 @@ def make_objective(
             clf = lgb.LGBMClassifier(
                 **params,
                 scale_pos_weight=spw,
-                metric="average_precision",
-                eval_metric="average_precision",
+                metric="None" if aligned else "average_precision",
                 random_state=seed,
                 n_jobs=-1,
                 verbosity=-1,
             )
+            fit_kw = {}
+            if aligned:
+                fit_kw["eval_metric"] = _make_topn_feval(
+                    np.asarray(dates)[val_idx], np.asarray(fwd_ret)[val_idx], eval_k,
+                    risk_adjusted=risk_adjusted,
+                )
             clf.fit(
                 X_tr,
                 y_tr,
@@ -491,8 +604,19 @@ def make_objective(
                     lgb.early_stopping(80, verbose=False, first_metric_only=True),
                     lgb.log_evaluation(0),
                 ],
+                **fit_kw,
             )
-            fold_scores.append(average_precision_score(y_va, clf.predict_proba(X_va)[:, 1]))
+            if aligned:
+                fold_scores.append(top_n_excess_score(
+                    np.asarray(dates)[val_idx],
+                    clf.predict_proba(X_va)[:, 1],
+                    np.asarray(fwd_ret)[val_idx],
+                    eval_k, risk_adjusted=risk_adjusted,
+                ))
+            else:
+                fold_scores.append(
+                    average_precision_score(y_va, clf.predict_proba(X_va)[:, 1])
+                )
         return float(np.mean(fold_scores))
 
     return objective
@@ -531,6 +655,7 @@ def monthly_walk_forward(
     purge_days: int = 0,
     objective: str = "binary",
     label_target: str = "raw",
+    metric: str = "auto",
 ) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
     """Walk forward month by month.
 
@@ -547,6 +672,7 @@ def monthly_walk_forward(
     """
     if objective not in ("binary", "rank"):
         raise ValueError(f"objective must be 'binary' or 'rank', got {objective!r}")
+    metric = resolve_optuna_metric(metric, objective)
     d = df.copy()
     d[date_col] = pd.to_datetime(d[date_col])
     if objective == "rank":
@@ -581,10 +707,11 @@ def monthly_walk_forward(
                 continue
             g_tr = tr_in.groupby(date_col).size().to_numpy()
             g_va = va_in.groupby(date_col).size().to_numpy()
+            lgb_metric, es_kw = _es_eval_kwargs(va_in, metric, top_k, date_col)
             es_model = lgb.LGBMRanker(
                 **lgb_core,
                 n_estimators=es_cap,
-                metric="ndcg",
+                metric=lgb_metric,
                 eval_at=[top_k],
                 random_state=random_state,
                 n_jobs=-1,
@@ -600,6 +727,7 @@ def monthly_walk_forward(
                     lgb.early_stopping(80, verbose=False, first_metric_only=True),
                     lgb.log_evaluation(0),
                 ],
+                **es_kw,
             )
             bi = es_model.best_iteration_
             n_trees = int(bi) + 1 if bi is not None else int(es_model.n_estimators_)
@@ -625,12 +753,12 @@ def monthly_walk_forward(
             if neg == 0 or pos == 0:
                 continue
             spw = neg / pos
+            lgb_metric, es_kw = _es_eval_kwargs(va_in, metric, top_k, date_col)
             clf = lgb.LGBMClassifier(
                 **lgb_core,
                 n_estimators=es_cap,
                 scale_pos_weight=spw,
-                metric="average_precision",
-                eval_metric="average_precision",
+                metric=lgb_metric,
                 random_state=random_state,
                 n_jobs=-1,
                 verbosity=-1,
@@ -643,6 +771,7 @@ def monthly_walk_forward(
                     lgb.early_stopping(80, verbose=False, first_metric_only=True),
                     lgb.log_evaluation(0),
                 ],
+                **({"eval_metric": "average_precision"} if not es_kw else es_kw),
             )
             bi = clf.best_iteration_
             if bi is None:
@@ -1022,6 +1151,7 @@ def run_optuna_search(
     objective: str = "binary",
     rank_eval_k: int = 15,
     label_target: str = "raw",
+    optuna_metric: str = "auto",
 ) -> dict:
     """Run Optuna TPE search over LightGBM hyperparameters.
 
@@ -1035,6 +1165,12 @@ def run_optuna_search(
     """
     if objective not in ("binary", "rank"):
         raise ValueError(f"objective must be 'binary' or 'rank', got {objective!r}")
+    metric = resolve_optuna_metric(optuna_metric, objective)
+    if metric in ("topn_excess", "topn_ir") and "fwd_ret" not in train.columns:
+        raise ValueError(
+            f"optuna_metric={metric!r} scores realized basket return and needs a "
+            "'fwd_ret' column on the training panel"
+        )
     train_sorted = train.sort_values(["date", "ticker"]).reset_index(drop=True)
     X_cv = train_sorted[feature_cols]
     splits = purged_date_splits(train_sorted["date"], ts_cv_splits, purge_days)
@@ -1043,23 +1179,41 @@ def run_optuna_search(
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=seed),
     )
+    dates_cv = pd.to_datetime(train_sorted["date"]).to_numpy()
+    fwd_cv = (
+        train_sorted["fwd_ret"].to_numpy() if "fwd_ret" in train_sorted.columns else None
+    )
     if objective == "rank":
         graded = add_rank_labels(train_sorted, label_target=label_target)
         fn = make_rank_objective(
             X_cv,
             graded["rank_grade"].to_numpy(),
-            pd.to_datetime(train_sorted["date"]).to_numpy(),
+            dates_cv,
             splits,
             seed,
             rank_eval_k,
+            fwd_ret=fwd_cv,
+            metric=metric,
         )
-        metric_name = f"NDCG@{rank_eval_k}"
     else:
         y_cv = train_sorted["target_5pct"].to_numpy()
         neg_cv, pos_cv = int((y_cv == 0).sum()), int((y_cv == 1).sum())
+        if pos_cv == 0 or neg_cv == 0:
+            raise ValueError(
+                f"objective='binary' needs both classes in the tuning set, got "
+                f"{pos_cv} positive / {neg_cv} negative. Lower --threshold, "
+                "widen the date range, or use objective='rank'."
+            )
         spw_cv = neg_cv / pos_cv
-        fn = make_objective(X_cv, y_cv, spw_cv, splits, seed)
-        metric_name = "PR-AUC"
+        fn = make_objective(
+            X_cv, y_cv, spw_cv, splits, seed,
+            dates=dates_cv, fwd_ret=fwd_cv, metric=metric, eval_k=rank_eval_k,
+        )
+    metric_name = {
+        "pr_auc": "PR-AUC", "ndcg": f"NDCG@{rank_eval_k}",
+        "topn_excess": f"top-{rank_eval_k} excess fwd ret",
+        "topn_ir": f"top-{rank_eval_k} excess IR",
+    }[metric]
     study.optimize(fn, n_trials=n_trials, show_progress_bar=True)
     print(f"Optuna best CV {metric_name}: {study.best_value:.4f}")
     print("Best params:", study.best_params)
@@ -1072,6 +1226,8 @@ def train_final_model(
     params: dict,
     seed: int,
     purge_days: int = 0,
+    metric: str = "auto",
+    eval_k: int = 15,
 ) -> tuple[lgb.LGBMClassifier, int]:
     """Find n_trees via early stopping on a val split, then retrain on full train."""
     train_inner, val_inner = _inner_train_val_split(
@@ -1084,11 +1240,12 @@ def train_final_model(
 
     neg_inner, pos_inner = int((y_tr_inner == 0).sum()), int((y_tr_inner == 1).sum())
     spw_inner = neg_inner / pos_inner
+    metric = resolve_optuna_metric(metric, "binary")
+    lgb_metric, es_kw = _es_eval_kwargs(val_inner, metric, eval_k)
     es_model = lgb.LGBMClassifier(
         **params,
         scale_pos_weight=spw_inner,
-        metric="average_precision",
-        eval_metric="average_precision",
+        metric=lgb_metric,
         random_state=seed,
         n_jobs=-1,
     )
@@ -1099,6 +1256,7 @@ def train_final_model(
             lgb.early_stopping(50, verbose=False, first_metric_only=True),
             lgb.log_evaluation(100),
         ],
+        **({"eval_metric": "average_precision"} if not es_kw else es_kw),
     )
     best_iter = es_model.best_iteration_
     n_trees = int(best_iter) + 1 if best_iter is not None else params.get("n_estimators", 500)
@@ -1130,6 +1288,7 @@ def train_final_rank_model(
     purge_days: int = 0,
     eval_k: int = 15,
     label_target: str = "raw",
+    metric: str = "auto",
 ) -> tuple[lgb.LGBMRanker, int]:
     """Lambdarank final model: n_trees via NDCG early stopping, retrain on full train.
 
@@ -1137,6 +1296,7 @@ def train_final_rank_model(
     date on per-date forward-return quintile grades (see
     :func:`add_rank_labels`).  *train* must contain ``fwd_ret``.
     """
+    metric = resolve_optuna_metric(metric, "rank")
     graded = add_rank_labels(train, label_target=label_target)
     train_inner, val_inner = _inner_train_val_split(
         graded, "date", val_frac=0.15, purge_days=purge_days,
@@ -1144,9 +1304,10 @@ def train_final_rank_model(
     train_inner = train_inner.sort_values("date", kind="stable")
     val_inner = val_inner.sort_values("date", kind="stable")
 
+    lgb_metric, es_kw = _es_eval_kwargs(val_inner, metric, eval_k)
     es_model = lgb.LGBMRanker(
         **params,
-        metric="ndcg",
+        metric=lgb_metric,
         eval_at=[eval_k],
         random_state=seed,
         n_jobs=-1,
@@ -1161,10 +1322,13 @@ def train_final_rank_model(
             lgb.early_stopping(50, verbose=False, first_metric_only=True),
             lgb.log_evaluation(100),
         ],
+        **es_kw,
     )
     best_iter = es_model.best_iteration_
     n_trees = int(best_iter) + 1 if best_iter is not None else int(es_model.n_estimators_)
-    print(f"Best iteration (from val split, NDCG@{eval_k}): {n_trees}")
+    label = {"ndcg": f"NDCG@{eval_k}", "topn_excess": f"top-{eval_k} excess",
+             "topn_ir": f"top-{eval_k} excess IR"}[metric]
+    print(f"Best iteration (from val split, {label}): {n_trees}")
 
     graded = graded.sort_values("date", kind="stable")
     final_params = {k: v for k, v in params.items() if k != "n_estimators"}

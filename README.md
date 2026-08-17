@@ -706,9 +706,47 @@ notebooks/               Exploration + full pipeline
 
   Reproduce all of the above on any panel with [`scripts/signal_depth.py`](scripts/signal_depth.py) — this disclosure is meant to be re-derived, not trusted.
 
-  **The label mattered; tuning did not.** Switching to the rank objective is
-  the one change that improved the traded end of the ranking and held its sign
-  across a 2023-24 / 2025+ split. Optuna on NDCG@15 did not add to it:
+  **The label mattered; tuning did not — under any metric.** Switching to the
+  rank objective is the one change that improved the traded end of the ranking
+  and held its sign across a 2023-24 / 2025+ split. Tuning did not add to it,
+  including after the tuning objective was rewritten to measure the traded
+  rule itself (`--optuna-metric topn_excess` / `topn_ir`):
+
+  | config | top-5 excess | HAC t | return IC | alpha vs RSP | t |
+  |---|---|---|---|---|---|
+  | rank, untuned | **+0.91%** | +1.90 | **+0.0144** | −2.7% | −0.35 |
+  | rank, tuned NDCG@15 | +0.41% | +0.83 | +0.0023 | +1.0% | +0.13 |
+  | rank, tuned `topn_excess` | +0.10% | +0.20 | +0.0049 | +1.6% | +0.20 |
+  | rank, tuned `topn_ir` | +0.65% | +1.42 | +0.0084 | +2.8% | +0.35 |
+
+  Note the shape of that failure: `topn_excess` *maximizes* top-N excess
+  forward return, and the model it produced has the **worst** top-5 excess of
+  the four. Optuna scored 0.0090 on that metric across pre-2023 folds and none
+  of it carried to 2023+. Every tuned variant also has lower return IC than
+  the untuned model. The tuning folds sit entirely before the evaluation
+  window, so this is a generalization failure, not leakage.
+
+  Full-window alpha turns mildly positive for all three tuned variants, which
+  looks like progress until the split:
+
+  | config | alpha 2023-24 | alpha 2025+ |
+  |---|---|---|
+  | rank, untuned | −8.3% (t −1.09) | +3.5% (t +0.24) |
+  | rank, `topn_excess` | −5.1% (t −0.52) | +7.1% (t +0.55) |
+  | rank, `topn_ir` | −11.6% (t −1.39) | **+21.1%** (t +1.45) |
+
+  `topn_ir`'s +21.1% out-of-sample alpha is the most eye-catching number this
+  repo can produce, and it arrives attached to −11.6% in-sample. That is
+  regime dependence, not edge. Nothing anywhere clears |t| = 2.
+
+  **The tree counts are the clearest signal.** Now that early stopping uses
+  the metric being maximized, validation performance peaks at 2 trees
+  (`topn_excess`), 4 (`topn_ir`) and 10 (NDCG@15). A ranker that cannot
+  justify more than ten trees has found almost nothing learnable in these
+  features — and a 2-tree `model.pkl` is unusable for `predict-sp500`, so
+  check `Best iteration` in the log before shipping a tuned model.
+
+  The earlier NDCG-specific finding, for reference:
 
   | config | top-5 excess (2023-24) | (2025+) | alpha vs RSP (2023-24) | (2025+) |
   |---|---|---|---|---|
@@ -719,10 +757,11 @@ notebooks/               Exploration + full pipeline
   Tuning flattened the top of the list — the tuned depth profile is nearly
   uniform (0.86% / 0.82% / 0.85% / 0.81% across top 5 / 15 / 50 / 100) and its
   in-sample top-5 excess turns slightly negative. NDCG@15 over ~600 names
-  scored on quintile grades rewards broad ordering, and the search settled on
-  a heavily regularized 74-tree model; maximizing it is not the same as
-  maximizing the top-15 basket's return. `--no-optuna` is a defensible default
-  for the rank objective until the tuning metric matches the trading rule.
+  scored on quintile grades rewards broad ordering, so maximizing it is not
+  the same as maximizing the top-15 basket's return. That diagnosis was
+  correct and `--optuna-metric` fixes it, but fixing it did not help: see the
+  table above. **`--no-optuna` remains the recommended setting for the rank
+  objective.**
 
   Configurations that look good still get there through beta. `--mode rank-hold --exit-rank 100` returns **+97%** (Sharpe 0.65) with **beta 1.40** and alpha **−6.7%** — leverage, not selection. Treat any better-looking result you produce here with the same suspicion: read the HAC alpha t-stat and the beta column, compare against RSP as well as SPY, and re-test on a sub-window the configuration has never seen.
 - **Sector labels** are a pragmatic blend of current Wikipedia GICS and a fixed override; they are not a perfect point-in-time sector history for every ticker-date.
