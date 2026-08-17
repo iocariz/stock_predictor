@@ -1429,6 +1429,40 @@ def save_eval_plots(
     print(f"Saved plots under {plots_dir}")
 
 
+def feature_importances(
+    model: object, feature_cols: list[str], *, importance_type: str = "gain",
+) -> dict[str, float]:
+    """Feature importance as a fraction of total, best first.
+
+    Recorded in model metadata so "did the model actually use this feature?"
+    is answerable without unpickling. Gain rather than split count: a feature
+    can be split on often while contributing almost nothing.
+    """
+    booster = getattr(model, "booster_", None)
+    if booster is None:
+        return {}
+    raw = np.asarray(booster.feature_importance(importance_type=importance_type),
+                     dtype=float)
+    if raw.size != len(feature_cols) or raw.sum() <= 0:
+        return {}
+    frac = raw / raw.sum()
+    order = np.argsort(-frac)
+    return {feature_cols[i]: float(frac[i]) for i in order}
+
+
+def importance_by_group(
+    importances: dict[str, float], prefixes: dict[str, tuple[str, ...]],
+) -> dict[str, float]:
+    """Aggregate importance by feature family, for a quick 'was it used' read."""
+    out = {name: 0.0 for name in prefixes}
+    for feat, val in importances.items():
+        for name, pfx in prefixes.items():
+            if feat.startswith(pfx):
+                out[name] += val
+                break
+    return out
+
+
 def save_model_artifacts(
     output_path: Path,
     model: lgb.LGBMClassifier,

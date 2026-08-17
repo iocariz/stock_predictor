@@ -289,3 +289,58 @@ def test_negative_equity_does_not_produce_a_ratio() -> None:
     out = add_fundamental_features(df)
     assert np.isnan(out["fund_book_to_price"].iloc[0])
     assert np.isnan(out["fund_roe"].iloc[0])
+
+
+# ---------------------------------------------------------------------------
+# Did the model use them?
+# ---------------------------------------------------------------------------
+
+
+def test_importances_sum_to_one_and_rank_by_gain() -> None:
+    import lightgbm as lgb
+
+    from stock_predictor.training import feature_importances
+
+    rng = np.random.default_rng(0)
+    n = 600
+    useful = rng.normal(size=n)
+    noise = rng.normal(size=n)
+    y = (useful + 0.05 * rng.normal(size=n) > 0).astype(int)
+    X = pd.DataFrame({"useful": useful, "noise": noise})
+    clf = lgb.LGBMClassifier(n_estimators=40, verbosity=-1).fit(X, y)
+
+    imp = feature_importances(clf, ["useful", "noise"])
+    assert set(imp) == {"useful", "noise"}
+    assert sum(imp.values()) == pytest.approx(1.0)
+    assert list(imp)[0] == "useful", "the predictive feature must rank first"
+    assert imp["useful"] > imp["noise"]
+
+
+def test_unused_feature_gets_near_zero_importance() -> None:
+    """The check that answers 'were the fundamentals used at all?'"""
+    import lightgbm as lgb
+
+    from stock_predictor.training import feature_importances, importance_by_group
+
+    rng = np.random.default_rng(1)
+    n = 600
+    signal = rng.normal(size=n)
+    X = pd.DataFrame({
+        "px_signal": signal,
+        "fund_a": np.zeros(n),          # constant: nothing to split on
+        "fund_b": rng.normal(size=n),   # pure noise
+    })
+    y = (signal > 0).astype(int)
+    clf = lgb.LGBMClassifier(n_estimators=40, verbosity=-1).fit(X, y)
+
+    imp = feature_importances(clf, list(X.columns))
+    grouped = importance_by_group(imp, {"price": ("px_",), "fundamentals": ("fund_",)})
+    assert grouped["price"] > 0.5
+    assert grouped["fundamentals"] < 0.5
+    assert imp.get("fund_a", 0.0) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_importances_empty_for_a_model_without_a_booster() -> None:
+    from stock_predictor.training import feature_importances
+
+    assert feature_importances(object(), ["a", "b"]) == {}
