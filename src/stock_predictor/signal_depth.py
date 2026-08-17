@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 from stock_predictor.stats import hac_mean_tstat
@@ -203,3 +204,76 @@ def depth_frame(rows: list[DepthRow]) -> pd.DataFrame:
         }
         for r in rows
     ])
+
+
+# ---------------------------------------------------------------------------
+# The same quantity, shaped as a tuning objective
+# ---------------------------------------------------------------------------
+
+
+def top_n_excess_score(
+    dates: np.ndarray,
+    scores: np.ndarray,
+    fwd_ret: np.ndarray,
+    top_n: int,
+    *,
+    risk_adjusted: bool = False,
+) -> float:
+    """Mean per-date excess forward return of the top-*top_n* scored names.
+
+    This is the trading rule expressed as a number: rank each date, take the
+    best *top_n*, equal-weight them, and measure the result against that
+    date's universe average (which removes market direction, so folds from
+    different regimes are comparable).
+
+    Written for a tuning loop rather than a report, hence numpy arrays and no
+    DataFrame. It is deliberately **indifferent to ordering below the
+    cutoff** — the strategy never trades those names. NDCG over the full list
+    is not: it rewards arranging the whole tail correctly, which is why tuning
+    NDCG@15 flattened the traded end of the ranking.
+
+    *risk_adjusted* divides by the standard deviation of the daily excess
+    series, turning the objective into an information ratio and penalising an
+    edge that comes from a handful of lucky dates.
+
+    Returns 0.0 when the input cannot express a preference (a single date, or
+    a basket that spans the whole universe).
+    """
+    if top_n < 1:
+        raise ValueError(f"top_n must be >= 1, got {top_n}")
+    d = np.asarray(dates)
+    sc = np.asarray(scores, dtype=float)
+    fr = np.asarray(fwd_ret, dtype=float)
+
+    order = np.argsort(d, kind="stable")
+    d, sc, fr = d[order], sc[order], fr[order]
+    bounds = np.flatnonzero(np.r_[True, d[1:] != d[:-1]])
+    bounds = np.r_[bounds, len(d)]
+
+    spreads: list[float] = []
+    for lo, hi in zip(bounds[:-1], bounds[1:], strict=True):
+        day_fr = fr[lo:hi]
+        day_sc = sc[lo:hi]
+        ok = np.isfinite(day_fr) & np.isfinite(day_sc)
+        if ok.sum() < 2:
+            continue
+        day_fr, day_sc = day_fr[ok], day_sc[ok]
+        k = min(top_n, len(day_fr))
+        if k >= len(day_fr):
+            # The basket is the universe; there is no preference to express.
+            spreads.append(0.0)
+            continue
+        picked = np.argpartition(-day_sc, k - 1)[:k]
+        spreads.append(float(day_fr[picked].mean() - day_fr.mean()))
+
+    if not spreads:
+        return 0.0
+    arr = np.asarray(spreads, dtype=float)
+    mean = float(arr.mean())
+    if not risk_adjusted:
+        return mean if np.isfinite(mean) else 0.0
+    sd = float(arr.std(ddof=1)) if len(arr) > 1 else 0.0
+    if sd <= 1e-12:
+        return 0.0
+    out = mean / sd
+    return out if np.isfinite(out) else 0.0

@@ -23,6 +23,7 @@ from stock_predictor.pit import (
 )
 from stock_predictor.training import (
     LABEL_TARGETS,
+    OPTUNA_METRICS,
     build_feature_panel,
     build_labeled_panel,
     evaluate_test_set,
@@ -79,6 +80,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--threshold", type=float, default=0.05)
     p.add_argument("--no-optuna", action="store_true", help="Skip Optuna hyperparameter search")
     p.add_argument("--optuna-trials", type=int, default=40, dest="optuna_trials")
+    p.add_argument(
+        "--optuna-metric",
+        default="auto",
+        choices=list(OPTUNA_METRICS),
+        dest="optuna_metric",
+        help="What Optuna maximizes. auto (default): topn_excess for the "
+        "ranker, pr_auc for the classifier. topn_excess/topn_ir score the "
+        "traded rule — mean per-date excess forward return of the top-N "
+        "basket (N = --wf-top-k), the IR variant divided by its std. ndcg "
+        "rewards ordering the whole list and measurably flattens the traded "
+        "end, so it is no longer the ranker default",
+    )
     p.add_argument("--ts-cv-splits", type=int, default=5, dest="ts_cv_splits")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--skip-earnings", action="store_true", help="Omit Yahoo earnings feature (faster)")
@@ -201,6 +214,7 @@ def main() -> None:
                 "strict_dropna": args.strict_dropna,
                 "objective": objective,
                 "label_target": args.label_target,
+                "optuna_metric": args.optuna_metric,
                 "seed": args.seed,
             },
         )
@@ -298,6 +312,8 @@ def main() -> None:
             purge_days=horizon,
             objective=objective,
             label_target=args.label_target,
+            optuna_metric=args.optuna_metric,
+            rank_eval_k=args.wf_top_k,
         )
 
     manual_params = {
@@ -404,6 +420,7 @@ def main() -> None:
             "feature_cols": feature_cols,
             "objective": objective,
             "label_target": args.label_target,
+            "optuna_metric": args.optuna_metric,
             "horizon": horizon,
             "threshold": threshold,
             "start": start,
