@@ -263,7 +263,9 @@ These are **not** recommendations—only sensible axes to explore when you stres
 | `--batch-size` | 100 | Symbols per yfinance request. Lower it if Yahoo throttles a large universe; no effect with `--provider tiingo` |
 | `--horizon` | 10 | Forward return horizon (sessions); also the **purge window** at every split boundary |
 | `--threshold` | 0.05 | Binary label threshold (e.g. 5%) |
-| `--rank-objective` | off | Train LGBMRanker (lambdarank, grouped by date) on per-date forward-return quintile grades instead of the binary classifier; applies to Optuna (NDCG@15), the walk-forward, and the saved model |
+| `--objective` | rank | `rank`: LGBMRanker (lambdarank, grouped by date) on per-date forward-return quintile grades. `binary`: LGBMClassifier on `fwd_ret >= --threshold`. Applies to Optuna (NDCG@15 vs PR-AUC), the walk-forward, and the saved model |
+| `--label-target` | raw | With `--objective rank`, what the ranker ranks: `raw` forward return, `vol_adj` (per unit trailing volatility), `excess` (minus the date's cross-sectional median), or `excess_vol_adj` |
+| `--rank-objective` | — | Deprecated; `rank` is now the default. Accepted for compatibility, conflicts with `--objective binary` |
 | `--no-optuna` | off | Skip Optuna search; use defaults + any prior best |
 | `--optuna-trials` | 40 | Optuna trials |
 | `--ts-cv-splits` | 5 | Purged, **date-grouped** expanding CV folds for tuning (no trading day straddles a fold; last `horizon` dates before each validation block are excluded) |
@@ -606,7 +608,9 @@ With **`--no-snapshot`**, no Parquet files and no `manifest.json` are written (t
 
 1. **Universe**: Point-in-time S&P 500 membership via [fja05680/sp500](https://github.com/fja05680/sp500); capped by `--sample-n` as a seeded random draw and coverage-checked after download
 2. **Prices**: Daily adjusted close + volume from Yahoo Finance (`yfinance`) or Tiingo
-3. **Labels**: Binary (forward return ≥ `--threshold` over `--horizon` sessions) or, with `--rank-objective`, per-date forward-return quintile grades (market-neutral by construction)
+3. **Labels**: Per-date forward-return quintile grades (default, market-neutral by construction), or `--objective binary` for `fwd_ret ≥ --threshold`.
+
+   **Why rank is the default.** The binary `+5% in 10 sessions` label is satisfied *mechanically* by volatility: a name needs a wide return distribution to clear the threshold, regardless of its expected return. A model trained on it ranks risk, not return — measured on this pipeline, cross-sectional IC of score vs `vol_21d` was **+0.75** while score vs `fwd_ret` was **+0.008**, and mean annualized volatility ran 17% in the bottom score decile to 49% in the top. The rank objective halves that coupling (vol IC +0.43) and flips the top-5 selection bucket from **−0.81%** to **+0.91%** against the universe. See `scripts/signal_depth.py`.
 4. **Features**: Price/volume (15), sector-relative (4), macro (5), regime (2), cross-sectional ranks (3), calendar (6), optional earnings (1)
 
    **Stage order is load-bearing** (`build_feature_panel`):
