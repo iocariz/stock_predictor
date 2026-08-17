@@ -21,6 +21,12 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 
 from stock_predictor.calendar_features import CALENDAR_FEATURE_COLS, add_calendar_features
 from stock_predictor.data_provider import _load_dotenv
+from stock_predictor.fundamentals import (
+    FUNDAMENTAL_FEATURE_COLS,
+    add_fundamental_features,
+    asof_join_fundamentals,
+    trailing_twelve_months,
+)
 from stock_predictor.macro_merge import download_macro_fred, merge_macro_panels
 from stock_predictor.pit import filter_panel_to_pit
 from stock_predictor.signal_depth import top_n_excess_score
@@ -997,6 +1003,7 @@ def build_feature_panel(
     fred_api_key: str | None = None,
     stints: pd.DataFrame | None = None,
     sector_map: pd.DataFrame | None = None,
+    fundamentals: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Engineer all features and return the panel with the feature column list.
 
@@ -1092,6 +1099,19 @@ def build_feature_panel(
         features = features.merge(macro_panel, on="date", how="left")
     features = add_calendar_features(features)
 
+    # 5. Point-in-time fundamentals, joined on filing date (never period end).
+    fund_cols: list[str] = []
+    if fundamentals is not None and not fundamentals.empty:
+        before = features.columns.size
+        features = asof_join_fundamentals(
+            features, trailing_twelve_months(fundamentals),
+        )
+        features = add_fundamental_features(features)
+        fund_cols = list(FUNDAMENTAL_FEATURE_COLS)
+        cov = features[fund_cols].notna().mean().mean()
+        print(f"  Fundamentals: +{features.columns.size - before} cols, "
+              f"{cov:.1%} mean coverage across {len(fund_cols)} features")
+
     earn_cols: list[str] = []
     if skip_earnings:
         print("Skipping earnings feature (--skip-earnings).")
@@ -1113,6 +1133,7 @@ def build_feature_panel(
         + MACRO_FEATURE_COLS
         + CALENDAR_FEATURE_COLS
         + earn_cols
+        + fund_cols
     )
     return features, feature_cols
 

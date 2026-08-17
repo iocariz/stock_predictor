@@ -162,6 +162,22 @@ def parse_args() -> argparse.Namespace:
         "volatility, so a model trained on it ranks risk, not return",
     )
     p.add_argument(
+        "--fundamentals",
+        action="store_true",
+        help="Add point-in-time fundamental features from SEC EDGAR XBRL "
+        "(free, no key). Joined on each report's filing date, never its "
+        "fiscal period end. First run downloads ~3.8 MB per ticker; set "
+        "SEC_USER_AGENT to a descriptive string with contact details, or SEC "
+        "answers 403",
+    )
+    p.add_argument(
+        "--edgar-cache",
+        type=Path,
+        default=Path("artifacts/edgar_cache"),
+        dest="edgar_cache",
+        help="Directory for cached EDGAR company facts (one parquet per ticker)",
+    )
+    p.add_argument(
         "--strict-dropna",
         action="store_true",
         dest="strict_dropna",
@@ -217,6 +233,7 @@ def main() -> None:
                 "objective": objective,
                 "label_target": args.label_target,
                 "optuna_metric": tune_metric,
+                "fundamentals": bool(args.fundamentals),
                 "seed": args.seed,
             },
         )
@@ -263,6 +280,15 @@ def main() -> None:
 
     # PIT filtering is deferred to build_feature_panel so per-ticker rolling
     # features see each symbol's full contiguous history first.
+    fundamentals = None
+    if args.fundamentals:
+        from stock_predictor.fundamentals import fetch_fundamentals
+
+        print("Fetching SEC EDGAR fundamentals…")
+        fundamentals = fetch_fundamentals(sample, cache_dir=args.edgar_cache)
+        n_tk = fundamentals["ticker"].nunique() if len(fundamentals) else 0
+        print(f"  {len(fundamentals):,} facts for {n_tk} tickers")
+
     labeled = build_labeled_panel(adj_close, None, horizon, threshold)
     print(f"  Positive rate: {labeled['target_5pct'].mean():.4%}")
 
@@ -284,6 +310,7 @@ def main() -> None:
         provider_name=args.provider,
         macro_merge=not args.no_macro_merge,
         stints=stints,
+        fundamentals=fundamentals,
     )
 
     features_clean = select_training_rows(
