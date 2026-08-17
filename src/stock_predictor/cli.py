@@ -22,6 +22,7 @@ from stock_predictor.pit import (
     tickers_overlapping_window,
 )
 from stock_predictor.training import (
+    LABEL_TARGETS,
     build_feature_panel,
     build_labeled_panel,
     evaluate_test_set,
@@ -118,11 +119,33 @@ def parse_args() -> argparse.Namespace:
         help="Disable Yahoo↔FRED macro cross-fill (use single macro source only)",
     )
     p.add_argument(
+        "--objective",
+        default="rank",
+        choices=["rank", "binary"],
+        help="rank (default): LGBMRanker (lambdarank, grouped by date) on "
+        "per-date forward-return quintile grades. binary: LGBMClassifier on "
+        "fwd_ret >= --threshold. The binary label is satisfied mechanically by "
+        "volatility — a name needs a wide distribution to clear +5%% in ten "
+        "sessions — so it trains a volatility ranker (score-vs-vol_21d "
+        "cross-sectional IC +0.75 vs +0.43 for rank)",
+    )
+    p.add_argument(
         "--rank-objective",
         action="store_true",
         dest="rank_objective",
-        help="Walk-forward trains an LGBMRanker (lambdarank, grouped by date) on "
-        "per-date forward-return quintile grades instead of the binary classifier",
+        help="Deprecated: rank is now the default. Accepted for compatibility; "
+        "conflicts with --objective binary",
+    )
+    p.add_argument(
+        "--label-target",
+        default="raw",
+        choices=list(LABEL_TARGETS),
+        dest="label_target",
+        help="With --rank-objective, what the ranker is asked to rank: raw "
+        "forward return, vol_adj (per unit trailing volatility), excess "
+        "(minus the date's cross-sectional median), or excess_vol_adj. The "
+        "default +5%%-in-10-days label is satisfied mechanically by "
+        "volatility, so a model trained on it ranks risk, not return",
     )
     p.add_argument(
         "--strict-dropna",
@@ -134,8 +157,19 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def resolve_objective(args: argparse.Namespace) -> str:
+    """Reconcile --objective with the legacy --rank-objective flag."""
+    if args.rank_objective and args.objective == "binary":
+        sys.exit(
+            "Error: --rank-objective conflicts with --objective binary. "
+            "--rank-objective is deprecated (rank is the default); drop it."
+        )
+    return args.objective
+
+
 def main() -> None:
     args = parse_args()
+    objective = resolve_objective(args)
     provider = get_provider(args.provider, batch_size=args.batch_size)
     start, end = args.start, args.end
     train_end, test_start = args.train_end, args.test_start
@@ -165,7 +199,8 @@ def main() -> None:
                 "no_optuna": args.no_optuna,
                 "no_macro_merge": args.no_macro_merge,
                 "strict_dropna": args.strict_dropna,
-                "rank_objective": args.rank_objective,
+                "objective": objective,
+                "label_target": args.label_target,
                 "seed": args.seed,
             },
         )
@@ -252,7 +287,6 @@ def main() -> None:
         repro.register_snapshot(manifest, "features_clean", meta)
         repro.write_manifest(snapshot_root / "manifest.json", manifest)
 
-    objective = "rank" if args.rank_objective else "binary"
     optuna_best: dict = {}
     if not args.no_optuna:
         optuna_best = run_optuna_search(
@@ -263,6 +297,7 @@ def main() -> None:
             seed=args.seed,
             purge_days=horizon,
             objective=objective,
+            label_target=args.label_target,
         )
 
     manual_params = {
@@ -276,9 +311,10 @@ def main() -> None:
     if optuna_best:
         manual_params.update(optuna_best)
 
-    if args.rank_objective:
+    if objective == "rank":
         model, n_trees = train_final_rank_model(
             train, feature_cols, manual_params, args.seed, purge_days=horizon,
+            label_target=args.label_target,
         )
     else:
         model, n_trees = train_final_model(
@@ -312,6 +348,7 @@ def main() -> None:
             return_scores=need_scores,
             purge_days=horizon,
             objective=objective,
+            label_target=args.label_target,
         )
         if need_scores:
             wf_results, wf_scores = wf_out
@@ -366,6 +403,7 @@ def main() -> None:
         meta = {
             "feature_cols": feature_cols,
             "objective": objective,
+            "label_target": args.label_target,
             "horizon": horizon,
             "threshold": threshold,
             "start": start,

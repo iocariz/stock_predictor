@@ -263,7 +263,9 @@ These are **not** recommendations—only sensible axes to explore when you stres
 | `--batch-size` | 100 | Symbols per yfinance request. Lower it if Yahoo throttles a large universe; no effect with `--provider tiingo` |
 | `--horizon` | 10 | Forward return horizon (sessions); also the **purge window** at every split boundary |
 | `--threshold` | 0.05 | Binary label threshold (e.g. 5%) |
-| `--rank-objective` | off | Train LGBMRanker (lambdarank, grouped by date) on per-date forward-return quintile grades instead of the binary classifier; applies to Optuna (NDCG@15), the walk-forward, and the saved model |
+| `--objective` | rank | `rank`: LGBMRanker (lambdarank, grouped by date) on per-date forward-return quintile grades. `binary`: LGBMClassifier on `fwd_ret >= --threshold`. Applies to Optuna (NDCG@15 vs PR-AUC), the walk-forward, and the saved model |
+| `--label-target` | raw | With `--objective rank`, what the ranker ranks: `raw` forward return, `vol_adj` (per unit trailing volatility), `excess` (minus the date's cross-sectional median), or `excess_vol_adj` |
+| `--rank-objective` | — | Deprecated; `rank` is now the default. Accepted for compatibility, conflicts with `--objective binary` |
 | `--no-optuna` | off | Skip Optuna search; use defaults + any prior best |
 | `--optuna-trials` | 40 | Optuna trials |
 | `--ts-cv-splits` | 5 | Purged, **date-grouped** expanding CV folds for tuning (no trading day straddles a fold; last `horizon` dates before each validation block are excluded) |
@@ -606,7 +608,9 @@ With **`--no-snapshot`**, no Parquet files and no `manifest.json` are written (t
 
 1. **Universe**: Point-in-time S&P 500 membership via [fja05680/sp500](https://github.com/fja05680/sp500); capped by `--sample-n` as a seeded random draw and coverage-checked after download
 2. **Prices**: Daily adjusted close + volume from Yahoo Finance (`yfinance`) or Tiingo
-3. **Labels**: Binary (forward return ≥ `--threshold` over `--horizon` sessions) or, with `--rank-objective`, per-date forward-return quintile grades (market-neutral by construction)
+3. **Labels**: Per-date forward-return quintile grades (default, market-neutral by construction), or `--objective binary` for `fwd_ret ≥ --threshold`.
+
+   **Why rank is the default.** The binary `+5% in 10 sessions` label is satisfied *mechanically* by volatility: a name needs a wide return distribution to clear the threshold, regardless of its expected return. A model trained on it ranks risk, not return — measured on this pipeline, cross-sectional IC of score vs `vol_21d` was **+0.75** while score vs `fwd_ret` was **+0.008**, and mean annualized volatility ran 17% in the bottom score decile to 49% in the top. The rank objective halves that coupling (vol IC +0.43) and flips the top-5 selection bucket from **−0.81%** to **+0.91%** against the universe. See `scripts/signal_depth.py`.
 4. **Features**: Price/volume (15), sector-relative (4), macro (5), regime (2), cross-sectional ranks (3), calendar (6), optional earnings (1)
 
    **Stage order is load-bearing** (`build_feature_panel`):
@@ -701,6 +705,24 @@ notebooks/               Exploration + full pipeline
   No single bucket clears |t| = 2 on its own, so read the *ordering*, not any one row: forward return rises monotonically from the top of the list down to the top-50 band, then falls away again. Rank IC is **+0.0082 (HAC t = +0.49)** — indistinguishable from noise. The earlier claim that this model showed "real cross-sectional ranking skill, roughly enough to pay its own trading costs" did not survive the universe and feature-staging fixes.
 
   Reproduce all of the above on any panel with [`scripts/signal_depth.py`](scripts/signal_depth.py) — this disclosure is meant to be re-derived, not trusted.
+
+  **The label mattered; tuning did not.** Switching to the rank objective is
+  the one change that improved the traded end of the ranking and held its sign
+  across a 2023-24 / 2025+ split. Optuna on NDCG@15 did not add to it:
+
+  | config | top-5 excess (2023-24) | (2025+) | alpha vs RSP (2023-24) | (2025+) |
+  |---|---|---|---|---|
+  | binary +5% | −1.35% (t −2.42) | −0.13% | −14.8% | +1.2% |
+  | rank, untuned | **+0.71%** (t +1.24) | **+1.17%** (t +1.43) | −8.3% | +3.5% |
+  | rank, Optuna-tuned | −0.24% (t −0.41) | +0.97% (t +1.03) | −7.2% | −1.5% |
+
+  Tuning flattened the top of the list — the tuned depth profile is nearly
+  uniform (0.86% / 0.82% / 0.85% / 0.81% across top 5 / 15 / 50 / 100) and its
+  in-sample top-5 excess turns slightly negative. NDCG@15 over ~600 names
+  scored on quintile grades rewards broad ordering, and the search settled on
+  a heavily regularized 74-tree model; maximizing it is not the same as
+  maximizing the top-15 basket's return. `--no-optuna` is a defensible default
+  for the rank objective until the tuning metric matches the trading rule.
 
   Configurations that look good still get there through beta. `--mode rank-hold --exit-rank 100` returns **+97%** (Sharpe 0.65) with **beta 1.40** and alpha **−6.7%** — leverage, not selection. Treat any better-looking result you produce here with the same suspicion: read the HAC alpha t-stat and the beta column, compare against RSP as well as SPY, and re-test on a sub-window the configuration has never seen.
 - **Sector labels** are a pragmatic blend of current Wikipedia GICS and a fixed override; they are not a perfect point-in-time sector history for every ticker-date.
