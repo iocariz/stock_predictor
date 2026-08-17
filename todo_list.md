@@ -40,6 +40,32 @@ Persistent list of **remaining** execution-realism and related items (phases 3�
 
 - [x] **`pyproject.toml` description** — replaced the placeholder.
 
+- [x] **Optuna metric aligned with the trading rule** — `--optuna-metric
+  {auto,pr_auc,ndcg,topn_excess,topn_ir}`; early stopping uses the same
+  metric in all four places that stop. Empirically it did **not** improve the
+  model (see the README results disclosure), so `--no-optuna` remains the
+  recommendation for the rank objective. Kept because tuning on one metric
+  while stopping on another was a correctness bug.
+
+## Research: what is left to try
+
+Five experiments have now come back negative or neutral (rank-band trading,
+vol-adjusted labels, excess labels, Optuna tuning, tuning-metric alignment).
+The one change that helped was the label — binary to rank. Under every
+configuration, validation performance peaks at 2-10 trees, which says the
+signal is not in the current inputs.
+
+- [ ] **Features, not labels or tuners.** Every current feature is a
+  price/volume/macro derivative of the same OHLCV panel. Candidates that add
+  genuinely new information: fundamentals (valuation, margins, revisions),
+  analyst estimate revisions, short interest, sector/industry momentum
+  spreads, or an intraday/higher-frequency price structure.
+- [ ] **Longer horizon.** Everything here is a 10-session forward return.
+  Cross-sectional equity signal is usually stronger at 1-6 months.
+- [ ] **Recover the delisted names.** ~97 of 691 departed members are absent
+  (Yahoo drops them); a Tiingo key recovers most, and their absence flatters
+  every result.
+
 ---
 
 *Add new bullets here as you discover gaps; strike through or remove when done.*
