@@ -24,12 +24,12 @@ from stock_predictor.pit import (
 from stock_predictor.training import (
     LABEL_TARGETS,
     OPTUNA_METRICS,
-    resolve_optuna_metric,
     build_feature_panel,
     build_labeled_panel,
     evaluate_test_set,
     monthly_walk_forward,
     purge_train_dates,
+    resolve_optuna_metric,
     run_optuna_search,
     save_eval_plots,
     save_model_artifacts,
