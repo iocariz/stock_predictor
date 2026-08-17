@@ -300,23 +300,82 @@ def purged_date_splits(
     return splits
 
 
+LABEL_TARGETS: tuple[str, ...] = ("raw", "vol_adj", "excess", "excess_vol_adj")
+"""What the ranker is asked to rank.
+
+``raw``
+    Forward return. Ranks the biggest movers.
+``vol_adj``
+    Forward return per unit of trailing volatility — a forward Sharpe.
+``excess``
+    Forward return minus that date's cross-sectional median: beta-neutral.
+``excess_vol_adj``
+    Both: peer-relative return per unit of risk.
+
+This matters more than it looks. The default ``fwd_ret >= threshold`` label
+is satisfied mechanically by volatility — a name needs a wide distribution to
+clear +5% in ten sessions — so a model trained on it ranks volatility, not
+expected return. Measured on this pipeline: score-vs-``vol_21d`` cross-
+sectional IC +0.75, score-vs-``fwd_ret`` IC +0.008.
+"""
+
+_VOL_COL = "vol_21d"
+_VOL_FLOOR = 1e-4  # ~0.16% annualized; below this the ratio is meaningless
+
+
+def label_target_series(
+    df: pd.DataFrame,
+    label_target: str = "raw",
+    *,
+    date_col: str = "date",
+    fwd_col: str = "fwd_ret",
+) -> pd.Series:
+    """The quantity a ranking label should be built from (see LABEL_TARGETS)."""
+    if label_target not in LABEL_TARGETS:
+        raise ValueError(
+            f"label_target must be one of {LABEL_TARGETS}, got {label_target!r}"
+        )
+    if fwd_col not in df.columns:
+        raise ValueError(f"label_target_series requires a {fwd_col!r} column")
+
+    target = df[fwd_col].astype(float)
+    if label_target in ("excess", "excess_vol_adj"):
+        target = target - df.groupby(date_col)[fwd_col].transform("median")
+    if label_target in ("vol_adj", "excess_vol_adj"):
+        if _VOL_COL not in df.columns:
+            raise ValueError(
+                f"label_target={label_target!r} requires a {_VOL_COL!r} column; "
+                "it is a standard price feature, so the panel is probably "
+                "missing the feature-engineering step"
+            )
+        vol = df[_VOL_COL].astype(float)
+        target = target / vol.where(vol > _VOL_FLOOR)
+    return target.replace([np.inf, -np.inf], np.nan)
+
+
 def add_rank_labels(
     df: pd.DataFrame,
     date_col: str = "date",
     fwd_col: str = "fwd_ret",
     n_grades: int = 5,
     out_col: str = "rank_grade",
+    label_target: str = "raw",
 ) -> pd.DataFrame:
     """Cross-sectional relevance grades for lambdarank: per-date quantiles of
-    forward return (0 = worst quintile that day, n_grades-1 = best).
+    *label_target* (0 = worst that day, n_grades-1 = best).
 
     Unlike the absolute ``fwd_ret >= threshold`` label, this target is
     market-neutral by construction: every date has the same grade
-    distribution regardless of whether the market rose or fell.
+    distribution regardless of whether the market rose or fell. Setting
+    *label_target* additionally strips the volatility bias — see
+    :data:`LABEL_TARGETS`.
     """
     if fwd_col not in df.columns:
         raise ValueError(f"add_rank_labels requires a {fwd_col!r} column")
-    pct = df.groupby(date_col)[fwd_col].rank(pct=True, method="average")
+    graded_on = label_target_series(
+        df, label_target, date_col=date_col, fwd_col=fwd_col,
+    )
+    pct = graded_on.groupby(df[date_col]).rank(pct=True, method="average")
     grades = np.ceil(pct.to_numpy() * n_grades) - 1
     grades = np.where(np.isnan(grades), 0, grades)  # defensive: NaN fwd_ret → worst grade
     df = df.copy()
@@ -471,6 +530,7 @@ def monthly_walk_forward(
     return_scores: bool = False,
     purge_days: int = 0,
     objective: str = "binary",
+    label_target: str = "raw",
 ) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
     """Walk forward month by month.
 
@@ -490,7 +550,7 @@ def monthly_walk_forward(
     d = df.copy()
     d[date_col] = pd.to_datetime(d[date_col])
     if objective == "rank":
-        d = add_rank_labels(d, date_col=date_col)
+        d = add_rank_labels(d, date_col=date_col, label_target=label_target)
     first_p = pd.Timestamp(test_start).to_period("M")
     last_p = d[date_col].max().to_period("M")
     periods = pd.period_range(first_p, last_p, freq="M")
@@ -961,6 +1021,7 @@ def run_optuna_search(
     purge_days: int = 0,
     objective: str = "binary",
     rank_eval_k: int = 15,
+    label_target: str = "raw",
 ) -> dict:
     """Run Optuna TPE search over LightGBM hyperparameters.
 
@@ -983,7 +1044,7 @@ def run_optuna_search(
         sampler=optuna.samplers.TPESampler(seed=seed),
     )
     if objective == "rank":
-        graded = add_rank_labels(train_sorted)
+        graded = add_rank_labels(train_sorted, label_target=label_target)
         fn = make_rank_objective(
             X_cv,
             graded["rank_grade"].to_numpy(),
@@ -1068,6 +1129,7 @@ def train_final_rank_model(
     seed: int,
     purge_days: int = 0,
     eval_k: int = 15,
+    label_target: str = "raw",
 ) -> tuple[lgb.LGBMRanker, int]:
     """Lambdarank final model: n_trees via NDCG early stopping, retrain on full train.
 
@@ -1075,7 +1137,7 @@ def train_final_rank_model(
     date on per-date forward-return quintile grades (see
     :func:`add_rank_labels`).  *train* must contain ``fwd_ret``.
     """
-    graded = add_rank_labels(train)
+    graded = add_rank_labels(train, label_target=label_target)
     train_inner, val_inner = _inner_train_val_split(
         graded, "date", val_frac=0.15, purge_days=purge_days,
     )

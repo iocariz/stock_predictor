@@ -22,6 +22,7 @@ from stock_predictor.pit import (
     tickers_overlapping_window,
 )
 from stock_predictor.training import (
+    LABEL_TARGETS,
     build_feature_panel,
     build_labeled_panel,
     evaluate_test_set,
@@ -125,6 +126,17 @@ def parse_args() -> argparse.Namespace:
         "per-date forward-return quintile grades instead of the binary classifier",
     )
     p.add_argument(
+        "--label-target",
+        default="raw",
+        choices=list(LABEL_TARGETS),
+        dest="label_target",
+        help="With --rank-objective, what the ranker is asked to rank: raw "
+        "forward return, vol_adj (per unit trailing volatility), excess "
+        "(minus the date's cross-sectional median), or excess_vol_adj. The "
+        "default +5%%-in-10-days label is satisfied mechanically by "
+        "volatility, so a model trained on it ranks risk, not return",
+    )
+    p.add_argument(
         "--strict-dropna",
         action="store_true",
         dest="strict_dropna",
@@ -166,6 +178,7 @@ def main() -> None:
                 "no_macro_merge": args.no_macro_merge,
                 "strict_dropna": args.strict_dropna,
                 "rank_objective": args.rank_objective,
+                "label_target": args.label_target,
                 "seed": args.seed,
             },
         )
@@ -263,6 +276,7 @@ def main() -> None:
             seed=args.seed,
             purge_days=horizon,
             objective=objective,
+            label_target=args.label_target,
         )
 
     manual_params = {
@@ -279,6 +293,7 @@ def main() -> None:
     if args.rank_objective:
         model, n_trees = train_final_rank_model(
             train, feature_cols, manual_params, args.seed, purge_days=horizon,
+            label_target=args.label_target,
         )
     else:
         model, n_trees = train_final_model(
@@ -312,6 +327,7 @@ def main() -> None:
             return_scores=need_scores,
             purge_days=horizon,
             objective=objective,
+            label_target=args.label_target,
         )
         if need_scores:
             wf_results, wf_scores = wf_out
@@ -366,6 +382,7 @@ def main() -> None:
         meta = {
             "feature_cols": feature_cols,
             "objective": objective,
+            "label_target": args.label_target,
             "horizon": horizon,
             "threshold": threshold,
             "start": start,
