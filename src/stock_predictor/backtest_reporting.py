@@ -188,6 +188,7 @@ def print_report(result: BacktestResult) -> None:
             f"+ ${c.commission_per_order:.2f}/order-leg"
         )
     floor = f", min_prob={c.min_prob:g}" if c.min_prob is not None else ""
+    band = f", band={c.rank_offset + 1}-{c.rank_offset + c.top_n}" if c.rank_offset else ""
     rf_used = float(m.get("risk_free_rate_used", 0.0) or 0.0)
     rf_src = "panel" if c.risk_free_rate is None and rf_used else "set"
     rf = f", rf={rf_used:.2%} ({rf_src})" if rf_used else ""
@@ -195,7 +196,7 @@ def print_report(result: BacktestResult) -> None:
         f"Config: top_n={c.top_n}, holding={c.holding_days}d, "
         f"rebalance={c.rebalance_day}, weighting={c.weighting}, "
         f"slippage={c.slippage_bps:.0f}bps, max_cohorts={c.max_overlapping_cohorts}"
-        f"{floor}{rf}{comm}"
+        f"{band}{floor}{rf}{comm}"
     )
     print()
     print(f"{'':20s} {'STRATEGY':>{col_w}s}  {bench_hdr:>{col_w}s}")

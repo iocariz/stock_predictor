@@ -70,6 +70,19 @@ class BacktestConfig:
     Total return, CAGR and drawdown are unaffected. The rate actually applied
     is printed in the report header and returned as
     ``metrics["risk_free_rate_used"]``."""
+    rank_offset: int = 0
+    """Skip this many top-ranked names before selecting, so the portfolio
+    trades a *band* (``rank_offset+1 .. rank_offset+top_n``) rather than the
+    head of the list.
+
+    Selection narrows; the price panel does not. Pre-filtering a scored panel
+    to a band achieves the same picks but strips the price history of every
+    excluded name, leaving held positions marked at stale forward-filled
+    prices and badly understating beta — use this instead.
+
+    In rank-hold mode the offset gates *entry* only; exits stay governed by
+    ``exit_rank``, so a holding that climbs into the skipped head is kept
+    rather than churned."""
     min_prob: float | None = None
     """Score floor: never buy a name scoring below this, even if it is in the
     top_n. Baskets shrink (weights renormalize over survivors) and a date with
@@ -104,6 +117,8 @@ class BacktestConfig:
                 f"risk_free_rate must be None or an annual rate in [-0.01, 1.0], "
                 f"got {self.risk_free_rate!r}"
             )
+        if self.rank_offset < 0:
+            raise ValueError(f"rank_offset must be >= 0, got {self.rank_offset}")
         if self.min_prob is not None and not np.isfinite(self.min_prob):
             raise ValueError(f"min_prob must be a finite number or None, got {self.min_prob!r}")
 
@@ -239,7 +254,9 @@ def _build_cohort(
 
     if config.min_prob is not None:
         scored_day = scored_day[scored_day["prob"] >= config.min_prob]
-    top = scored_day.nlargest(config.top_n, "prob")
+    top = scored_day.nlargest(config.rank_offset + config.top_n, "prob")
+    if config.rank_offset:
+        top = top.iloc[config.rank_offset :]
     if len(top) == 0:
         return None
 
@@ -837,12 +854,12 @@ def run_rank_hold_backtest(
         bought = 0
         # The score floor gates *buys* only; exits stay governed by exit_rank
         # so a held name is never stranded by a threshold change.
-        buy_candidates = ranked_tickers
+        buy_candidates = ranked_tickers[config.rank_offset :]
         if config.min_prob is not None:
             eligible = set(
                 scored_day.loc[scored_day["prob"] >= config.min_prob, "ticker"]
             )
-            buy_candidates = [t for t in ranked_tickers if t in eligible]
+            buy_candidates = [t for t in buy_candidates if t in eligible]
         for t in buy_candidates:
             if bought >= slots:
                 break
@@ -974,6 +991,15 @@ def main() -> None:
         help="Flat commission per ticker per buy or sell order (0=off)",
     )
     p.add_argument(
+        "--rank-offset",
+        type=int,
+        default=0,
+        dest="rank_offset",
+        help="Skip this many top-ranked names before selecting, so the "
+        "portfolio trades the band rank_offset+1..rank_offset+top_n instead "
+        "of the head of the list (default 0 = trade the top)",
+    )
+    p.add_argument(
         "--min-prob",
         type=float,
         default=None,
@@ -1053,6 +1079,7 @@ def main() -> None:
         commission_per_order=args.commission_per_order,
         exit_rank=args.exit_rank,
         min_prob=args.min_prob,
+        rank_offset=args.rank_offset,
         risk_free_rate=args.rf_rate,
     )
     backtest_fn = run_rank_hold_backtest if args.mode == "rank-hold" else run_backtest
