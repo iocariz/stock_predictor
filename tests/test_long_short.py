@@ -194,3 +194,47 @@ def test_borrow_sensitivity_is_monotone_in_the_rate() -> None:
     assert list(out["short_borrow_annual"]) == [0.0, 0.02, 0.10]
     assert out["total_return"].is_monotonic_decreasing
     assert out["borrow_cost"].is_monotonic_increasing
+
+
+# ---------------------------------------------------------------------------
+# P1-1: opening cost visibility and execution timing
+# ---------------------------------------------------------------------------
+
+
+def test_opening_cost_is_visible_in_the_reported_return() -> None:
+    """Regression: NAV was first recorded *after* the opening trade, so
+    metrics normalized against an already-reduced NAV. A flat-price book lost
+    real money and reported 0.0%."""
+    dates = pd.bdate_range("2024-01-01", periods=80)
+    flat = pd.DataFrame([
+        {"date": d, "ticker": f"T{i:02d}", "prob": float(-i), "adj_close": 100.0}
+        for d in dates for i in range(60)
+    ])
+    cfg = replace(FREE, slippage_bps=50.0)
+    res = run_long_short_backtest(flat, cfg)
+
+    assert res.daily_nav.iloc[0] == pytest.approx(cfg.initial_capital), (
+        "the first observation must precede any trading"
+    )
+    true_return = res.daily_nav.iloc[-1] / cfg.initial_capital - 1
+    assert res.metrics["total_return"] == pytest.approx(true_return)
+    assert res.metrics["total_return"] < -0.001, "flat prices minus costs is a loss"
+
+
+def test_execution_happens_on_the_session_after_the_signal() -> None:
+    """Matching both long-only engines: a signal on date T is filled at T+1.
+    Trading on the signal-day close uses the very bar the score was built on."""
+    dates = pd.bdate_range("2024-01-01", periods=60)
+    rows = []
+    for di, d in enumerate(dates):
+        for i in range(60):
+            # Prices jump on the second session only, so a book filled on the
+            # signal day and one filled the day after are distinguishable.
+            px = 100.0 if di == 0 else (100.0 + i)
+            rows.append({"date": d, "ticker": f"T{i:02d}",
+                         "prob": float(-i), "adj_close": px})
+    panel = pd.DataFrame(rows)
+    res = run_long_short_backtest(panel, replace(FREE, slippage_bps=0.0))
+
+    assert res.turnover.iloc[0] == 0, "nothing may trade on the signal session"
+    assert res.turnover.iloc[1] > 0, "the fill lands on the next session"

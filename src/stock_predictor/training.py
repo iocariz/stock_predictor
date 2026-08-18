@@ -852,11 +852,49 @@ def monthly_walk_forward(
 
 
 
+def _terminal_forward_returns(
+    long: pd.DataFrame, horizon: int, *, price_col: str = "adj_close",
+) -> pd.Series:
+    """Forward return to a delisted name's final quote, for its last rows.
+
+    A ``horizon``-session forward return does not exist for the final sessions
+    of a company that stops trading, so those rows are dropped — removing
+    precisely the terminal decline (or buyout premium) that makes departed
+    members worth having in the panel at all. Here they are measured to the
+    last price a holder could actually have realized.
+
+    Only applied to names whose history ends **before** the panel does. A
+    ticker still trading on the last session has a genuinely unknown future,
+    and its tail must stay censored.
+    """
+    panel_end = long["date"].max()
+    out = pd.Series(np.nan, index=long.index, dtype=float)
+    for _, g in long.groupby("ticker", sort=False):
+        priced = g.dropna(subset=[price_col])
+        if priced.empty:
+            continue
+        last_date = priced["date"].max()
+        if last_date >= panel_end:
+            continue  # still trading: the future is unknown, not censored
+        last_px = float(priced.loc[priced["date"] == last_date, price_col].iloc[0])
+        # Strictly before the final quote: on the last session itself there is
+        # no holding period left, so a 0% "return" would be an artefact rather
+        # than an observation.
+        window = priced[priced["date"] < last_date]
+        need = window["fwd_ret"].isna() if "fwd_ret" in window.columns else None
+        idx = window.index if need is None else window.index[need.to_numpy()]
+        px = long.loc[idx, price_col].astype(float)
+        out.loc[idx] = last_px / px - 1.0
+    return out
+
+
 def build_labeled_panel(
     adj_close: pd.DataFrame,
     stints: pd.DataFrame | None,
     horizon: int,
     threshold: float,
+    *,
+    terminal_fill: bool = True,
 ) -> pd.DataFrame:
     """Stack wide adj_close into long format, compute forward return & label.
 
@@ -874,6 +912,9 @@ def build_labeled_panel(
     long["fwd_ret"] = long.groupby("ticker", group_keys=False)["adj_close"].transform(
         lambda s: s.shift(-horizon) / s - 1.0
     )
+    if terminal_fill:
+        fill = _terminal_forward_returns(long, horizon)
+        long["fwd_ret"] = long["fwd_ret"].fillna(fill)
     long["target_5pct"] = (long["fwd_ret"] >= threshold).astype("int8")
     labeled = long.dropna(subset=["fwd_ret"])
     if stints is None:

@@ -131,7 +131,10 @@ def run_long_short_backtest(
     nav_index = pd.DatetimeIndex(trading_dates)
     by_date = df.groupby("date")
 
-    rebal_idx = list(range(0, n_days - 1, config.rebalance_every))
+    # Signal sessions; the fill lands on the *next* session, matching the
+    # long-only engines. Trading on the signal-day close would use the very
+    # bar the score was computed from.
+    signal_idx = set(range(0, n_days - 1, config.rebalance_every))
     rf_daily = daily_risk_free(config.risk_free_rate)
     borrow_daily = config.short_borrow_annual / TRADING_DAYS
 
@@ -196,11 +199,12 @@ def run_long_short_backtest(
             financing += interest
             cost_borrow += borrow
 
-        if i in rebal_idx and day in by_date.groups:
+        signal_day = trading_dates[i - 1] if i > 0 else None
+        if i > 0 and (i - 1) in signal_idx and signal_day in by_date.groups:
             equity = cash + sum(
                 s * prices.get(t, 0.0) for t, s in shares.items()
             )
-            target = _target_book(by_date.get_group(day), config, equity)
+            target = _target_book(by_date.get_group(signal_day), config, equity)
             if target:
                 n_rebal += 1
                 traded = set(target) | set(shares)
@@ -228,6 +232,9 @@ def run_long_short_backtest(
                     else:
                         shares[t] = want
 
+        # Recorded after any fill, so nav[0] is untouched capital and the
+        # opening trade's cost shows up in the first return rather than being
+        # normalized away.
         nav[i] = cash + sum(s * prices.get(t, 0.0) for t, s in shares.items())
 
     daily_nav = pd.Series(nav, index=nav_index, dtype=float)
