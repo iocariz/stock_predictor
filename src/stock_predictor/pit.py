@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import io
+import time
+import urllib.error
 import urllib.request
+from pathlib import Path
 
 import pandas as pd
 
@@ -17,21 +20,75 @@ _DEFAULT_UA = (
 )
 
 
-def load_sp500_stints(
-    url: str = SP500_STINTS_URL,
-    *,
-    user_agent: str = _DEFAULT_UA,
-    timeout: int = 60,
-) -> pd.DataFrame:
-    """Load membership stints: ticker, start_date, end_date (NaT = still in index per source)."""
-    req = urllib.request.Request(url, headers={"User-Agent": user_agent})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read().decode("utf-8")
+DEFAULT_STINTS_CACHE = (
+    Path(__file__).resolve().parents[2] / "artifacts" / "cache" / "sp500_stints.csv"
+)
+STINTS_CACHE_MAX_AGE_DAYS = 7
+
+
+def _read_stints_csv(raw: str) -> pd.DataFrame:
     df = pd.read_csv(io.StringIO(raw))
     df["ticker"] = df["ticker"].astype(str).str.replace(".", "-", regex=False)
     df["start_date"] = pd.to_datetime(df["start_date"])
     df["end_date"] = pd.to_datetime(df["end_date"], errors="coerce")
     return df
+
+
+def load_sp500_stints(
+    url: str = SP500_STINTS_URL,
+    *,
+    user_agent: str = _DEFAULT_UA,
+    timeout: int = 60,
+    cache_path: Path | None = None,
+    max_age_days: float = STINTS_CACHE_MAX_AGE_DAYS,
+    retries: int = 3,
+    backoff_s: float = 2.0,
+) -> pd.DataFrame:
+    """Load membership stints: ticker, start_date, end_date (NaT = still in index per source).
+
+    Cached on disk because every training run needs it and the upstream host
+    rate-limits: a day of repeated runs earns HTTP 429 and every run then dies
+    before it starts. Index membership changes a few times a month, so a
+    week-old copy is not a research compromise.
+
+    A fresh cache is used directly. Otherwise the fetch is retried with
+    backoff, and if it still fails a **stale** cache is preferred over
+    failing — a slightly old membership table beats no run at all.
+    """
+    cache = Path(cache_path) if cache_path is not None else DEFAULT_STINTS_CACHE
+    fresh = (
+        cache.exists()
+        and (time.time() - cache.stat().st_mtime) < max_age_days * 86400
+    )
+    if fresh:
+        return _read_stints_csv(cache.read_text(encoding="utf-8"))
+
+    raw = None
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": user_agent})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8")
+            break
+        except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as exc:
+            if attempt < retries - 1:
+                wait = backoff_s * 2**attempt
+                print(f"  PIT stints fetch failed ({exc}); retry in {wait:.0f}s…")
+                time.sleep(wait)
+            elif cache.exists():
+                age_d = (time.time() - cache.stat().st_mtime) / 86400
+                print(f"  PIT stints fetch failed ({exc}); using cached copy "
+                      f"{age_d:.1f} days old")
+                return _read_stints_csv(cache.read_text(encoding="utf-8"))
+            else:
+                raise
+
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(raw, encoding="utf-8")
+    except OSError as exc:  # a read-only checkout must not fail the run
+        print(f"  Could not cache PIT stints ({exc})")
+    return _read_stints_csv(raw)
 
 
 def tickers_overlapping_window(

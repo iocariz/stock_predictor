@@ -21,6 +21,12 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 
 from stock_predictor.calendar_features import CALENDAR_FEATURE_COLS, add_calendar_features
 from stock_predictor.data_provider import _load_dotenv
+from stock_predictor.fundamentals import (
+    FUNDAMENTAL_FEATURE_COLS,
+    add_fundamental_features,
+    asof_join_fundamentals,
+    trailing_twelve_months,
+)
 from stock_predictor.macro_merge import download_macro_fred, merge_macro_panels
 from stock_predictor.pit import filter_panel_to_pit
 from stock_predictor.signal_depth import top_n_excess_score
@@ -997,6 +1003,7 @@ def build_feature_panel(
     fred_api_key: str | None = None,
     stints: pd.DataFrame | None = None,
     sector_map: pd.DataFrame | None = None,
+    fundamentals: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Engineer all features and return the panel with the feature column list.
 
@@ -1092,6 +1099,19 @@ def build_feature_panel(
         features = features.merge(macro_panel, on="date", how="left")
     features = add_calendar_features(features)
 
+    # 5. Point-in-time fundamentals, joined on filing date (never period end).
+    fund_cols: list[str] = []
+    if fundamentals is not None and not fundamentals.empty:
+        before = features.columns.size
+        features = asof_join_fundamentals(
+            features, trailing_twelve_months(fundamentals),
+        )
+        features = add_fundamental_features(features)
+        fund_cols = list(FUNDAMENTAL_FEATURE_COLS)
+        cov = features[fund_cols].notna().mean().mean()
+        print(f"  Fundamentals: +{features.columns.size - before} cols, "
+              f"{cov:.1%} mean coverage across {len(fund_cols)} features")
+
     earn_cols: list[str] = []
     if skip_earnings:
         print("Skipping earnings feature (--skip-earnings).")
@@ -1113,6 +1133,7 @@ def build_feature_panel(
         + MACRO_FEATURE_COLS
         + CALENDAR_FEATURE_COLS
         + earn_cols
+        + fund_cols
     )
     return features, feature_cols
 
@@ -1406,6 +1427,40 @@ def save_eval_plots(
     fig2.savefig(plots_dir / "feature_importance.png", dpi=120)
     plt.close(fig2)
     print(f"Saved plots under {plots_dir}")
+
+
+def feature_importances(
+    model: object, feature_cols: list[str], *, importance_type: str = "gain",
+) -> dict[str, float]:
+    """Feature importance as a fraction of total, best first.
+
+    Recorded in model metadata so "did the model actually use this feature?"
+    is answerable without unpickling. Gain rather than split count: a feature
+    can be split on often while contributing almost nothing.
+    """
+    booster = getattr(model, "booster_", None)
+    if booster is None:
+        return {}
+    raw = np.asarray(booster.feature_importance(importance_type=importance_type),
+                     dtype=float)
+    if raw.size != len(feature_cols) or raw.sum() <= 0:
+        return {}
+    frac = raw / raw.sum()
+    order = np.argsort(-frac)
+    return {feature_cols[i]: float(frac[i]) for i in order}
+
+
+def importance_by_group(
+    importances: dict[str, float], prefixes: dict[str, tuple[str, ...]],
+) -> dict[str, float]:
+    """Aggregate importance by feature family, for a quick 'was it used' read."""
+    out = {name: 0.0 for name in prefixes}
+    for feat, val in importances.items():
+        for name, pfx in prefixes.items():
+            if feat.startswith(pfx):
+                out[name] += val
+                break
+    return out
 
 
 def save_model_artifacts(
