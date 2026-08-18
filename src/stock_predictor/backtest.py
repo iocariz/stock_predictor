@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from stock_predictor.execution_calendar import next_trading_day, offset_trading_days
+from stock_predictor.stats import downside_deviation
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -439,7 +440,10 @@ def _compute_metrics(
     mean_r = excess.mean()
     std_r = excess.std()
     sharpe = (mean_r / std_r * np.sqrt(252)) if std_r > _FLAT_EPS else float("nan")
-    downside = excess[excess < 0].std()
+    # Root-mean-square shortfall below zero excess, over every observation —
+    # not the standard deviation of the losses, which demeans them and counts
+    # only the losing periods.
+    downside = downside_deviation(excess)
     sortino = (mean_r / downside * np.sqrt(252)) if downside > _FLAT_EPS else float("nan")
     drawdown = nav / nav.cummax() - 1
     max_dd = drawdown.min()
