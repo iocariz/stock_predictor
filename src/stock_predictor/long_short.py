@@ -37,6 +37,7 @@ from stock_predictor.backtest import (
     _prepare_scored,
     daily_risk_free,
 )
+from stock_predictor.borrow import resolve_borrow_rates
 
 TRADING_DAYS = 252
 
@@ -58,8 +59,16 @@ class LongShortConfig:
     commission_per_share: float = 0.0
     commission_per_order: float = 0.0
     short_borrow_annual: float = 0.005
-    """Annualized borrow on short notional. 0.005 is roughly general
-    collateral for liquid large caps; hard-to-borrow names run far higher."""
+    """Flat annualized borrow, used when no per-name rates are available.
+    0.005 is roughly general collateral for liquid large caps."""
+    per_name_borrow: bool = False
+    """Charge borrow per position instead of one flat rate.
+
+    A flat rate is optimistic here: this model partly ranks volatility, so the
+    short book is drawn from the names that are expensive to borrow. Rates come
+    from a ``borrow_rate`` column on the panel if present, otherwise from the
+    stylised proxy in :mod:`stock_predictor.borrow` — which is a sensitivity
+    tool, not a measurement."""
     risk_free_rate: float = 0.045
     """Earned on the cash balance and used for Sharpe."""
     initial_capital: float = 100_000.0
@@ -126,6 +135,19 @@ def run_long_short_backtest(
     rf_daily = daily_risk_free(config.risk_free_rate)
     borrow_daily = config.short_borrow_annual / TRADING_DAYS
 
+    rate_frame = resolve_borrow_rates(
+        df, flat_rate=config.short_borrow_annual, per_name=config.per_name_borrow,
+    )
+    rate_panel = None
+    if rate_frame is not None:
+        rate_panel = (
+            rate_frame.pivot_table(index="date", columns="ticker",
+                                   values="borrow_rate", aggfunc="first")
+            .sort_index().ffill()
+        )
+    borrowed_rate_sum = 0.0
+    borrowed_notional = 0.0
+
     cash = config.initial_capital
     shares: dict[str, float] = {}
     nav = np.zeros(n_days)
@@ -148,7 +170,28 @@ def run_long_short_backtest(
         # so a position pays borrow for every day it is actually held.
         if i > 0:
             interest = cash * rf_daily
-            borrow = gross_short * borrow_daily
+            if rate_panel is None:
+                borrow = gross_short * borrow_daily
+            else:
+                # Per position: a book concentrated in specials costs more
+                # than the same notional spread across general collateral.
+                borrow = 0.0
+                day_rates = rate_panel.loc[day] if day in rate_panel.index else None
+                for t, sh in shares.items():
+                    if sh >= 0:
+                        continue
+                    px = prices.get(t, np.nan)
+                    if px != px:
+                        continue
+                    notional = -sh * px
+                    rate = config.short_borrow_annual
+                    if day_rates is not None:
+                        r = day_rates.get(t, np.nan)
+                        if r == r:
+                            rate = float(r)
+                    borrow += notional * rate / TRADING_DAYS
+                    borrowed_rate_sum += notional * rate
+                    borrowed_notional += notional
             cash += interest - borrow
             financing += interest
             cost_borrow += borrow
@@ -192,6 +235,10 @@ def run_long_short_backtest(
     metrics = _compute_metrics(daily_nav, [], risk_free_rate=config.risk_free_rate)
     metrics["n_rebalances"] = float(n_rebal)
     metrics["gross_leverage"] = config.long_weight + config.short_weight
+    metrics["effective_borrow_rate"] = (
+        borrowed_rate_sum / borrowed_notional if borrowed_notional > 0
+        else config.short_borrow_annual
+    )
 
     bench_nav = pd.Series(dtype=float)
     bench_metrics: dict[str, float] = {}

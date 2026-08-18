@@ -649,6 +649,7 @@ src/stock_predictor/
   universe.py            Seeded ticker sampling + download coverage guard
   signal_depth.py        Selection-depth diagnostics (does the top of the ranking work?)
   long_short.py          Dollar-neutral long-short engine (borrow + turnover costs)
+  borrow.py              Per-name short borrow: real rates, stylised proxy, or flat
   fundamentals.py        Point-in-time SEC EDGAR fundamentals (joined on filing date)
   stats.py               HAC / Newey-West helpers
   repro.py               Run manifests, hashing, Parquet snapshots
@@ -698,9 +699,15 @@ notebooks/               Exploration + full pipeline
   significant measure and the implementable one are different measures.
   **Magnitude is schedule-sensitive** (Sharpe 0.49–1.18 across offsets; the
   first schedule run gave 1.18, the maximum, so always sweep offsets before
-  quoting a number). And borrow is modelled as one flat rate while the short
-  book skews to high-volatility, hard-to-borrow names, so realistic per-name
-  financing would push it down further.
+  quoting a number). Borrow is the one caveat that
+  **turned out to be backwards**: I assumed the short book skewed to
+  high-volatility, hard-to-borrow names, so a flat rate would be optimistic.
+  Measured with `--per-name-borrow`, the short book is *cheaper* than the
+  universe (mean 0.71% vs 1.23%, a 0.58x concentration) because the model
+  ranks volatility **positively** — the volatile, expensive-to-borrow names are
+  in the *long* book, where no borrow is paid. Per-name borrow moves median
+  Sharpe from 0.74 to 0.73. The assumption was plausible and wrong, and it was
+  in this README until it was measured.
 
 - **Fundamentals help the model, not the book.** SEC EDGAR point-in-time
   features (`--fundamentals`) take **31–46% of total model gain**, all 11 used,
