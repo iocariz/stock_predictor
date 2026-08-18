@@ -55,7 +55,22 @@ The one change that helped was the label — binary to rank. Under every
 configuration, validation performance peaks at 2-10 trees, which says the
 signal is not in the current inputs.
 
-- [ ] **Features, not labels or tuners.** Every current feature is a
+- [x] **Fundamentals** — SEC EDGAR point-in-time, joined on filing date.
+  Used heavily by the model (31-46% of gain) but the price-only control still
+  wins at horizon 63; off by default.
+- [x] **Longer horizon** — the biggest lever found. `--horizon 63` takes return
+  IC from +0.001 to +0.047 and the decile spread to t +2.36 on 30 independent
+  periods.
+- [x] **Long-short engine** — `long_short.py`, with borrow and turnover costs.
+  Median Sharpe 0.74 after costs; always sweep rebalance-schedule offsets.
+
+- [ ] **Per-name short borrow.** One flat rate understates a short book that
+  skews to high-volatility names. Needs a borrow-rate source.
+- [ ] **Recover the delisted names.** ~187 of 342 departed members are absent
+  on the 2010+ universe; a Tiingo equities key recovers most.
+- [ ] **More independent periods.** 30 is better than 14 and still modest for
+  a 63-day horizon.
+- [ ] **Other feature families, not labels or tuners.** Every current feature is a
   price/volume/macro derivative of the same OHLCV panel. Candidates that add
   genuinely new information: fundamentals (valuation, margins, revisions),
   analyst estimate revisions, short interest, sector/industry momentum

@@ -648,6 +648,8 @@ src/stock_predictor/
   providers/             yfinance + Tiingo/FRED implementations
   universe.py            Seeded ticker sampling + download coverage guard
   signal_depth.py        Selection-depth diagnostics (does the top of the ranking work?)
+  long_short.py          Dollar-neutral long-short engine (borrow + turnover costs)
+  fundamentals.py        Point-in-time SEC EDGAR fundamentals (joined on filing date)
   stats.py               HAC / Newey-West helpers
   repro.py               Run manifests, hashing, Parquet snapshots
 scripts/
@@ -675,6 +677,38 @@ notebooks/               Exploration + full pipeline
 
 - **Stale artifacts.** Any `wf_scored.parquet` or report produced before the universe fix was built on an **alphabetically truncated** universe (`--sample-n` sliced a sorted ticker list, so a 500-cap run covered roughly A–POOL) with features computed *after* the PIT filter. Those panels are not comparable to current ones — on the same rules, the truncated panel showed +76.6% and Sharpe 1.05 where the corrected panel shows +22.2% and Sharpe 0.16. Regenerate before drawing any conclusion.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
+- **Horizon is the biggest lever found.** Everything below was measured at a
+  10-session horizon, which is the wrong instrument for cross-sectional equity
+  signal. At `--horizon 63` on a 2019–2026 panel the same pipeline gives return
+  IC **+0.047** (vs +0.001), a long-short decile spread of **+18.2%/yr gross**,
+  and a HAC t of **+3.28** (vs +1.58). On strictly non-overlapping samples —
+  the only honest test at this horizon, since consecutive daily observations
+  share 62 of 63 days — that is **t = +2.36 across 30 independent periods**,
+  positive in 67% of quarters, and positive in *both* 2019–2022 (incl. COVID,
+  +14.9%/yr, t +1.74) and 2023+ (+22.0%/yr, t +3.48). It is the first result
+  here to hold sign and magnitude across two regimes.
+
+  Traded at 1.0x gross through [`long_short.py`](src/stock_predictor/long_short.py)
+  with 5bps slippage, short borrow and financing charged, the median across 21
+  rebalance-schedule offsets is **CAGR +13.1%, Sharpe 0.74, max drawdown −14.7%**,
+  every offset positive. It tolerates borrow to ~10%/yr before decaying to zero.
+
+  Three things keep this short of a strategy. The **long-only** book — the one
+  the cohort engines simulate — still has alpha of only +3.7% (t +0.84): the
+  significant measure and the implementable one are different measures.
+  **Magnitude is schedule-sensitive** (Sharpe 0.49–1.18 across offsets; the
+  first schedule run gave 1.18, the maximum, so always sweep offsets before
+  quoting a number). And borrow is modelled as one flat rate while the short
+  book skews to high-volatility, hard-to-borrow names, so realistic per-name
+  financing would push it down further.
+
+- **Fundamentals help the model, not the book.** SEC EDGAR point-in-time
+  features (`--fundamentals`) take **31–46% of total model gain**, all 11 used,
+  and give the only *stable* return IC across halves (+0.018 / +0.016). But the
+  price-only control beats them at horizon 63 on IC (+0.047 vs +0.032), spread
+  (+18.2% vs +12.5%) and post-cost Sharpe (0.74 vs 0.72), so they are not in the
+  default feature set.
+
 - **Honest results disclosure.** On a corrected 2023–2026 walk-forward panel (544 tickers spanning the full alphabet, 100% of current index members, features staged before the PIT filter, purged splits, cost-inclusive NAV, HAC alpha t-stats, `--rf-rate 0.045`), **this model has no demonstrable stock-selection skill at the top of its ranking — the only part the strategy trades.**
 
   Baseline `--top-n 15`: total return **+22.2%** against **+105.2%** for SPY and **+61.5%** for equal-weight RSP over the same sessions; Sharpe **0.16**; max drawdown **−27.7%**. CAPM alpha is **−12.6% (HAC t = −1.64)** vs SPY and **−7.5% (t = −0.97)** vs RSP. Against the equal-weight benchmark — the fair comparison for an equal-weighted strategy, especially across a mega-cap-dominated tape — that is statistically indistinguishable from zero. It is *no skill*, not proven harm.
