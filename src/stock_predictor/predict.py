@@ -32,6 +32,7 @@ from stock_predictor.portfolio import (
     init_state,
     load_state,
     save_state,
+    stale_positions,
 )
 from stock_predictor.training import (
     MACRO_FEATURE_COLS,
@@ -99,6 +100,7 @@ def build_inference_panel(
     provider: DataProvider | None = None,
     provider_name: str = "yfinance",
     macro_merge: bool = True,
+    fundamentals: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Build feature panel for scoring (no forward return, no label).
 
@@ -119,6 +121,7 @@ def build_inference_panel(
         provider_name=provider_name,
         macro_merge=macro_merge,
         stints=stints,
+        fundamentals=fundamentals,
     )
 
 
@@ -367,6 +370,22 @@ def parse_args() -> argparse.Namespace:
         help="Flat commission per ticker per buy/sell order (same as backtest-sp500)",
     )
     p.add_argument(
+        "--rebalance-day",
+        default=None,
+        dest="rebalance_day",
+        choices=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+        help="Only open a cohort on this weekday, matching the backtest's "
+        "one-signal-per-week schedule. Without it any confirmed run may open "
+        "a cohort, so a daily cron trades a different strategy from the one "
+        "backtested. Expiries always settle either way",
+    )
+    p.add_argument(
+        "--force-rebalance",
+        action="store_true",
+        dest="force_rebalance",
+        help="Bypass the rebalance-day gate and the repeat-signal guard",
+    )
+    p.add_argument(
         "--one-lot-per-ticker",
         action="store_true",
         dest="one_lot_per_ticker",
@@ -435,6 +454,19 @@ def main() -> None:
         label="equity download",
     )
 
+    # Required whenever the model was trained with them, or scoring dies on
+    # missing feature columns.
+    fundamentals = None
+    if any(c.startswith("fund_") for c in feature_cols):
+        from stock_predictor.fundamentals import fetch_fundamentals
+
+        print("Model uses fundamental features; fetching SEC EDGAR facts...")
+        fundamentals = fetch_fundamentals(
+            sample, cache_dir=Path("artifacts/edgar_cache"),
+        )
+        n_tk = fundamentals["ticker"].nunique() if len(fundamentals) else 0
+        print(f"  {len(fundamentals):,} facts for {n_tk} tickers")
+
     # Build features
     print("Computing features...")
     panel, inferred_cols = build_inference_panel(
@@ -444,6 +476,7 @@ def main() -> None:
         provider=provider,
         provider_name=args.provider,
         macro_merge=not args.no_macro_merge,
+        fundamentals=fundamentals,
     )
 
     # Validate feature alignment
@@ -464,6 +497,14 @@ def main() -> None:
 
     # Kill-switch check
     halted, nav, dd = check_kill_switch(state, latest_prices, args.max_drawdown)
+    stale = stale_positions(state, latest_prices)
+    if stale:
+        print(
+            f"Warning: {len(stale)} holding(s) have no live quote and are marked "
+            f"from the last observed price: {', '.join(stale[:8])}"
+            + (" …" if len(stale) > 8 else ""),
+            file=sys.stderr,
+        )
 
     # Generate orders (calendar = session dates in downloaded OHLC index)
     trading_dates = trading_dates_from_index(adj_close.index)
@@ -479,6 +520,8 @@ def main() -> None:
             commission_per_share=args.commission_per_share,
             commission_per_order=args.commission_per_order,
             allow_buys=not halted,
+            rebalance_day=args.rebalance_day,
+            force=args.force_rebalance,
         )
     else:
         picks = scored.head(args.top_n * 2).to_dict("records")  # extra candidates in case some filtered
@@ -495,6 +538,8 @@ def main() -> None:
             commission_per_order=args.commission_per_order,
             allow_buys=not halted,
             allow_duplicate_holdings=not args.one_lot_per_ticker,
+            rebalance_day=args.rebalance_day,
+            force=args.force_rebalance,
         )
 
     print_signal_report(

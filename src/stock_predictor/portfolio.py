@@ -6,12 +6,13 @@ import json
 import os
 import tempfile
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, timezone
 from math import floor
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 from stock_predictor.execution_calendar import (
     exit_date_iso_after_hold,
@@ -28,6 +29,12 @@ class Position:
     entry_date: str  # ISO YYYY-MM-DD
     expiry_date: str
     cohort_id: str
+    last_price: float = 0.0
+    """Most recent observed price, refreshed whenever a quote is available.
+
+    Without it a holding that stops being quoted — delisted, halted, or simply
+    dropped by the data vendor — falls back to its entry price and can never
+    register a loss, so the kill-switch cannot see it."""
 
 
 @dataclass(frozen=True)
@@ -49,6 +56,9 @@ class PortfolioState:
     created_at: str = ""
     updated_at: str = ""
     history: tuple[dict, ...] = ()
+    last_signal_date: str = ""
+    """as_of of the last run that opened a cohort, so re-running one signal
+    does not open a second."""
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -73,7 +83,11 @@ def init_state(initial_capital: float = 100_000.0) -> PortfolioState:
 def load_state(path: Path) -> PortfolioState:
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
-    positions = tuple(Position(**p) for p in raw.get("positions", []))
+    known = {f.name for f in fields(Position)}
+    positions = tuple(
+        Position(**{k: v for k, v in p.items() if k in known})
+        for p in raw.get("positions", [])
+    )
     history = tuple(raw.get("history", []))
     return PortfolioState(
         initial_capital=raw["initial_capital"],
@@ -83,6 +97,7 @@ def load_state(path: Path) -> PortfolioState:
         created_at=raw.get("created_at", ""),
         updated_at=raw.get("updated_at", ""),
         history=history,
+        last_signal_date=raw.get("last_signal_date", ""),
     )
 
 
@@ -96,6 +111,7 @@ def save_state(state: PortfolioState, path: Path) -> None:
         "created_at": state.created_at,
         "updated_at": now,
         "history": list(state.history),
+        "last_signal_date": state.last_signal_date,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
@@ -113,13 +129,36 @@ def save_state(state: PortfolioState, path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def portfolio_value(state: PortfolioState, prices: dict[str, float]) -> float:
-    """Mark-to-market: cash + sum(shares * current_price)."""
-    invested = sum(
-        p.shares * prices.get(p.ticker, p.entry_price)
-        for p in state.positions
+def mark_price(position: Position, prices: dict[str, float]) -> float:
+    """Live quote, else the last one seen, else entry price.
+
+    Falling straight back to entry price marks a collapsed or delisted holding
+    at cost, which hides the loss from every downstream metric including the
+    kill-switch.
+    """
+    live = prices.get(position.ticker)
+    if live is not None and live == live and live > 0:
+        return float(live)
+    if position.last_price > 0:
+        return float(position.last_price)
+    return float(position.entry_price)
+
+
+def stale_positions(
+    state: PortfolioState, prices: dict[str, float],
+) -> tuple[str, ...]:
+    """Tickers with no live quote, marked from history instead."""
+    return tuple(
+        p.ticker for p in state.positions
+        if not (prices.get(p.ticker) or 0) > 0
     )
-    return state.cash + invested
+
+
+def portfolio_value(state: PortfolioState, prices: dict[str, float]) -> float:
+    """Mark-to-market: cash + sum(shares * marked price)."""
+    return state.cash + sum(
+        p.shares * mark_price(p, prices) for p in state.positions
+    )
 
 
 def check_kill_switch(
@@ -200,6 +239,8 @@ def generate_orders(
     commission_per_order: float = 0.0,
     allow_buys: bool = True,
     allow_duplicate_holdings: bool = True,
+    rebalance_day: str | None = None,
+    force: bool = False,
 ) -> tuple[tuple[Order, ...], PortfolioState]:
     """
     Sell expired positions, then open a new cohort if a slot is free.
@@ -221,6 +262,10 @@ def generate_orders(
       index used for scoring (see :func:`stock_predictor.execution_calendar.trading_dates_from_index`).
     *allow_buys* — set False when a risk kill-switch is active so expiries still
       liquidate but no new cohort opens (avoids persisting buys while halted).
+    *rebalance_day* — only open a cohort when *as_of* falls on this weekday,
+      matching the backtest's one-signal-per-week schedule. ``None`` allows any
+      day. Expiries always settle regardless.
+    *force* — bypass both the schedule and the repeat-signal guard.
     *allow_duplicate_holdings* — defaults to ``True`` for parity with the
       cohort backtest, which lets a persistently top-ranked name sit in two
       overlapping cohorts at double weight. Set ``False`` to cap each ticker
@@ -260,7 +305,21 @@ def generate_orders(
     new_positions: list[Position] = []
     cash_used = 0.0
 
-    if available_slots > 0 and allow_buys:
+    # A confirmed run used to open a cohort every time it was invoked, so a
+    # daily cron built five cohorts a week against a backtest that models one.
+    repeat_signal = bool(state.last_signal_date) and as_of == state.last_signal_date
+    off_schedule = (
+        rebalance_day is not None
+        and pd.Timestamp(as_of).day_name() != rebalance_day
+    )
+    may_open = allow_buys and not (repeat_signal or off_schedule) or force
+    if repeat_signal and not force:
+        print(f"  Signal for {as_of} already acted on; no new cohort "
+              "(pass force=True to override).")
+    elif off_schedule and not force:
+        print(f"  {as_of} is not the {rebalance_day} rebalance day; no new cohort.")
+
+    if available_slots > 0 and may_open:
         capital_available = state.cash + cash_from_sells
         # Divide by *free* slots, matching the backtest's `cash / free_slots`.
         # Dividing by max_cohorts under-deploys whenever a slot is occupied —
@@ -303,21 +362,40 @@ def generate_orders(
                 shares = floor(gross_shares)
                 buy_comm = shares * commission_per_share + commission_per_order
                 cash_need = shares * buy_px + buy_comm
+                # Sizing used to ignore fees, so commissions could overdraw the
+                # account: $1,000 cash with $100/order produced -$200.
+                budget_left = capital_available - cash_used
+                if cash_need > budget_left:
+                    affordable = (budget_left - commission_per_order) / (
+                        buy_px + commission_per_share
+                    )
+                    shares = max(0, floor(affordable))
+                    if shares < 1:
+                        continue
+                    buy_comm = shares * commission_per_share + commission_per_order
+                    cash_need = shares * buy_px + buy_comm
+                    if cash_need > budget_left:
+                        continue
                 buy_orders.append(Order(
                     action="BUY", ticker=ticker, shares=shares,
                     price=buy_px, cohort_id=cohort_id, reason="new_pick",
                 ))
                 new_positions.append(Position(
                     ticker=ticker, shares=shares, entry_price=buy_px,
-                    entry_date=entry_iso, expiry_date=expiry_iso, cohort_id=cohort_id,
+                    entry_date=entry_iso, expiry_date=expiry_iso,
+                    cohort_id=cohort_id, last_price=float(px),
                 ))
                 cash_used += cash_need
 
-    # Build new state
-    kept_positions = tuple(p for p in state.positions if p not in expiring)
+    # Build new state, refreshing marks so a later run without a quote falls
+    # back to the newest price seen rather than the entry price.
+    kept_positions = tuple(
+        replace(p, last_price=mark_price(p, prices))
+        for p in state.positions if p not in expiring
+    )
     new_cash = state.cash + cash_from_sells - cash_used
     nav = new_cash + sum(
-        p.shares * prices.get(p.ticker, p.entry_price)
+        p.shares * mark_price(p, prices)
         for p in (*kept_positions, *new_positions)
     )
     new_watermark = max(state.high_watermark, nav)
@@ -347,6 +425,7 @@ def generate_orders(
         created_at=state.created_at,
         updated_at=datetime.now(timezone.utc).isoformat(),
         history=tuple(new_history),
+        last_signal_date=as_of if buy_orders else state.last_signal_date,
     )
     all_orders = (*sell_orders, *buy_orders)
     return all_orders, new_state
@@ -369,6 +448,8 @@ def generate_orders_rank_hold(
     commission_per_share: float = 0.0,
     commission_per_order: float = 0.0,
     allow_buys: bool = True,
+    rebalance_day: str | None = None,
+    force: bool = False,
 ) -> tuple[tuple[Order, ...], PortfolioState]:
     """Rank-hold order generation (mirrors :func:`run_rank_hold_backtest`).
 
@@ -415,8 +496,14 @@ def generate_orders_rank_hold(
     buy_orders: list[Order] = []
     new_positions: list[Position] = []
     cash_used = 0.0
+    repeat_signal = bool(state.last_signal_date) and as_of == state.last_signal_date
+    off_schedule = (
+        rebalance_day is not None
+        and pd.Timestamp(as_of).day_name() != rebalance_day
+    )
+    may_open = allow_buys and not (repeat_signal or off_schedule) or force
     slots = top_n - len(kept_positions)
-    if slots > 0 and allow_buys:
+    if slots > 0 and may_open:
         held = {p.ticker for p in kept_positions}
         cal = extend_calendar(trading_dates, 10)
         entry = next_trading_day(as_of, cal)
@@ -447,14 +534,15 @@ def generate_orders_rank_hold(
                 new_positions.append(Position(
                     ticker=ticker, shares=shares, entry_price=buy_px,
                     entry_date=entry_iso, expiry_date=OPEN_ENDED_EXPIRY,
-                    cohort_id=cohort_id,
+                    cohort_id=cohort_id, last_price=float(px),
                 ))
                 cash_used += shares * buy_px + buy_comm
                 bought += 1
 
+    kept_positions = [replace(p, last_price=mark_price(p, prices)) for p in kept_positions]
     new_cash = state.cash + cash_from_sells - cash_used
     nav = new_cash + sum(
-        p.shares * prices.get(p.ticker, p.entry_price)
+        p.shares * mark_price(p, prices)
         for p in (*kept_positions, *new_positions)
     )
     new_state = PortfolioState(
@@ -465,5 +553,6 @@ def generate_orders_rank_hold(
         created_at=state.created_at,
         updated_at=datetime.now(timezone.utc).isoformat(),
         history=tuple(new_history),
+        last_signal_date=as_of if buy_orders else state.last_signal_date,
     )
     return (*sell_orders, *buy_orders), new_state
