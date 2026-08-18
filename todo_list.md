@@ -64,8 +64,13 @@ signal is not in the current inputs.
 - [x] **Long-short engine** — `long_short.py`, with borrow and turnover costs.
   Median Sharpe 0.74 after costs; always sweep rebalance-schedule offsets.
 
-- [ ] **Per-name short borrow.** One flat rate understates a short book that
-  skews to high-volatility names. Needs a borrow-rate source.
+- [x] **Per-name short borrow** — `borrow.py`. Consumes a real `borrow_rate`
+  column when supplied, else a stylised volatility-percentile proxy, else a
+  flat rate. The premise turned out to be **wrong**: the short book is cheaper
+  than the universe (0.58x), not dearer, because the model ranks volatility
+  positively and the expensive names sit in the *long* book. Impact on median
+  Sharpe: 0.74 -> 0.73.
+  - [ ] Real borrow data would still beat the proxy; the hook is there.
 - [ ] **Recover the delisted names.** ~187 of 342 departed members are absent
   on the 2010+ universe; a Tiingo equities key recovers most.
 - [ ] **More independent periods.** 30 is better than 14 and still modest for
