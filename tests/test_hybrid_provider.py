@@ -208,3 +208,29 @@ def test_macro_and_benchmark_delegate_to_yfinance(tmp_path) -> None:
     p = _provider(["AAA"], tmp_path)
     assert set(p.download_macro("2024-01-01", None).columns) >= {"date", "vix"}
     assert p.download_benchmark("SPY", "2024-01-01", "2024-01-10").name == "SPY"
+
+
+def test_placeholder_columns_do_not_duplicate_recovered_tickers(tmp_path) -> None:
+    """Regression: Yahoo returns an all-NaN column for a name it cannot serve.
+    Concatenating Tiingo's version on top produced two columns for the same
+    ticker — a real fetch came back 1006 wide for 845 requested — which then
+    yields duplicate rows on stack()."""
+    class _PlaceholderYF(_FakeYF):
+        def download_equity_ohlcv(self, tickers, start, end):
+            adj, vol = super().download_equity_ohlcv(tickers, start, end)
+            for t in tickers:
+                if t not in self.served:
+                    adj[t] = np.nan      # the placeholder Yahoo actually emits
+                    vol[t] = np.nan
+            return adj, vol
+
+    p = HybridProvider(tiingo_api_key="k", cache_dir=tmp_path,
+                       yf_provider=_PlaceholderYF(["AAA"]), pause_s=0.0)
+    with patch.object(p, "_get_session") as sess:
+        sess.return_value.get.return_value = _Resp(200, _tiingo_rows())
+        adj, vol = p.download_equity_ohlcv(["AAA", "DEAD"], "2024-01-01", None)
+
+    assert list(adj.columns) == ["AAA", "DEAD"]
+    assert not adj.columns.duplicated().any()
+    assert not vol.columns.duplicated().any()
+    assert adj["DEAD"].notna().sum() == 6, "Tiingo data must win over the placeholder"

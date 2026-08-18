@@ -166,10 +166,20 @@ class HybridProvider:
         vol_add = pd.DataFrame({
             t: df.set_index("date")["volume"] for t, df in recovered.items()
         })
+        # Yahoo hands back an all-NaN placeholder column for a name it cannot
+        # serve. Those names are exactly the ones Tiingo just supplied, so the
+        # placeholder must go before concatenating or the ticker ends up
+        # duplicated — which then produces duplicate rows on stack().
+        dead = [c for c in adj_close.columns if str(c) in recovered]
+        if dead:
+            adj_close = adj_close.drop(columns=dead)
+            volume = volume.drop(columns=[c for c in volume.columns if str(c) in recovered],
+                                 errors="ignore")
         # Tiingo carries session dates Yahoo never returned for these names, so
         # union the index rather than reindexing onto Yahoo's calendar.
         adj_close = pd.concat([adj_close, close_add], axis=1, sort=True).sort_index()
         volume = pd.concat([volume, vol_add], axis=1, sort=True).sort_index()
+        assert not adj_close.columns.duplicated().any(), "duplicate ticker columns"
         return _order_columns(adj_close, wanted), _order_columns(volume, wanted)
 
     def download_macro(self, start: str, end: str | None) -> pd.DataFrame:
