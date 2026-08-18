@@ -187,6 +187,7 @@ def test_inference_panel_accepts_fundamentals() -> None:
     """Regression: training supported fundamental columns but inference never
     passed them, so scoring raised on missing features."""
     import inspect
+
     from stock_predictor.predict import build_inference_panel, main
 
     assert "fundamentals" in inspect.signature(build_inference_panel).parameters
@@ -197,6 +198,7 @@ def test_inference_panel_accepts_fundamentals() -> None:
 
 def test_predict_cli_exposes_the_schedule_gates() -> None:
     from unittest.mock import patch
+
     from stock_predictor.predict import parse_args
 
     with patch("sys.argv", ["predict-sp500", "--model", "m.pkl"]):

@@ -9,7 +9,6 @@ guarding never appeared at all.
 from __future__ import annotations
 
 import pandas as pd
-import pytest
 
 from stock_predictor.fundamentals import (
     asof_join_fundamentals,
@@ -88,6 +87,7 @@ def test_every_filing_vintage_is_retained() -> None:
 
 def test_edgar_cache_has_a_refresh_policy() -> None:
     import inspect
+
     from stock_predictor import fundamentals
 
     src = inspect.getsource(fundamentals.fetch_fundamentals)
