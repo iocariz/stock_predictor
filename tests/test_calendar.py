@@ -13,6 +13,12 @@ def test_add_calendar_features_columns() -> None:
 
 
 def test_fomc_day_zero() -> None:
-    df = pd.DataFrame({"date": pd.to_datetime(["2020-03-03"]), "x": [1]})
+    """On a scheduled meeting day the countdown is zero.
+
+    Previously asserted against 2020-03-03, which is an *emergency*
+    inter-meeting action and is deliberately excluded from the forward-looking
+    calendar — see tests/test_fomc_scheduling.py.
+    """
+    df = pd.DataFrame({"date": pd.to_datetime(["2020-04-29"]), "x": [1]})
     out = add_calendar_features(df)
     assert out["cal_days_to_next_fomc"].iloc[0] == 0
