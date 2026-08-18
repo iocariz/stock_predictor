@@ -49,7 +49,12 @@ class DataProvider(Protocol):
 
 
 def get_provider(name: str, *, batch_size: int | None = None) -> DataProvider:
-    """Instantiate a data provider by name ('yfinance' or 'tiingo').
+    """Instantiate a data provider by name ('yfinance', 'tiingo' or 'hybrid').
+
+    ``hybrid`` downloads through yfinance and falls back to Tiingo only for
+    tickers Yahoo does not serve — mostly companies that were acquired,
+    renamed or taken private. Those absences are the project's survivorship
+    bias, and they are not random: they are disproportionately the failures.
 
     *batch_size* caps how many symbols go into one yfinance request. Lower it
     when Yahoo throttles a large universe; it has no effect on Tiingo, which
@@ -61,6 +66,20 @@ def get_provider(name: str, *, batch_size: int | None = None) -> DataProvider:
         if batch_size is not None:
             return YFinanceProvider(batch_size=batch_size)
         return YFinanceProvider()
+
+    if name == "hybrid":
+        # yfinance for the bulk, Tiingo only for the names Yahoo drops.
+        _load_dotenv()
+        tiingo_key = os.environ.get("TIINGO_API_KEY", "")
+        if not tiingo_key:
+            raise EnvironmentError(
+                "TIINGO_API_KEY is required for --provider hybrid. "
+                "Get a free key at https://www.tiingo.com"
+            )
+        from stock_predictor.providers.hybrid_provider import HybridProvider
+
+        kw = {"batch_size": batch_size} if batch_size is not None else {}
+        return HybridProvider(tiingo_api_key=tiingo_key, **kw)
 
     if name == "tiingo":
         _load_dotenv()
@@ -87,4 +106,6 @@ def get_provider(name: str, *, batch_size: int | None = None) -> DataProvider:
 
         return TiingoFredProvider(tiingo_api_key=tiingo_key, fred_api_key=fred_key)
 
-    raise ValueError(f"Unknown provider: {name!r}. Choose 'yfinance' or 'tiingo'.")
+    raise ValueError(
+        f"Unknown provider: {name!r}. Choose 'yfinance', 'tiingo' or 'hybrid'."
+    )

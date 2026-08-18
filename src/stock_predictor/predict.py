@@ -349,7 +349,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--provider",
         default="yfinance",
-        choices=["yfinance", "tiingo"],
+        choices=["yfinance", "tiingo", "hybrid"],
         help="Data provider: yfinance (default) or tiingo (Tiingo equities + FRED macro)",
     )
     p.add_argument("--weighting", default="equal", choices=["equal", "probability"],

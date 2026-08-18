@@ -1053,7 +1053,7 @@ def main() -> None:
     p.add_argument(
         "--provider",
         default="yfinance",
-        choices=["yfinance", "tiingo"],
+        choices=["yfinance", "tiingo", "hybrid"],
         help="Data provider for benchmark download (default: yfinance)",
     )
     args = p.parse_args()
