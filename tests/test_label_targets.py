@@ -31,7 +31,9 @@ def _panel() -> pd.DataFrame:
 
 
 def test_known_targets_are_exposed() -> None:
-    assert set(LABEL_TARGETS) == {"raw", "vol_adj", "excess", "excess_vol_adj"}
+    """'excess' was removed: ranking within a date makes it identical to 'raw'.
+    See tests/test_label_excess_removed.py."""
+    assert set(LABEL_TARGETS) == {"raw", "vol_adj", "excess_vol_adj"}
 
 
 def test_unknown_target_raises() -> None:
@@ -58,12 +60,6 @@ def test_vol_adjusted_target_rewards_return_per_unit_risk() -> None:
     adj = label_target_series(day, "vol_adj")
     assert day.loc[adj.idxmax(), "ticker"] == "CALM"
     assert adj.nunique() == len(day), "fixture must not tie"
-
-
-def test_excess_target_is_cross_sectionally_centred() -> None:
-    out = label_target_series(_panel(), "excess")
-    per_date = out.groupby(_panel()["date"]).median()
-    np.testing.assert_allclose(per_date.to_numpy(), 0.0, atol=1e-12)
 
 
 def test_excess_vol_adjusted_combines_both() -> None:

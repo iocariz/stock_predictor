@@ -264,7 +264,7 @@ These are **not** recommendations—only sensible axes to explore when you stres
 | `--horizon` | 10 | Forward return horizon (sessions); also the **purge window** at every split boundary |
 | `--threshold` | 0.05 | Binary label threshold (e.g. 5%) |
 | `--objective` | rank | `rank`: LGBMRanker (lambdarank, grouped by date) on per-date forward-return quintile grades. `binary`: LGBMClassifier on `fwd_ret >= --threshold`. Applies to Optuna (NDCG@15 vs PR-AUC), the walk-forward, and the saved model |
-| `--label-target` | raw | With `--objective rank`, what the ranker ranks: `raw` forward return, `vol_adj` (per unit trailing volatility), `excess` (minus the date's cross-sectional median), or `excess_vol_adj` |
+| `--label-target` | raw | With `--objective rank`, what the ranker ranks: `raw` forward return, `vol_adj` (per unit trailing volatility), or `excess_vol_adj` (peer-relative per unit risk). A plain `excess` option was removed — grades are ranked within a date, so subtracting that date's median cannot change the ordering |
 | `--rank-objective` | — | Deprecated; `rank` is now the default. Accepted for compatibility, conflicts with `--objective binary` |
 | `--no-optuna` | off | Skip Optuna search; use defaults + any prior best |
 | `--optuna-trials` | 40 | Optuna trials |

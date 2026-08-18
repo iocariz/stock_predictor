@@ -307,17 +307,29 @@ def purged_date_splits(
     return splits
 
 
-LABEL_TARGETS: tuple[str, ...] = ("raw", "vol_adj", "excess", "excess_vol_adj")
+LABEL_TARGETS: tuple[str, ...] = ("raw", "vol_adj", "excess_vol_adj")
+
+_NO_OP_TARGETS = {
+    "excess": (
+        "grades are ranked within each date, so subtracting that date's median "
+        "shifts every value by the same constant and cannot change the "
+        "ordering — 'excess' produced grades identical to 'raw'. Use "
+        "'excess_vol_adj', where dividing by volatility does reorder"
+    ),
+}
 """What the ranker is asked to rank.
 
 ``raw``
     Forward return. Ranks the biggest movers.
 ``vol_adj``
     Forward return per unit of trailing volatility — a forward Sharpe.
-``excess``
-    Forward return minus that date's cross-sectional median: beta-neutral.
 ``excess_vol_adj``
-    Both: peer-relative return per unit of risk.
+    Peer-relative return per unit of risk: the cross-sectional median is
+    removed *and* the result divided by trailing volatility.
+
+A plain ``excess`` option was removed. Ranking happens within a date, so
+subtracting a per-date constant cannot change the order — it was identical to
+``raw`` while being documented as something else.
 
 This matters more than it looks. The default ``fwd_ret >= threshold`` label
 is satisfied mechanically by volatility — a name needs a wide distribution to
@@ -338,6 +350,9 @@ def label_target_series(
     fwd_col: str = "fwd_ret",
 ) -> pd.Series:
     """The quantity a ranking label should be built from (see LABEL_TARGETS)."""
+    if label_target in _NO_OP_TARGETS:
+        raise ValueError(f"label_target={label_target!r} is not supported: "
+                         f"{_NO_OP_TARGETS[label_target]}")
     if label_target not in LABEL_TARGETS:
         raise ValueError(
             f"label_target must be one of {LABEL_TARGETS}, got {label_target!r}"
@@ -346,7 +361,7 @@ def label_target_series(
         raise ValueError(f"label_target_series requires a {fwd_col!r} column")
 
     target = df[fwd_col].astype(float)
-    if label_target in ("excess", "excess_vol_adj"):
+    if label_target == "excess_vol_adj":
         target = target - df.groupby(date_col)[fwd_col].transform("median")
     if label_target in ("vol_adj", "excess_vol_adj"):
         if _VOL_COL not in df.columns:
