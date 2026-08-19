@@ -95,7 +95,30 @@ class BacktestConfig:
     score — so a threshold is only comparable across runs of the same model
     family and configuration."""
 
+    min_cross_section: int | None = None
+    """Fewest scored names a date must carry before it may open positions.
+
+    Separating row roles keeps the newest sessions in the panel — correctly,
+    since those are what a live model ranks — but a panel can still end
+    ragged, and "the top 15" of a two-name date is not a selection. ``None``
+    derives the floor as ``rank_offset + top_n``: the tightest non-arbitrary
+    bound, since a basket cannot be filled from fewer names than it holds.
+
+    Entries only. Exits stay governed by ``holding_days``/``exit_rank``, so a
+    narrowing cross-section can never strand an open position."""
+
+    @property
+    def effective_min_cross_section(self) -> int:
+        """The floor actually applied; see :attr:`min_cross_section`."""
+        if self.min_cross_section is not None:
+            return self.min_cross_section
+        return self.rank_offset + self.top_n
+
     def __post_init__(self) -> None:
+        if self.min_cross_section is not None and self.min_cross_section < 1:
+            raise ValueError(
+                f"min_cross_section must be >= 1, got {self.min_cross_section}"
+            )
         if self.weighting not in ("equal", "probability"):
             raise ValueError(f"weighting must be 'equal' or 'probability', got {self.weighting!r}")
         if self.top_n < 1:
@@ -253,6 +276,10 @@ def _build_cohort(
     if exit_date is None:
         return None
 
+    # Width is measured before min_prob: a deliberate score floor shrinking
+    # the basket is intended, a date with nothing to rank is not.
+    if len(scored_day) < config.effective_min_cross_section:
+        return None
     if config.min_prob is not None:
         scored_day = scored_day[scored_day["prob"] >= config.min_prob]
     top = scored_day.nlargest(config.rank_offset + config.top_n, "prob")
@@ -847,6 +874,9 @@ def run_rank_hold_backtest(
             and sig_date in vix_by_date.index
             and float(vix_by_date.loc[sig_date]) > config.vix_filter_percentile
         ):
+            continue
+        # Too few names to rank: hold what is open, start nothing new.
+        if len(scored_day) < config.effective_min_cross_section:
             continue
         slots = config.top_n - len(open_pos)
         if slots <= 0:

@@ -72,8 +72,10 @@ def test_build_labeled_panel_no_future_leak() -> None:
     adj_close = _synthetic_adj_close()
     stints = _synthetic_stints()
     panel = build_labeled_panel(adj_close, stints, horizon=5, threshold=0.03)
-    # 30 dates, 2 tickers, last 5 rows per ticker have NaN fwd_ret → dropped
-    assert len(panel) <= 2 * (30 - 5)
+    # 30 dates, 2 tickers; the last 5 rows per ticker have no forward return.
+    # They remain in the panel as tradable rows but carry no label.
+    assert panel["has_label"].sum() <= 2 * (30 - 5)
+    assert not panel[~panel["has_label"]]["fwd_ret"].notna().any()
 
 
 def test_add_price_features_columns() -> None:

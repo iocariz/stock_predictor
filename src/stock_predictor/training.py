@@ -713,6 +713,11 @@ def monthly_walk_forward(
         test_mask = (d[date_col] >= m_start) & (d[date_col] <= m_end)
         train_df = purge_train_dates(d.loc[train_mask], m_start, purge_days, date_col=date_col)
         test_df = d.loc[test_mask]
+        # Train only on rows that carry a label; score every tradable row,
+        # including the newest sessions whose future is not known yet. Those
+        # are precisely the rows a live model has to rank.
+        if "has_label" in d.columns:
+            train_df = train_df[train_df["has_label"]]
         if len(train_df) < min_train_rows or len(test_df) == 0:
             continue
         tr_in, va_in = _inner_train_val_split(
@@ -766,7 +771,6 @@ def monthly_walk_forward(
             final_rank.fit(
                 train_sorted[feature_cols], train_sorted["rank_grade"], group=g_full,
             )
-            y_test = test_df[target_col]
             prob = final_rank.predict(test_df[feature_cols])
         else:
             y_tr = tr_in[target_col]
@@ -815,24 +819,36 @@ def monthly_walk_forward(
                 verbosity=-1,
             )
             final.fit(train_df[feature_cols], train_df[target_col])
-            y_test = test_df[target_col]
             prob = final.predict_proba(test_df[feature_cols])[:, 1]
-        pr = average_precision_score(y_test, prob)
-        try:
-            roc = roc_auc_score(y_test, prob)
-        except ValueError:
-            roc = float("nan")
         scored = test_df.assign(prob=prob)
+        # Three roles, three consumers. Scoring needs a price; evaluation needs
+        # a label; training needed both and used to impose that on everyone.
+        graded = scored[scored["has_label"]] if "has_label" in scored.columns else scored
+
         if return_scores:
             score_cols = [date_col, "ticker", "prob", "adj_close", "fwd_ret", target_col]
+            if "has_label" in scored.columns:
+                score_cols.append("has_label")
             # Carry the regime column (--vix-filter) and the realized cash
             # rate (Sharpe/Sortino funding) through to the backtest.
             for extra in ("vix_percentile", "irx_yield"):
                 if extra in scored.columns:
                     score_cols.append(extra)
             scored_panels.append(scored[score_cols].copy())
+
+        # A month at the end of the panel can be entirely unlabelled. Its rows
+        # are still scored and still tradable; there is simply nothing to
+        # measure them against, so it contributes no metrics row.
+        if len(graded) == 0:
+            continue
+        y_graded = graded[target_col].astype(float)
+        pr = average_precision_score(y_graded, graded["prob"])
+        try:
+            roc = roc_auc_score(y_graded, graded["prob"])
+        except ValueError:
+            roc = float("nan")
         weekly_p = (
-            scored.assign(week=lambda x: x[date_col].dt.to_period("W"))
+            graded.assign(week=lambda x: x[date_col].dt.to_period("W"))
             .groupby("week", observed=True)
             .apply(
                 lambda g: precision_at_k(g[target_col], g["prob"].values, k=top_k),
@@ -845,11 +861,11 @@ def monthly_walk_forward(
                 "month": str(p),
                 "train_end": train_df[date_col].max().date(),
                 "n_train": len(train_df),
-                "n_test": len(test_df),
+                "n_test": len(graded),
                 "pr_auc": pr,
                 "roc_auc": roc,
                 "mean_weekly_precision_at_k": w_mean,
-                "pos_rate_test": float(y_test.mean()),
+                "pos_rate_test": float(y_graded.mean()),
                 "n_trees": n_trees,
             }
         )
@@ -910,6 +926,7 @@ def build_labeled_panel(
     threshold: float,
     *,
     terminal_fill: bool = True,
+    drop_unlabeled: bool = False,
 ) -> pd.DataFrame:
     """Stack wide adj_close into long format, compute forward return & label.
 
@@ -930,8 +947,22 @@ def build_labeled_panel(
     if terminal_fill:
         fill = _terminal_forward_returns(long, horizon)
         long["fwd_ret"] = long["fwd_ret"].fillna(fill)
-    long["target_5pct"] = (long["fwd_ret"] >= threshold).astype("int8")
-    labeled = long.dropna(subset=["fwd_ret"])
+
+    # Three different questions, previously answered by one dropna:
+    #   is_tradable  a price exists, so the row can be ranked and traded
+    #   has_label    a forward return exists, so the row can supervise training
+    # A row can be perfectly tradable with no label — that is exactly the
+    # newest `horizon` sessions, the ones a live model must score. Dropping
+    # them removed the present along with the unknown future.
+    long["is_tradable"] = long["adj_close"].notna() & (long["adj_close"] > 0)
+    long["has_label"] = long["fwd_ret"].notna()
+    # NaN rather than 0: an unknown future is not a negative outcome.
+    long["target_5pct"] = np.where(
+        long["has_label"], (long["fwd_ret"] >= threshold).astype(float), np.nan,
+    )
+    labeled = long[long["is_tradable"]]
+    if drop_unlabeled:
+        labeled = labeled[labeled["has_label"]]
     if stints is None:
         return labeled
     return filter_panel_to_pit(labeled, stints)
@@ -1210,11 +1241,17 @@ def select_training_rows(
     before a ticker's earliest known earnings, biasing the sample.
 
     ``strict=True`` restores the legacy behavior (drop any NaN feature).
+
+    Always requires a label: an unlabelled row is a scoring row, not a
+    training row, and supervising on an unknown future would be fiction.
     """
+    out = features
+    if "has_label" in out.columns:
+        out = out[out["has_label"]]
     if strict:
-        return features.dropna(subset=feature_cols + [target_col])
-    required = [c for c in ("ret_1d",) if c in features.columns]
-    return features.dropna(subset=required + [target_col])
+        return out.dropna(subset=feature_cols + [target_col])
+    required = [c for c in ("ret_1d",) if c in out.columns]
+    return out.dropna(subset=required + [target_col])
 
 
 def run_optuna_search(

@@ -32,7 +32,9 @@ def test_delisted_tail_is_kept_and_priced_to_the_last_quote() -> None:
     return measured to the terminal price a holder would actually realize."""
     px = _prices(dies_at=30)
     panel = build_labeled_panel(px, None, horizon=10, threshold=0.05)
-    dy = panel[panel.ticker == "DYING"].sort_values("date")
+    # The panel now keeps tradable-but-unlabelled rows, so ask for the
+    # labelled ones explicitly.
+    dy = panel[(panel.ticker == "DYING") & panel.has_label].sort_values("date")
 
     # The final session itself has no holding period, so the last usable
     # observation is the session before the delisting.
@@ -47,7 +49,8 @@ def test_delisted_tail_is_kept_and_priced_to_the_last_quote() -> None:
 def test_the_terminal_loss_is_actually_negative_and_large() -> None:
     """Regression for the bias itself: censoring these rows removed losses."""
     panel = build_labeled_panel(_prices(dies_at=30), None, horizon=10, threshold=0.05)
-    tail = panel[(panel.ticker == "DYING") & (panel.date >= DATES[20])]
+    tail = panel[(panel.ticker == "DYING") & panel.has_label
+                 & (panel.date >= DATES[20])]
     assert len(tail) == 9, "sessions 20-28; the terminal session carries no return"
     assert (tail["fwd_ret"] < 0).all()
     assert tail["fwd_ret"].min() < -0.10
@@ -57,8 +60,8 @@ def test_a_still_trading_name_keeps_its_unknown_future_censored() -> None:
     """The panel ending is not a delisting: those rows must still be dropped,
     because the future genuinely is not known yet."""
     panel = build_labeled_panel(_prices(dies_at=None), None, horizon=10, threshold=0.05)
-    alive = panel[panel.ticker == "ALIVE"]
-    assert alive["date"].max() == DATES[-11], "no forward return, no row"
+    alive = panel[(panel.ticker == "ALIVE") & panel.has_label]
+    assert alive["date"].max() == DATES[-11], "no forward return, no label"
 
 
 def test_full_horizon_returns_are_unchanged() -> None:
@@ -75,8 +78,8 @@ def test_terminal_fill_can_be_disabled() -> None:
     panel = build_labeled_panel(
         _prices(dies_at=30), None, horizon=10, threshold=0.05, terminal_fill=False,
     )
-    dy = panel[panel.ticker == "DYING"]
-    assert dy["date"].max() == DATES[19], "legacy behaviour drops the tail"
+    dy = panel[(panel.ticker == "DYING") & panel.has_label]
+    assert dy["date"].max() == DATES[19], "without the fill, the tail is unlabelled"
 
 
 def test_labels_follow_the_filled_returns() -> None:
