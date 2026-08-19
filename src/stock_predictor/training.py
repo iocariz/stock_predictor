@@ -1243,15 +1243,51 @@ def select_training_rows(
     ``strict=True`` restores the legacy behavior (drop any NaN feature).
 
     Always requires a label: an unlabelled row is a scoring row, not a
-    training row, and supervising on an unknown future would be fiction.
+    training row, and supervising on an unknown future would be fiction. Use
+    :func:`select_scoring_rows` for the panel a model is asked to rank.
     """
     out = features
     if "has_label" in out.columns:
         out = out[out["has_label"]]
+    return _require_features(out, feature_cols, [target_col], strict=strict)
+
+
+def select_scoring_rows(
+    features: pd.DataFrame,
+    feature_cols: list[str],
+    target_col: str = "target_5pct",
+    *,
+    strict: bool = False,
+) -> pd.DataFrame:
+    """Pick rows a model can score: features present, label not required.
+
+    A superset of :func:`select_training_rows`. The difference is the newest
+    ``horizon`` sessions, whose forward return is not knowable yet — which is
+    precisely the set a live run has to rank. Handing the walk-forward the
+    training selection instead deleted them from the backtest while
+    :func:`~stock_predictor.predict.build_inference_panel` kept scoring them
+    live, so the two disagreed on the only rows that matter for trading.
+    """
+    return _require_features(features, feature_cols, [], strict=strict)
+
+
+def _require_features(
+    out: pd.DataFrame,
+    feature_cols: list[str],
+    also: list[str],
+    *,
+    strict: bool,
+) -> pd.DataFrame:
+    """Drop rows lacking the features a model needs (plus *also*).
+
+    Non-strict keeps rows with other NaN features: LightGBM handles missing
+    values natively, and dropping every row with any NaN discards long-lookback
+    warm-up periods and biases the sample.
+    """
     if strict:
-        return out.dropna(subset=feature_cols + [target_col])
+        return out.dropna(subset=feature_cols + also)
     required = [c for c in ("ret_1d",) if c in out.columns]
-    return out.dropna(subset=required + [target_col])
+    return out.dropna(subset=required + also)
 
 
 def run_optuna_search(

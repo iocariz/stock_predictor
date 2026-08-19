@@ -161,3 +161,68 @@ def test_unlabelled_rows_are_scored_but_not_graded() -> None:
     # Metrics must be computed only where a label exists.
     assert metrics["pr_auc"].notna().any()
     assert (metrics["n_test"] > 0).all()
+
+
+# ---------------------------------------------------------------------------
+# The panel handed to the walk-forward
+# ---------------------------------------------------------------------------
+
+
+def _features() -> pd.DataFrame:
+    """Two names over ten dates; the last three rows per name are unlabelled."""
+    dates = pd.bdate_range("2024-01-01", periods=10)
+    rows = []
+    for t in ("AAA", "BBB"):
+        for i, d in enumerate(dates):
+            labelled = i < 7
+            rows.append({
+                "date": d, "ticker": t,
+                "adj_close": 100.0 + i,
+                "ret_1d": np.nan if i == 0 else 0.01,   # no history on day one
+                "mom_21d": 0.5,
+                "fwd_ret": 0.02 if labelled else np.nan,
+                "target_5pct": 0.0 if labelled else np.nan,
+                "has_label": labelled,
+                "is_tradable": True,
+            })
+    return pd.DataFrame(rows)
+
+
+def test_training_rows_require_a_label_and_a_price_history() -> None:
+    from stock_predictor.training import select_training_rows
+
+    out = select_training_rows(_features(), ["ret_1d", "mom_21d"], "target_5pct")
+    assert out["has_label"].all(), "an unlabelled row cannot supervise"
+    assert out["ret_1d"].notna().all(), "day one has no return to learn from"
+    assert len(out) == 2 * 6, "10 dates, minus 3 unlabelled, minus day one"
+
+
+def test_scoring_rows_require_features_but_not_a_label() -> None:
+    """The rows a live model has to rank are exactly the unlabelled newest
+    ones. Requiring a label here is what deleted them from the backtest."""
+    from stock_predictor.training import select_scoring_rows
+
+    out = select_scoring_rows(_features(), ["ret_1d", "mom_21d"], "target_5pct")
+    assert len(out) == 2 * 9, "only day one drops, for want of a return"
+    assert not out["has_label"].all(), "unlabelled rows must survive"
+    assert out["date"].max() == pd.Timestamp("2024-01-12"), "the newest session is kept"
+
+
+def test_scoring_rows_are_a_superset_of_training_rows() -> None:
+    from stock_predictor.training import select_scoring_rows, select_training_rows
+
+    cols = ["ret_1d", "mom_21d"]
+    f = _features()
+    tr = select_training_rows(f, cols, "target_5pct")
+    sc = select_scoring_rows(f, cols, "target_5pct")
+    assert set(tr.index) <= set(sc.index)
+    assert len(sc) > len(tr)
+
+
+def test_strict_mode_still_drops_any_nan_feature() -> None:
+    from stock_predictor.training import select_scoring_rows
+
+    f = _features()
+    f.loc[f["ticker"] == "BBB", "mom_21d"] = np.nan
+    out = select_scoring_rows(f, ["ret_1d", "mom_21d"], "target_5pct", strict=True)
+    assert set(out["ticker"]) == {"AAA"}
