@@ -199,6 +199,111 @@ def resolve_objective(args: argparse.Namespace) -> str:
     return args.objective
 
 
+DEFAULT_LGBM_PARAMS: dict[str, Any] = {
+    "n_estimators": 500,
+    "learning_rate": 0.05,
+    "num_leaves": 63,
+    "max_depth": -1,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+}
+"""Hand-picked baseline, used as-is when --no-optuna and as the base otherwise."""
+
+
+def validate_train_test_window(train_end: str, test_start: str) -> None:
+    """Training must end before testing begins, or the test period leaks."""
+    if pd.Timestamp(train_end) >= pd.Timestamp(test_start):
+        raise ValueError(
+            f"--train-end ({train_end}) must be before --test-start ({test_start})."
+        )
+
+
+def resolve_model_params(optuna_best: dict) -> dict:
+    """Baseline hyperparameters with any tuned values layered on top.
+
+    Returns a fresh dict: handing out the module-level default by reference
+    would let one run's tuning leak into the next.
+    """
+    params = dict(DEFAULT_LGBM_PARAMS)
+    params.update(optuna_best or {})
+    return params
+
+
+def build_run_extra(
+    args: argparse.Namespace, *, objective: str, tune_metric: str,
+) -> dict[str, Any]:
+    """The knobs a manifest must record to make a run reproducible.
+
+    Resolved values, not raw flags: ``--objective auto`` recorded as "auto"
+    stops identifying the run the moment the default changes.
+    """
+    return {
+        "start": args.start,
+        "end": args.end,
+        "train_end": args.train_end,
+        "test_start": args.test_start,
+        "sample_n": args.sample_n,
+        "min_coverage": args.min_coverage,
+        "horizon": args.horizon,
+        "threshold": args.threshold,
+        "skip_earnings": args.skip_earnings,
+        "no_optuna": args.no_optuna,
+        "no_macro_merge": args.no_macro_merge,
+        "strict_dropna": args.strict_dropna,
+        "objective": objective,
+        "label_target": args.label_target,
+        "optuna_metric": tune_metric,
+        "fundamentals": bool(args.fundamentals),
+        "seed": args.seed,
+    }
+
+
+def build_model_meta(
+    args: argparse.Namespace,
+    *,
+    feature_cols: list[str],
+    objective: str,
+    tune_metric: str,
+    optuna_best: dict,
+    manual_params: dict,
+    n_trees: int,
+    importance: dict,
+    pr_auc: float,
+    roc_auc: float,
+    run_id: str,
+    snapshot_root: Path | None,
+) -> dict[str, Any]:
+    """What a saved model remembers about how it was built.
+
+    ``feature_cols`` and ``horizon`` are contractual —
+    :func:`~stock_predictor.predict.load_model` refuses metadata without them.
+    ``seed`` and ``sample_n`` are what the live path uses to rebuild the same
+    universe the model was fitted on.
+    """
+    return {
+        "feature_cols": feature_cols,
+        "objective": objective,
+        "label_target": args.label_target,
+        "optuna_metric": tune_metric,
+        "horizon": args.horizon,
+        "threshold": args.threshold,
+        "start": args.start,
+        "end": args.end,
+        "train_end": args.train_end,
+        "test_start": args.test_start,
+        "sample_n": args.sample_n,
+        "seed": args.seed,
+        "skip_earnings": args.skip_earnings,
+        "optuna_best": optuna_best,
+        "manual_params": manual_params,
+        "best_iteration": n_trees,
+        "feature_importance": importance,
+        "metrics": {"pr_auc": pr_auc, "roc_auc": roc_auc},
+        "run_id": run_id,
+        "snapshot_dir": str(snapshot_root) if snapshot_root else None,
+    }
+
+
 def main() -> None:
     args = parse_args()
     objective = resolve_objective(args)
@@ -207,8 +312,10 @@ def main() -> None:
     start, end = args.start, args.end
     train_end, test_start = args.train_end, args.test_start
     horizon, threshold = args.horizon, args.threshold
-    if pd.Timestamp(train_end) >= pd.Timestamp(test_start):
-        sys.exit(f"Error: --train-end ({train_end}) must be before --test-start ({test_start}).")
+    try:
+        validate_train_test_window(train_end, test_start)
+    except ValueError as exc:
+        sys.exit(f"Error: {exc}")
 
     run_id = repro.new_run_id()
     snapshot_root: Path | None = None
@@ -219,25 +326,7 @@ def main() -> None:
         manifest = repro.build_base_manifest(
             run_id=run_id,
             argv=sys.argv.copy(),
-            extra={
-                "start": start,
-                "end": end,
-                "train_end": train_end,
-                "test_start": test_start,
-                "sample_n": args.sample_n,
-                "min_coverage": args.min_coverage,
-                "horizon": horizon,
-                "threshold": threshold,
-                "skip_earnings": args.skip_earnings,
-                "no_optuna": args.no_optuna,
-                "no_macro_merge": args.no_macro_merge,
-                "strict_dropna": args.strict_dropna,
-                "objective": objective,
-                "label_target": args.label_target,
-                "optuna_metric": tune_metric,
-                "fundamentals": bool(args.fundamentals),
-                "seed": args.seed,
-            },
+            extra=build_run_extra(args, objective=objective, tune_metric=tune_metric),
         )
         repro.write_manifest(snapshot_root / "manifest.json", manifest)
 
@@ -353,16 +442,7 @@ def main() -> None:
             rank_eval_k=args.wf_top_k,
         )
 
-    manual_params = {
-        "n_estimators": 500,
-        "learning_rate": 0.05,
-        "num_leaves": 63,
-        "max_depth": -1,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-    }
-    if optuna_best:
-        manual_params.update(optuna_best)
+    manual_params = resolve_model_params(optuna_best)
 
     if objective == "rank":
         model, n_trees = train_final_rank_model(
@@ -456,28 +536,20 @@ def main() -> None:
                 plot_backtest(bt_result, args.plots_dir)
 
     if args.output_model is not None:
-        meta = {
-            "feature_cols": feature_cols,
-            "objective": objective,
-            "label_target": args.label_target,
-            "optuna_metric": tune_metric,
-            "horizon": horizon,
-            "threshold": threshold,
-            "start": start,
-            "end": end,
-            "train_end": train_end,
-            "test_start": test_start,
-            "sample_n": args.sample_n,
-            "seed": args.seed,
-            "skip_earnings": args.skip_earnings,
-            "optuna_best": optuna_best,
-            "manual_params": manual_params,
-            "best_iteration": n_trees,
-            "feature_importance": feature_importances(model, feature_cols),
-            "metrics": {"pr_auc": pr_auc, "roc_auc": roc_auc},
-            "run_id": run_id,
-            "snapshot_dir": str(snapshot_root) if snapshot_root else None,
-        }
+        meta = build_model_meta(
+            args,
+            feature_cols=feature_cols,
+            objective=objective,
+            tune_metric=tune_metric,
+            optuna_best=optuna_best,
+            manual_params=manual_params,
+            n_trees=n_trees,
+            importance=feature_importances(model, feature_cols),
+            pr_auc=pr_auc,
+            roc_auc=roc_auc,
+            run_id=run_id,
+            snapshot_root=snapshot_root,
+        )
         save_model_artifacts(args.output_model, model, meta, optuna_best)
         if manifest is not None and snapshot_root is not None:
             p = Path(args.output_model)
