@@ -34,6 +34,7 @@ from stock_predictor.training import (
     run_optuna_search,
     save_eval_plots,
     save_model_artifacts,
+    select_scoring_rows,
     select_training_rows,
     train_final_model,
     train_final_rank_model,
@@ -125,7 +126,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--provider",
         default="yfinance",
-        choices=["yfinance", "tiingo"],
+        choices=["yfinance", "tiingo", "hybrid"],
         help="Data provider: yfinance (default) or tiingo (Tiingo equities + FRED macro)",
     )
     p.add_argument(
@@ -317,6 +318,12 @@ def main() -> None:
     features_clean = select_training_rows(
         features, feature_cols, "target_5pct", strict=args.strict_dropna,
     )
+    # The walk-forward trains on labelled rows but must *score* every row a
+    # live run would score, including the newest sessions whose forward return
+    # is not knowable yet. Handing it features_clean deleted exactly those.
+    features_scorable = select_scoring_rows(
+        features, feature_cols, "target_5pct", strict=args.strict_dropna,
+    )
     train = features_clean[features_clean["date"] <= train_end]
     # Purge: labels look `horizon` trading days ahead, so training rows within
     # `horizon` days of test_start would leak test-period prices.
@@ -383,7 +390,7 @@ def main() -> None:
     if not args.skip_walk_forward:
         need_scores = args.run_backtest or args.wf_scores_path is not None
         wf_out = monthly_walk_forward(
-            features_clean,
+            features_scorable,
             feature_cols,
             "target_5pct",
             "date",

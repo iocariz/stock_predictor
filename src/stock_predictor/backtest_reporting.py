@@ -15,6 +15,7 @@ import pandas as pd
 
 from stock_predictor.backtest import BacktestResult, daily_risk_free
 from stock_predictor.stats import auto_hac_lags as _auto_hac_lags
+from stock_predictor.stats import downside_deviation
 from stock_predictor.stats import hac_ols as _hac_ols
 
 # ---------------------------------------------------------------------------
@@ -251,8 +252,7 @@ def _nav_only_metrics(nav: pd.Series, *, risk_free_rate: float = 0.0) -> dict[st
     mean_r = float(excess.mean())
     std_r = float(excess.std())
     sharpe = (mean_r / std_r * np.sqrt(252)) if std_r > _FLAT_EPS else float("nan")
-    neg = excess[excess < 0]
-    downside = float(neg.std()) if len(neg) > 0 else float("nan")
+    downside = downside_deviation(excess)
     sortino = (mean_r / downside * np.sqrt(252)) if downside > _FLAT_EPS else float("nan")
     drawdown = nav / nav.cummax() - 1
     max_dd = float(drawdown.min())

@@ -197,10 +197,14 @@ def fetch_fundamentals(
     cache_dir: Path | None = None,
     user_agent: str | None = None,
     cik_map: dict[str, str] | None = None,
+    max_age_days: float = 7.0,
     min_interval_s: float = SEC_MIN_INTERVAL_S,
     progress_every: int = 50,
 ) -> pd.DataFrame:
     """Long fundamentals table for *tickers*, cached one parquet per ticker.
+
+    *max_age_days* refreshes a cached ticker once it is older than that, so new
+    quarters and restatements arrive; 0 disables expiry.
 
     Missing or un-mapped tickers are skipped with a note rather than failing
     the run — an S&P panel always contains symbols EDGAR cannot resolve
@@ -219,8 +223,12 @@ def fetch_fundamentals(
     for i, ticker in enumerate(sorted(set(tickers)), 1):
         cached = cache_dir / f"{ticker}.parquet" if cache_dir else None
         if cached is not None and cached.exists():
-            frames.append(pd.read_parquet(cached))
-            continue
+            # A permanently frozen cache never sees a new quarter or a
+            # restatement, so it silently ages out of correctness.
+            age_days = (time.time() - cached.stat().st_mtime) / 86400
+            if max_age_days <= 0 or age_days <= max_age_days:
+                frames.append(pd.read_parquet(cached))
+                continue
         if cmap is None:
             # Deferred: a fully cached universe needs no network at all.
             cmap = load_cik_map(user_agent=user_agent)
@@ -328,7 +336,11 @@ def trailing_twelve_months(fund: pd.DataFrame) -> pd.DataFrame:
     work["span_days"] = (work["period_end"] - work["period_start"]).dt.days
 
     flows = work[work["concept"].isin(FLOW_CONCEPTS)].copy()
-    stocks = work[~work["concept"].isin(FLOW_CONCEPTS)].copy()
+    # Balances keep every filing vintage. Collapsing to the earliest filing per
+    # period discarded revisions outright rather than merely delaying them, so
+    # a restatement never became visible at all. The as-of join picks the
+    # newest filing on or before each date, which delays and then reveals them.
+    stocks = _dedupe_filings(fund[~fund["concept"].isin(FLOW_CONCEPTS)]).copy()
     stocks["ttm"] = np.nan
 
     keep = ["ticker", "concept", "period_end", "filed", "value", "ttm"]

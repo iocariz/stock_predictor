@@ -63,3 +63,25 @@ def hac_mean_tstat(x: np.ndarray, *, overlap: int = 1) -> tuple[float, float, in
     if not np.isfinite(var) or var <= 0:
         return mean, float("nan"), lags
     return mean, mean / float(np.sqrt(var)), lags
+
+
+def downside_deviation(returns, target: float = 0.0) -> float:
+    """Root-mean-square shortfall below *target*, over **all** observations.
+
+    Sortino's denominator. Two things it is not:
+
+    * Not the standard deviation of the negative returns. ``std`` demeans,
+      so it measures dispersion around the average shortfall rather than
+      distance from the target — a series of identical losses has zero
+      dispersion and would give a denominator of 0 despite real downside.
+    * Not restricted to the losing observations. Periods without a shortfall
+      contribute zero to the sum but still count in the average, which is what
+      makes a strategy with few losses score better than one with many of the
+      same size.
+    """
+    arr = np.asarray(returns, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return float("nan")
+    shortfall = np.minimum(arr - target, 0.0)
+    return float(np.sqrt(np.mean(shortfall**2)))

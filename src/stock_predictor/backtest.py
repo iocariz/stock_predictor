@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from stock_predictor.execution_calendar import next_trading_day, offset_trading_days
+from stock_predictor.stats import downside_deviation
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -94,7 +95,30 @@ class BacktestConfig:
     score — so a threshold is only comparable across runs of the same model
     family and configuration."""
 
+    min_cross_section: int | None = None
+    """Fewest scored names a date must carry before it may open positions.
+
+    Separating row roles keeps the newest sessions in the panel — correctly,
+    since those are what a live model ranks — but a panel can still end
+    ragged, and "the top 15" of a two-name date is not a selection. ``None``
+    derives the floor as ``rank_offset + top_n``: the tightest non-arbitrary
+    bound, since a basket cannot be filled from fewer names than it holds.
+
+    Entries only. Exits stay governed by ``holding_days``/``exit_rank``, so a
+    narrowing cross-section can never strand an open position."""
+
+    @property
+    def effective_min_cross_section(self) -> int:
+        """The floor actually applied; see :attr:`min_cross_section`."""
+        if self.min_cross_section is not None:
+            return self.min_cross_section
+        return self.rank_offset + self.top_n
+
     def __post_init__(self) -> None:
+        if self.min_cross_section is not None and self.min_cross_section < 1:
+            raise ValueError(
+                f"min_cross_section must be >= 1, got {self.min_cross_section}"
+            )
         if self.weighting not in ("equal", "probability"):
             raise ValueError(f"weighting must be 'equal' or 'probability', got {self.weighting!r}")
         if self.top_n < 1:
@@ -252,6 +276,10 @@ def _build_cohort(
     if exit_date is None:
         return None
 
+    # Width is measured before min_prob: a deliberate score floor shrinking
+    # the basket is intended, a date with nothing to rank is not.
+    if len(scored_day) < config.effective_min_cross_section:
+        return None
     if config.min_prob is not None:
         scored_day = scored_day[scored_day["prob"] >= config.min_prob]
     top = scored_day.nlargest(config.rank_offset + config.top_n, "prob")
@@ -439,7 +467,10 @@ def _compute_metrics(
     mean_r = excess.mean()
     std_r = excess.std()
     sharpe = (mean_r / std_r * np.sqrt(252)) if std_r > _FLAT_EPS else float("nan")
-    downside = excess[excess < 0].std()
+    # Root-mean-square shortfall below zero excess, over every observation —
+    # not the standard deviation of the losses, which demeans them and counts
+    # only the losing periods.
+    downside = downside_deviation(excess)
     sortino = (mean_r / downside * np.sqrt(252)) if downside > _FLAT_EPS else float("nan")
     drawdown = nav / nav.cummax() - 1
     max_dd = drawdown.min()
@@ -844,6 +875,9 @@ def run_rank_hold_backtest(
             and float(vix_by_date.loc[sig_date]) > config.vix_filter_percentile
         ):
             continue
+        # Too few names to rank: hold what is open, start nothing new.
+        if len(scored_day) < config.effective_min_cross_section:
+            continue
         slots = config.top_n - len(open_pos)
         if slots <= 0:
             continue
@@ -952,7 +986,8 @@ def _load_scored(path: Path) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Extracted from main() so the flag contract can be tested without running."""
     p = argparse.ArgumentParser(description="Run portfolio backtest on walk-forward scored data.")
     p.add_argument("scored_path", type=Path, help="Path to scored parquet or CSV")
     p.add_argument(
@@ -1009,6 +1044,17 @@ def main() -> None:
         "for classifiers and unbounded for --rank-objective models",
     )
     p.add_argument(
+        "--min-cross-section",
+        type=int,
+        default=None,
+        dest="min_cross_section",
+        help="Fewest scored names a date must carry before it may open "
+        "positions (default: rank_offset + top_n). Gates entries only; exits "
+        "are never blocked, so a narrowing cross-section cannot strand a "
+        "position. Guards against trading a ragged panel edge as if it were "
+        "a ranking",
+    )
+    p.add_argument(
         "--rf-rate",
         type=float,
         default=None,
@@ -1053,10 +1099,14 @@ def main() -> None:
     p.add_argument(
         "--provider",
         default="yfinance",
-        choices=["yfinance", "tiingo"],
+        choices=["yfinance", "tiingo", "hybrid"],
         help="Data provider for benchmark download (default: yfinance)",
     )
-    args = p.parse_args()
+    return p
+
+
+def main() -> None:
+    args = _build_arg_parser().parse_args()
 
     from stock_predictor.data_provider import get_provider
 
@@ -1079,6 +1129,7 @@ def main() -> None:
         commission_per_order=args.commission_per_order,
         exit_rank=args.exit_rank,
         min_prob=args.min_prob,
+        min_cross_section=args.min_cross_section,
         rank_offset=args.rank_offset,
         risk_free_rate=args.rf_rate,
     )

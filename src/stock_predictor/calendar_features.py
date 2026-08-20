@@ -6,8 +6,21 @@ import numpy as np
 import pandas as pd
 
 # FOMC policy statement release dates (approx. second day for two-day meetings).
-# Source: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm (verify for production).
-FOMC_STATEMENT_DATES: tuple[str, ...] = (
+# Source: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+# (verify for production).
+#
+# Split deliberately. The Fed publishes its calendar about a year ahead, so a
+# countdown to a *scheduled* meeting is knowable in advance and legitimate as a
+# feature. Emergency inter-meeting actions are not: the 3 March 2020 cut was
+# announced that morning and the 15 March cut on a Sunday evening. Including
+# them in the countdown told the model on 28 February that an FOMC event was
+# four days away — knowledge nobody had.
+FOMC_UNSCHEDULED_DATES: tuple[str, ...] = (
+    "2020-03-03",   # emergency 50bp cut, announced same morning
+    "2020-03-15",   # emergency cut to zero, announced Sunday evening
+)
+
+FOMC_SCHEDULED_DATES: tuple[str, ...] = (
     "2018-01-31",
     "2018-03-21",
     "2018-05-02",
@@ -25,8 +38,7 @@ FOMC_STATEMENT_DATES: tuple[str, ...] = (
     "2019-10-30",
     "2019-12-11",
     "2020-01-29",
-    "2020-03-03",
-    "2020-03-15",
+    "2020-03-18",   # on the calendar until the 15 March action superseded it
     "2020-04-29",
     "2020-06-10",
     "2020-07-29",
@@ -83,6 +95,13 @@ FOMC_STATEMENT_DATES: tuple[str, ...] = (
     "2026-12-09",
 )
 
+FOMC_STATEMENT_DATES: tuple[str, ...] = tuple(
+    sorted(set(FOMC_SCHEDULED_DATES) | set(FOMC_UNSCHEDULED_DATES))
+)
+"""Every statement date. Safe for backward-looking use; the forward-looking
+countdown below uses :data:`FOMC_SCHEDULED_DATES` only."""
+
+
 CALENDAR_FEATURE_COLS: list[str] = [
     "cal_month_sin",
     "cal_month_cos",
@@ -94,7 +113,8 @@ CALENDAR_FEATURE_COLS: list[str] = [
 
 
 def _fomc_np() -> np.ndarray:
-    return np.array(FOMC_STATEMENT_DATES, dtype="datetime64[D]")
+    """Scheduled meetings only — the countdown must not anticipate emergencies."""
+    return np.array(FOMC_SCHEDULED_DATES, dtype="datetime64[D]")
 
 
 def add_calendar_features(
