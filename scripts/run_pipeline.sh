@@ -13,16 +13,53 @@ cd "$ROOT"
 : "${TRAIN_PROVIDER:=yfinance}"
 : "${PREDICT_PROVIDER:=$TRAIN_PROVIDER}"
 : "${SAMPLE_N:=10000}"
+# --- Strategy: ONE definition, read by both the backtest and the live path ---
+# These used to be passed to predict-sp500 only. backtest-sp500 got nothing, so
+# it measured its own defaults: setting TOP_N=25 traded 25 names against a
+# simulation of 15. Anything that changes what is held belongs here.
 : "${TOP_N:=15}"
 : "${MAX_COHORTS:=2}"
 : "${HOLDING_DAYS:=10}"
 : "${SLIPPAGE_BPS:=5}"
 : "${WEIGHTING:=equal}"
+: "${EXIT_RANK:=40}"
+: "${RANK_OFFSET:=0}"
+: "${MIN_PROB:=}"
+: "${MIN_CROSS_SECTION:=}"
+: "${COMMISSION_PER_SHARE:=0}"
+: "${COMMISSION_PER_ORDER:=0}"
+# Friday matches backtest-sp500's default. predict-sp500 defaults to "any
+# day", so a daily cron used to open cohorts on a schedule the backtest never
+# simulated. Set to "any" only if you also change the backtest.
+: "${REBALANCE_DAY:=Friday}"
+# fixed = holding_days expiry (cohort engine); rank = exit_rank decay.
+: "${HOLD_MODE:=fixed}"
 : "${MAX_DD:=0.15}"
 : "${OPTUNA_TRIALS:=40}"
 : "${TS_CV_SPLITS:=5}"
 : "${EARNINGS_WORKERS:=8}"
 : "${EXTRA_TRAIN_ARGS:=}"
+
+# Selection rules, emitted one per line so both consumers read the same list.
+# The flags below exist on backtest-sp500 and predict-sp500 alike; see
+# tests/test_pipeline_flags.py, which fails if the two ever diverge again.
+strategy_flags() {
+  local -a f=(
+    --top-n "$TOP_N"
+    --holding-days "$HOLDING_DAYS"
+    --max-cohorts "$MAX_COHORTS"
+    --slippage-bps "$SLIPPAGE_BPS"
+    --weighting "$WEIGHTING"
+    --exit-rank "$EXIT_RANK"
+    --rank-offset "$RANK_OFFSET"
+    --commission-per-share "$COMMISSION_PER_SHARE"
+    --commission-per-order "$COMMISSION_PER_ORDER"
+  )
+  [[ -n "$MIN_PROB" ]] && f+=(--min-prob "$MIN_PROB")
+  [[ -n "$MIN_CROSS_SECTION" ]] && f+=(--min-cross-section "$MIN_CROSS_SECTION")
+  [[ "$REBALANCE_DAY" != "any" ]] && f+=(--rebalance-day "$REBALANCE_DAY")
+  printf '%s\n' "${f[@]}"
+}
 
 train_full() {
   uv run train-sp500 \
@@ -42,7 +79,14 @@ train_full() {
 }
 
 backtest_only() {
-  uv run backtest-sp500 "$WF_SCORES" --plots-dir "$PLOTS_DIR"
+  local -a flags
+  mapfile -t flags < <(strategy_flags)
+  local -a mode=()
+  [[ "$HOLD_MODE" == "rank" ]] && mode=(--mode rank-hold)
+  ${DRY_RUN:+echo} uv run backtest-sp500 "$WF_SCORES" \
+    --plots-dir "$PLOTS_DIR" \
+    "${flags[@]}" \
+    "${mode[@]}"
 }
 
 predict_daily() {
@@ -50,17 +94,16 @@ predict_daily() {
   if [[ "${1:-}" == "--confirm" ]]; then
     confirm_flag=(--confirm)
   fi
-  uv run predict-sp500 \
+  local -a flags
+  mapfile -t flags < <(strategy_flags)
+  ${DRY_RUN:+echo} uv run predict-sp500 \
     --model "$MODEL" \
     --state "$STATE" \
     --sample-n "$SAMPLE_N" \
     --provider "$PREDICT_PROVIDER" \
-    --top-n "$TOP_N" \
-    --max-cohorts "$MAX_COHORTS" \
-    --holding-days "$HOLDING_DAYS" \
-    --slippage-bps "$SLIPPAGE_BPS" \
-    --weighting "$WEIGHTING" \
+    --hold-mode "$HOLD_MODE" \
     --max-drawdown "$MAX_DD" \
+    "${flags[@]}" \
     "${confirm_flag[@]}"
 }
 
@@ -78,6 +121,15 @@ Environment (examples):
   MODEL=artifacts/model.pkl STATE=portfolio_state.json SAMPLE_N=10000
   TRAIN_PROVIDER=tiingo PREDICT_PROVIDER=tiingo
   TRAIN_START=2018-01-01 TRAIN_END=2022-12-31 TEST_START=2023-01-01
+
+Strategy (one definition, applied to BOTH the backtest and the live path):
+  TOP_N=15 HOLDING_DAYS=10 MAX_COHORTS=2 WEIGHTING=equal SLIPPAGE_BPS=5
+  EXIT_RANK=40 RANK_OFFSET=0 MIN_PROB= MIN_CROSS_SECTION=
+  REBALANCE_DAY=Friday  (use "any" to trade every session)
+  HOLD_MODE=fixed|rank  COMMISSION_PER_SHARE=0 COMMISSION_PER_ORDER=0
+
+  DRY_RUN=1 prints the command instead of running it:
+    DRY_RUN=1 TOP_N=25 ./scripts/run_pipeline.sh predict
 
 Load .env from repo root if you use python-dotenv (Tiingo/FRED keys).
 EOF

@@ -83,6 +83,43 @@ Recommended rollout:
 
 3. Add monitoring/alerts for failed runs and kill-switch events before fully automating.
 
+**Strategy settings are defined once and applied to both sides.**
+`run_pipeline.sh` builds one list of selection flags and passes it to
+`backtest-sp500` *and* `predict-sp500`, so the configuration you measure is the
+configuration you trade. It previously passed them to `predict` only —
+`backtest` fell back to its own defaults, which happened to agree, so setting
+`TOP_N=25` would have traded twenty-five names against a simulation of fifteen
+with nothing looking wrong.
+
+| variable | default | applies to |
+|---|---|---|
+| `TOP_N`, `HOLDING_DAYS`, `MAX_COHORTS` | 15, 10, 2 | both |
+| `WEIGHTING`, `SLIPPAGE_BPS` | equal, 5 | both |
+| `EXIT_RANK`, `RANK_OFFSET` | 40, 0 | both |
+| `MIN_PROB`, `MIN_CROSS_SECTION` | unset (omitted) | both |
+| `COMMISSION_PER_SHARE`, `COMMISSION_PER_ORDER` | 0, 0 | both |
+| `REBALANCE_DAY` | `Friday` (`any` to trade every session) | both |
+| `HOLD_MODE` | `fixed` (`rank` for rank-decay exits) | both |
+| `MAX_DD` | 0.15 | live only — the kill switch has no simulation twin |
+
+`REBALANCE_DAY` is the one that changed behaviour: `backtest-sp500` defaults to
+Friday and `predict-sp500` to *any* day, so a daily cron was opening cohorts on
+a schedule the backtest never simulated. The pipeline now pins both to Friday.
+
+Check what a run will do without running it:
+
+```bash
+DRY_RUN=1 TOP_N=25 MIN_PROB=0.4 ./scripts/run_pipeline.sh predict
+DRY_RUN=1 TOP_N=25 MIN_PROB=0.4 ./scripts/run_pipeline.sh backtest
+```
+
+`tests/test_pipeline_flags.py` drives the real script and fails if the two
+commands ever disagree on a selection flag.
+
+> `train-sp500 --run-backtest` is a **sanity check at library defaults** — that
+> command has no strategy flags — and it now prints the config it used. For the
+> configuration you trade, use `run_pipeline.sh backtest`.
+
 ## Usage
 
 ### Training CLI
