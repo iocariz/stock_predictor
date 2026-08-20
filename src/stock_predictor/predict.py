@@ -226,6 +226,119 @@ def score_universe(
 # ---------------------------------------------------------------------------
 
 
+DEFAULT_UNIVERSE_SEED = 42
+
+
+def resolve_universe_seed(explicit: int | None, meta: dict) -> int:
+    """Which seed draws the live universe.
+
+    The live sample must be the same draw the model was fitted on: the
+    universe defines every cross-sectional feature, so an unrelated sample
+    silently changes the inputs the model was trained to read. An explicit
+    ``--seed`` wins; otherwise the model's own recorded seed; otherwise the
+    default. A stored seed that is not a number is ignored rather than fatal.
+    """
+    if explicit is not None:
+        return int(explicit)
+    try:
+        return int(meta.get("seed", DEFAULT_UNIVERSE_SEED))
+    except (TypeError, ValueError):
+        return DEFAULT_UNIVERSE_SEED
+
+
+def sample_mismatch_warning(sample_n: int, meta: dict) -> str | None:
+    """Warn when the live universe size differs from training's, else ``None``."""
+    trained = meta.get("sample_n")
+    if trained is None or trained == sample_n:
+        return None
+    return (
+        f"--sample-n {sample_n} differs from training ({trained}); the live "
+        "universe will not match the panel the model was trained on."
+    )
+
+
+def missing_feature_columns(panel: pd.DataFrame, feature_cols: list[str]) -> set[str]:
+    """Features the model expects that the panel does not carry."""
+    return set(feature_cols) - set(panel.columns)
+
+
+def format_signal_report(
+    scored: pd.DataFrame,
+    orders: tuple[Order, ...],
+    state: PortfolioState,
+    *,
+    nav: float,
+    drawdown: float,
+    halted: bool,
+    top_n: int,
+    max_drawdown: float,
+) -> list[str]:
+    """The daily signal as lines, so it can be asserted on rather than eyeballed."""
+    today = date.today().isoformat()
+    status = "HALTED" if halted else "ACTIVE"
+    out: list[str] = [
+        "",
+        "=" * 60,
+        f"DAILY SIGNAL \u2014 {today}",
+        "=" * 60,
+        f"Portfolio: ${nav:,.0f} | "
+        f"Drawdown: {drawdown:+.1%} (kill-switch at {-max_drawdown:.0%}) | "
+        f"Status: {status}",
+        "",
+    ]
+
+    sells = [o for o in orders if o.action == "SELL"]
+    buys = [o for o in orders if o.action == "BUY"]
+
+    if sells:
+        out.append("CLOSING POSITIONS (sell at open):")
+        for o in sells:
+            pos = next(
+                (p for p in state.positions
+                 if p.ticker == o.ticker and p.cohort_id == o.cohort_id),
+                None,
+            )
+            # State and orders can disagree if state was hand-edited between
+            # runs; report the leg rather than failing the whole signal.
+            pnl = (o.price - pos.entry_price) * o.shares if pos else 0
+            out.append(
+                f"  SELL {o.shares:>4d} {o.ticker:<6s} @ ~${o.price:.2f}  (P&L {pnl:+,.0f})"
+            )
+        out.append("")
+
+    if halted:
+        out += ["*** KILL-SWITCH ENGAGED — no new positions ***", ""]
+    elif buys:
+        out.append("NEW PICKS (buy at open):")
+        out.append(f"  {'Rank':>4s}  {'Ticker':<6s}  {'Score':>7s}  {'Shares':>6s}  {'~Cost':>8s}")
+        for i, o in enumerate(buys, 1):
+            row = scored[scored["ticker"] == o.ticker]
+            prob = row["prob"].iloc[0] if len(row) else 0
+            out.append(
+                f"  {i:>4d}  {o.ticker:<6s}  {prob:>7.3f}  {o.shares:>6d}  "
+                f"${o.shares * o.price:>7,.0f}"
+            )
+        out.append("")
+    elif not sells:
+        out += ["No orders today (no expirations, no available cohort slots).", ""]
+
+    non_expiring = [p for p in state.positions if p.expiry_date > today]
+    if non_expiring:
+        out.append("HOLD (active, not expiring):")
+        for p in non_expiring:
+            out.append(f"  {p.shares:>4d} {p.ticker:<6s}  (expires {p.expiry_date})")
+        out.append("")
+
+    turnover = sum(o.shares * o.price for o in buys) + sum(o.shares * o.price for o in sells)
+    out += [
+        f"Summary: {len(sells)} sells, {len(buys)} buys, {len(non_expiring)} holds",
+        f"Estimated turnover: ${turnover:,.0f}",
+        "=" * 60,
+        "",
+    ]
+    return out
+
+
 def print_signal_report(
     scored: pd.DataFrame,
     orders: tuple[Order, ...],
@@ -237,62 +350,12 @@ def print_signal_report(
     top_n: int,
     max_drawdown: float,
 ) -> None:
-    today = date.today().isoformat()
-    status = "HALTED" if halted else "ACTIVE"
-
-    print()
-    print("=" * 60)
-    print(f"DAILY SIGNAL \u2014 {today}")
-    print("=" * 60)
-    print(
-        f"Portfolio: ${nav:,.0f} | "
-        f"Drawdown: {drawdown:+.1%} (kill-switch at {-max_drawdown:.0%}) | "
-        f"Status: {status}"
-    )
-    print()
-
-    sells = [o for o in orders if o.action == "SELL"]
-    buys = [o for o in orders if o.action == "BUY"]
-
-    if sells:
-        print("CLOSING POSITIONS (sell at open):")
-        for o in sells:
-            # Find matching position for P&L
-            pos = next((p for p in state.positions if p.ticker == o.ticker and p.cohort_id == o.cohort_id), None)
-            pnl = (o.price - pos.entry_price) * o.shares if pos else 0
-            print(f"  SELL {o.shares:>4d} {o.ticker:<6s} @ ~${o.price:.2f}  (P&L {pnl:+,.0f})")
-        print()
-
-    if halted:
-        print("*** KILL-SWITCH ENGAGED — no new positions ***")
-        print()
-    elif buys:
-        print("NEW PICKS (buy at open):")
-        print(f"  {'Rank':>4s}  {'Ticker':<6s}  {'Score':>7s}  {'Shares':>6s}  {'~Cost':>8s}")
-        for i, o in enumerate(buys, 1):
-            cost = o.shares * o.price
-            # Find prob from scored
-            row = scored[scored["ticker"] == o.ticker]
-            prob = row["prob"].iloc[0] if len(row) else 0
-            print(f"  {i:>4d}  {o.ticker:<6s}  {prob:>7.3f}  {o.shares:>6d}  ${cost:>7,.0f}")
-        print()
-    elif not sells:
-        print("No orders today (no expirations, no available cohort slots).")
-        print()
-
-    # Active holds
-    non_expiring = [p for p in state.positions if p.expiry_date > today]
-    if non_expiring:
-        print("HOLD (active, not expiring):")
-        for p in non_expiring:
-            print(f"  {p.shares:>4d} {p.ticker:<6s}  (expires {p.expiry_date})")
-        print()
-
-    total_cost = sum(o.shares * o.price for o in buys) + sum(o.shares * o.price for o in sells)
-    print(f"Summary: {len(sells)} sells, {len(buys)} buys, {len(non_expiring)} holds")
-    print(f"Estimated turnover: ${total_cost:,.0f}")
-    print("=" * 60)
-    print()
+    """Print the daily signal. Formatting lives in :func:`format_signal_report`."""
+    for line in format_signal_report(
+        scored, orders, state, nav=nav, drawdown=drawdown, halted=halted,
+        top_n=top_n, max_drawdown=max_drawdown,
+    ):
+        print(line)
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +367,9 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Daily inference: score S&P 500 universe, generate orders.",
     )
-    p.add_argument("--model", type=Path, required=True, help="Path to model .pkl")
+    # Not argparse-required: `--init` alone is a valid invocation that just
+    # creates a portfolio file. main() enforces it for every other path.
+    p.add_argument("--model", type=Path, default=None, help="Path to model .pkl")
     p.add_argument("--state", type=Path, default=Path("portfolio_state.json"),
                    help="Portfolio state JSON (default: portfolio_state.json)")
     p.add_argument("--init", action="store_true", help="Create new portfolio state")
@@ -413,6 +478,9 @@ def main() -> None:
         if not args.model:
             return
 
+    if not args.model:
+        sys.exit("--model is required unless you are only running --init.")
+
     if not args.state.exists():
         sys.exit(f"Portfolio state not found: {args.state}. Use --init to create one.")
 
@@ -434,16 +502,12 @@ def main() -> None:
     tickers = tickers_overlapping_window(stints, start_date, None)
     # Reuse training's seed so the live universe is the same draw the model
     # was fitted on; an unrelated sample changes every cross-sectional feature.
-    seed = args.seed if args.seed is not None else int(meta.get("seed", 42))
+    seed = resolve_universe_seed(args.seed, meta)
     sample = sample_tickers(tickers, args.sample_n, seed=seed)
     print(f"  Universe: {len(sample)} tickers (seeded sample, seed={seed})")
-    if "sample_n" in meta and meta["sample_n"] != args.sample_n:
-        print(
-            f"  Warning: --sample-n {args.sample_n} differs from training "
-            f"({meta['sample_n']}); the live universe will not match the "
-            "panel the model was trained on.",
-            file=sys.stderr,
-        )
+    mismatch = sample_mismatch_warning(args.sample_n, meta)
+    if mismatch:
+        print(f"  Warning: {mismatch}", file=sys.stderr)
 
     adj_close, volume = download_recent_prices(sample, lookback_days=lookback, provider=provider)
     print(f"  Downloaded: {adj_close.shape[0]} days x {adj_close.shape[1]} tickers")
@@ -480,7 +544,7 @@ def main() -> None:
     )
 
     # Validate feature alignment
-    missing_feats = set(feature_cols) - set(panel.columns)
+    missing_feats = missing_feature_columns(panel, feature_cols)
     if missing_feats:
         print(f"Warning: model expects features not in panel: {missing_feats}", file=sys.stderr)
         print("Run with matching --skip-earnings flag as training.", file=sys.stderr)
