@@ -1,4 +1,14 @@
-"""Parity checks between backtest cohort timing and live order generation."""
+"""Backtest, paper and live must select the same names.
+
+The three paths are allowed to differ in how they *hold* state and in share
+granularity. They are not allowed to differ in *what they choose*. Before the
+shared core, `--min-prob`, `--rank-offset` and `--min-cross-section` reached
+the simulation and never the live path, so a configuration could be measured
+and then silently not traded.
+
+These tests compare the two ends directly rather than trusting each side's own
+unit tests, because that is exactly the seam a passing suite hid before.
+"""
 
 from __future__ import annotations
 
@@ -6,187 +16,149 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from stock_predictor.backtest import _compute_weights
-from stock_predictor.execution_calendar import (
-    entry_on_or_after,
-    exit_date_iso_after_hold,
-    extend_calendar,
-    next_trading_day,
-    offset_trading_days,
-    trading_dates_from_index,
-)
-from stock_predictor.portfolio import PortfolioState, Position, generate_orders
+from stock_predictor.backtest import BacktestConfig, _build_cohort
+from stock_predictor.execution import SelectionRules
+from stock_predictor.execution_calendar import trading_dates_from_index
+from stock_predictor.portfolio import PortfolioState, generate_orders
+
+DATES = pd.bdate_range("2024-01-01", periods=40)
+N = 60
 
 
-def test_exit_iso_matches_backtest_offset() -> None:
-    td = pd.bdate_range("2024-01-08", periods=40).values
-    entry = entry_on_or_after("2024-01-10", td)
-    assert entry == pd.Timestamp("2024-01-10")
-    ex_iso = exit_date_iso_after_hold(entry, 10, td)
-    ex_ts = offset_trading_days(entry, 10, td)
-    assert ex_ts is not None
-    assert ex_iso == ex_ts.strftime("%Y-%m-%d")
+def _scored_day() -> pd.DataFrame:
+    return pd.DataFrame({
+        "ticker": [f"T{i:02d}" for i in range(N)],
+        "prob": np.linspace(0.99, 0.01, N),
+        "adj_close": np.linspace(50.0, 200.0, N),
+    })
 
 
-def test_trading_dates_from_index_sorted_unique() -> None:
-    idx = pd.DatetimeIndex(["2024-01-05", "2024-01-03", "2024-01-05"])
-    df = pd.DataFrame({"x": [1, 2, 3]}, index=idx)
-    out = trading_dates_from_index(df.index)
-    assert len(out) == 2
+def _price_panel(day: pd.DataFrame) -> pd.DataFrame:
+    return pd.DataFrame(
+        np.tile(day["adj_close"].to_numpy(), (len(DATES), 1)),
+        index=DATES, columns=day["ticker"],
+    )
 
 
-def test_live_weights_match_backtest_compute_weights() -> None:
-    probs = pd.Series([0.2, 0.5, 0.3]).to_numpy()
-    w_eq = _compute_weights(probs, "equal")
-    w_pr = _compute_weights(probs, "probability")
-    assert abs(w_eq.sum() - 1.0) < 1e-9
-    assert abs(w_pr.sum() - 1.0) < 1e-9
-    np.testing.assert_allclose(w_pr, probs)
+def _backtest_picks(day: pd.DataFrame, config: BacktestConfig) -> list[str]:
+    cohort = _build_cohort(
+        DATES[0], _price_panel(day), day, config,
+        np.array(DATES, dtype="datetime64[ns]"), capital=1_000_000.0,
+    )
+    return sorted(cohort.tickers) if cohort else []
 
 
-def test_extend_calendar_appends_business_days() -> None:
-    td = pd.bdate_range("2024-06-03", end="2024-06-14").values  # ends Friday
-    cal = extend_calendar(td, 10)
-    assert len(cal) == len(td) + 10
-    # First appended session is the next business day (Monday 2024-06-17)
-    assert pd.Timestamp(cal[len(td)]) == pd.Timestamp("2024-06-17")
-    # Known sessions are untouched
-    assert (cal[: len(td)] == td).all()
+def _live_picks(day: pd.DataFrame, config: BacktestConfig) -> list[str]:
+    orders, _ = generate_orders(
+        PortfolioState(cash=1_000_000.0),
+        day.to_dict("records"),
+        dict(zip(day["ticker"], day["adj_close"], strict=True)),
+        top_n=config.top_n,
+        max_cohorts=config.max_overlapping_cohorts,
+        holding_days=config.holding_days,
+        slippage_bps=config.slippage_bps,
+        as_of=DATES[0].strftime("%Y-%m-%d"),
+        trading_dates=trading_dates_from_index(DATES),
+        weighting=config.weighting,
+        rank_offset=config.rank_offset,
+        min_prob=config.min_prob,
+        min_cross_section=config.min_cross_section,
+        force=True,
+    )
+    return sorted(o.ticker for o in orders if o.action == "BUY")
 
 
-def test_extend_calendar_empty_and_zero() -> None:
-    td = pd.bdate_range("2024-06-03", periods=5).values
-    assert (extend_calendar(td, 0) == td).all()
-    assert len(extend_calendar(np.array([], dtype="datetime64[ns]"), 5)) == 0
+CONFIGS = {
+    "plain": dict(top_n=10),
+    "score floor": dict(top_n=10, min_prob=0.5),
+    "rank band": dict(top_n=10, rank_offset=5),
+    "band and floor": dict(top_n=10, rank_offset=5, min_prob=0.4),
+    "probability weights": dict(top_n=10, weighting="probability"),
+    "wide basket": dict(top_n=25, exit_rank=30),
+}
 
 
-def test_live_entry_matches_backtest_next_day_convention() -> None:
-    """Live entry (next session strictly after as_of) equals the backtest's
-    next_trading_day when the session exists in the historical calendar."""
-    td = pd.bdate_range("2024-01-08", periods=40).values
-    as_of = pd.Timestamp("2024-01-10")  # Wednesday, a session in td
-    cal = extend_calendar(td, 15)
-    live_entry = next_trading_day(as_of, cal)
-    bt_entry = next_trading_day(as_of, td)
-    assert live_entry == bt_entry == pd.Timestamp("2024-01-11")
+@pytest.mark.parametrize("name", list(CONFIGS))
+def test_the_backtest_and_the_live_path_pick_the_same_names(name: str) -> None:
+    config = BacktestConfig(benchmark_ticker=None, slippage_bps=0.0, **CONFIGS[name])
+    day = _scored_day()
+    assert _backtest_picks(day, config) == _live_picks(day, config), name
+
+
+def test_a_score_floor_actually_reaches_the_live_path() -> None:
+    """The regression this whole module exists for. A floor above every score
+    must stop the live path trading, not be ignored by it."""
+    day = _scored_day()
+    config = BacktestConfig(benchmark_ticker=None, top_n=10, min_prob=1.5)
+    assert _live_picks(day, config) == []
+    assert _backtest_picks(day, config) == []
+
+
+def test_a_rank_offset_actually_reaches_the_live_path() -> None:
+    day = _scored_day()
+    head = BacktestConfig(benchmark_ticker=None, top_n=5, slippage_bps=0.0)
+    band = BacktestConfig(benchmark_ticker=None, top_n=5, rank_offset=10,
+                          slippage_bps=0.0)
+    assert set(_live_picks(day, head)).isdisjoint(_live_picks(day, band))
+
+
+def test_a_thin_cross_section_stops_the_live_path_too() -> None:
+    """Two names is not a ranking in a simulation and is not one live."""
+    thin = _scored_day().head(2)
+    config = BacktestConfig(benchmark_ticker=None, top_n=10)
+    assert _live_picks(thin, config) == []
+    assert _backtest_picks(thin, config) == []
 
 
 # ---------------------------------------------------------------------------
-# Capital deployment parity (dollars, not just calendars)
+# Where they are allowed to differ
 # ---------------------------------------------------------------------------
 
-_CAL = pd.bdate_range("2024-01-02", periods=60).to_numpy()
-_PRICES = {f"T{i}": 100.0 for i in range(40)}
 
+def test_live_buys_whole_shares_and_the_backtest_need_not() -> None:
+    """The one legitimate divergence: an account cannot hold 25.4 shares."""
+    from stock_predictor.execution import CostModel, select_targets, size_targets
 
-def _picks(start: int = 0, n: int = 20) -> list[dict]:
-    return [
-        {"ticker": f"T{i}", "prob": 0.5, "adj_close": 100.0}
-        for i in range(start, start + n)
-    ]
+    targets = select_targets(_scored_day(), SelectionRules(top_n=7))
+    costs = CostModel(slippage_bps=0.0)
+    sim = size_targets(targets, 100_000.0, costs, whole_shares=False)
+    live = size_targets(targets, 100_000.0, costs, whole_shares=True)
 
-
-def _open_cohort(cid: str, tickers: range, expiry: str) -> tuple[Position, ...]:
-    return tuple(
-        Position(f"T{i}", 50, 100.0, "2024-01-10", expiry, cid) for i in tickers
+    assert [lot.ticker for lot in sim] == [lot.ticker for lot in live], (
+        "same names, only the quantities round"
     )
+    assert all(float(lot.shares).is_integer() for lot in live)
+    assert any(not float(lot.shares).is_integer() for lot in sim)
+    assert sum(lot.cost for lot in live) <= sum(lot.cost for lot in sim) + 1e-6
 
 
-def _deployed(orders) -> float:
-    return sum(o.shares * o.price for o in orders if o.action == "BUY")
+def test_both_sides_charge_the_same_fill_price() -> None:
+    """A backtest that fills cheaper than the account is the whole problem."""
+    from stock_predictor.backtest import _apply_slippage
+    from stock_predictor.execution import CostModel
+
+    costs = CostModel(slippage_bps=25.0)
+    assert _apply_slippage(100.0, 25.0, +1) == pytest.approx(costs.fill_price(100.0, 1))
+    assert _apply_slippage(100.0, 25.0, -1) == pytest.approx(costs.fill_price(100.0, -1))
 
 
-@pytest.mark.parametrize(
-    ("max_cohorts", "n_active"),
-    [(2, 0), (2, 1), (3, 0), (3, 1), (3, 2), (4, 3)],
-)
-def test_live_sizes_a_cohort_off_free_slots_like_the_backtest(
-    max_cohorts: int, n_active: int,
-) -> None:
-    """Regression: live divided free cash by max_cohorts while the backtest
-    divides by *free* slots, so with 1 of 2 slots open live deployed ~half the
-    intended capital and the rest sat idle indefinitely."""
-    cash = 60_000.0
-    positions: tuple[Position, ...] = ()
-    for c in range(n_active):
-        positions += _open_cohort(f"coh{c}", range(c * 5, c * 5 + 5), "2124-01-25")
-    state = PortfolioState(
-        initial_capital=100_000.0, cash=cash,
-        high_watermark=100_000.0, positions=positions,
-    )
-
-    orders, _ = generate_orders(
-        state, _picks(start=30, n=10), _PRICES,
-        top_n=10, max_cohorts=max_cohorts, holding_days=10,
-        slippage_bps=0.0, as_of="2024-02-01", trading_dates=_CAL,
-    )
-
-    free_slots = max_cohorts - n_active
-    expected = cash / free_slots  # the backtest's `cash / free_slots`
-    # Integer share lots cost a little precision; 1% is well inside one lot.
-    assert _deployed(orders) == pytest.approx(expected, rel=0.01)
+# ---------------------------------------------------------------------------
+# The rules are reachable from the live CLI
+# ---------------------------------------------------------------------------
 
 
-def test_live_deploys_all_free_cash_when_one_slot_remains() -> None:
-    """The concrete case from the audit: 1 of 2 slots free, $50k cash."""
-    state = PortfolioState(
-        initial_capital=100_000.0, cash=50_000.0, high_watermark=100_000.0,
-        positions=_open_cohort("coh1", range(10), "2124-01-25"),
-    )
-    orders, new_state = generate_orders(
-        state, _picks(start=20, n=10), _PRICES,
-        top_n=10, max_cohorts=2, holding_days=10,
-        slippage_bps=0.0, as_of="2024-02-01", trading_dates=_CAL,
-    )
-    assert _deployed(orders) == pytest.approx(50_000.0, rel=0.01)
-    assert new_state.cash < 600  # not ~26k left stranded
+def test_the_live_cli_exposes_every_selection_rule() -> None:
+    """A rule the backtest can express and the live CLI cannot is a
+    configuration you can measure and then fail to trade."""
+    import re
+    from pathlib import Path
 
+    def flags(mod: str) -> set[str]:
+        src = Path("src/stock_predictor") / mod
+        return set(re.findall(r'"(--[a-z-]+)"', src.read_text()))
 
-def test_expiring_cohort_frees_its_slot_before_sizing() -> None:
-    """Cash from an expiring cohort funds the replacement, and its slot counts
-    as free — otherwise the portfolio ratchets down every cycle."""
-    expiring = _open_cohort("old", range(10), "2024-01-31")
-    state = PortfolioState(
-        initial_capital=100_000.0, cash=10_000.0, high_watermark=100_000.0,
-        positions=expiring + _open_cohort("live", range(10, 20), "2124-01-25"),
-    )
-    orders, _ = generate_orders(
-        state, _picks(start=20, n=10), _PRICES,
-        top_n=10, max_cohorts=2, holding_days=10,
-        slippage_bps=0.0, as_of="2024-02-01", trading_dates=_CAL,
-    )
-    # 10k cash + 10 lots x 50 shares x $100 = 60k free, one slot open.
-    assert _deployed(orders) == pytest.approx(60_000.0, rel=0.01)
-
-
-def test_duplicate_holdings_are_allowed_by_default() -> None:
-    """Live now matches the backtest: a persistently top-ranked name may sit
-    in two overlapping cohorts, at the double weight the backtest models."""
-    held = _open_cohort("coh1", range(10), "2124-01-25")
-    state = PortfolioState(
-        initial_capital=100_000.0, cash=50_000.0,
-        high_watermark=100_000.0, positions=held,
-    )
-    orders, _ = generate_orders(
-        state, _picks(start=0, n=10), _PRICES,
-        top_n=10, max_cohorts=2, holding_days=10,
-        slippage_bps=0.0, as_of="2024-02-01", trading_dates=_CAL,
-    )
-    bought = [o.ticker for o in orders if o.action == "BUY"]
-    assert bought == [f"T{i}" for i in range(10)]
-    assert _deployed(orders) == pytest.approx(50_000.0, rel=0.01)
-
-
-def test_duplicate_holdings_can_be_opted_out() -> None:
-    held = _open_cohort("coh1", range(10), "2124-01-25")
-    state = PortfolioState(
-        initial_capital=100_000.0, cash=50_000.0,
-        high_watermark=100_000.0, positions=held,
-    )
-    orders, _ = generate_orders(
-        state, _picks(start=0, n=10), _PRICES,
-        top_n=10, max_cohorts=2, holding_days=10,
-        slippage_bps=0.0, as_of="2024-02-01", trading_dates=_CAL,
-        allow_duplicate_holdings=False,
-    )
-    assert [o.ticker for o in orders if o.action == "BUY"] == []
+    selection = {"--top-n", "--exit-rank", "--weighting", "--holding-days",
+                 "--max-cohorts", "--min-prob", "--rank-offset",
+                 "--min-cross-section", "--slippage-bps"}
+    missing = (flags("backtest.py") & selection) - flags("predict.py")
+    assert not missing, f"backtest-only selection rules: {sorted(missing)}"

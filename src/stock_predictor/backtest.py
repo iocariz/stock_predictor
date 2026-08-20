@@ -18,6 +18,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from stock_predictor.execution import (
+    CostModel,
+    SelectionRules,
+    eligible_candidates,
+    portfolio_weights,
+    rank_exits,
+)
 from stock_predictor.execution_calendar import next_trading_day, offset_trading_days
 from stock_predictor.stats import downside_deviation
 
@@ -108,11 +115,34 @@ class BacktestConfig:
     narrowing cross-section can never strand an open position."""
 
     @property
+    def selection_rules(self) -> SelectionRules:
+        """The strategy's selection, in the form every engine consumes.
+
+        Backtest, paper and live share these rules; only the loop around them
+        differs. See :mod:`stock_predictor.execution`.
+        """
+        return SelectionRules(
+            top_n=self.top_n,
+            rank_offset=self.rank_offset,
+            min_prob=self.min_prob,
+            min_cross_section=self.min_cross_section,
+            weighting=self.weighting,
+            exit_rank=self.exit_rank,
+        )
+
+    @property
+    def cost_model(self) -> CostModel:
+        """Slippage and commissions, shared with the live path."""
+        return CostModel(
+            slippage_bps=self.slippage_bps,
+            commission_per_share=self.commission_per_share,
+            commission_per_order=self.commission_per_order,
+        )
+
+    @property
     def effective_min_cross_section(self) -> int:
         """The floor actually applied; see :attr:`min_cross_section`."""
-        if self.min_cross_section is not None:
-            return self.min_cross_section
-        return self.rank_offset + self.top_n
+        return self.selection_rules.effective_min_cross_section
 
     def __post_init__(self) -> None:
         if self.min_cross_section is not None and self.min_cross_section < 1:
@@ -207,36 +237,13 @@ def _get_rebalance_dates(
 
 
 def _compute_weights(probs: np.ndarray, weighting: str) -> np.ndarray:
-    """Long-only portfolio weights summing to 1.
-
-    ``probability`` weighting normalizes scores by their sum, which is only
-    meaningful for non-negative scores. Raw lambdarank output straddles zero:
-    ``p / sum(p)`` then yields negative weights (an implicit short in a
-    long-only book) and, when the scores nearly cancel, unbounded leverage —
-    e.g. ``[1.0, -0.99, 0.01]`` produced ``[50.0, -49.5, 0.5]``. Reject those
-    inputs instead of silently trading them.
-    """
-    n = len(probs)
-    if n == 0:
-        return np.zeros(0)
-    if weighting != "probability":
-        return np.ones(n) / n
-    if np.any(probs < 0):
-        raise ValueError(
-            "weighting='probability' requires non-negative scores, got "
-            f"min={float(np.min(probs)):.6g}. Raw lambdarank scores are not "
-            "probabilities — use weighting='equal' with --rank-objective "
-            "models, or a classifier whose scores are in [0, 1]."
-        )
-    total = float(probs.sum())
-    if not np.isfinite(total) or total <= 0:
-        return np.ones(n) / n
-    return probs / total
+    """Deprecated alias for :func:`stock_predictor.execution.portfolio_weights`."""
+    return portfolio_weights(probs, weighting)
 
 
 def _apply_slippage(price: float, slippage_bps: float, direction: int) -> float:
-    """direction: +1 for buy, -1 for sell."""
-    return price * (1 + direction * slippage_bps / 10_000)
+    """direction: +1 for buy, -1 for sell. See :class:`execution.CostModel`."""
+    return CostModel(slippage_bps=slippage_bps).fill_price(price, direction)
 
 
 def _cohort_commission_dollars(
@@ -276,16 +283,10 @@ def _build_cohort(
     if exit_date is None:
         return None
 
-    # Width is measured before min_prob: a deliberate score floor shrinking
-    # the basket is intended, a date with nothing to rank is not.
-    if len(scored_day) < config.effective_min_cross_section:
-        return None
-    if config.min_prob is not None:
-        scored_day = scored_day[scored_day["prob"] >= config.min_prob]
-    top = scored_day.nlargest(config.rank_offset + config.top_n, "prob")
-    if config.rank_offset:
-        top = top.iloc[config.rank_offset :]
-    if len(top) == 0:
+    # Selection is shared with the live path; only the price lookup below is
+    # simulation-specific.
+    picks = eligible_candidates(scored_day, config.selection_rules)[: config.top_n]
+    if not picks:
         return None
 
     tickers: list[str] = []
@@ -293,8 +294,8 @@ def _build_cohort(
     exit_prices: list[float] = []
     probs: list[float] = []
 
-    for _, row in top.iterrows():
-        t = row["ticker"]
+    for cand in picks:
+        t = cand.ticker
         try:
             ep = price_panel.at[entry_date, t]
             xp = price_panel.at[exit_date, t]
@@ -305,12 +306,12 @@ def _build_cohort(
         tickers.append(t)
         entry_prices.append(_apply_slippage(ep, config.slippage_bps, +1))
         exit_prices.append(_apply_slippage(xp, config.slippage_bps, -1))
-        probs.append(row["prob"])
+        probs.append(cand.prob)
 
     if len(tickers) == 0:
         return None
 
-    weights = _compute_weights(np.array(probs), config.weighting)
+    weights = portfolio_weights(np.array(probs), config.weighting)
     gross_ret = sum(w * (xp / ep - 1) for w, ep, xp in zip(
         weights,
         [price_panel.at[entry_date, t] for t in tickers],
@@ -832,12 +833,10 @@ def run_rank_hold_backtest(
         e_idx = int(np.searchsorted(trading_dates, np.datetime64(entry_date)))
         scored_day = by_date.get_group(sig_date).sort_values("prob", ascending=False)
         ranked_tickers = list(scored_day["ticker"])
-        ranks = {t: i + 1 for i, t in enumerate(ranked_tickers)}
 
         # Sells: rank decayed beyond exit_rank, or name left the universe.
-        for t in list(open_pos):
-            if ranks.get(t, config.exit_rank + 1) <= config.exit_rank:
-                continue
+        # Shared with the live path so a simulated exit and a real one agree.
+        for t in sorted(rank_exits(set(open_pos), ranked_tickers, config.exit_rank)):
             pos = open_pos.pop(t)
             px = float(price_panel.at[entry_date, t]) if t in price_panel.columns else float("nan")
             if px != px or px <= 0:
@@ -875,8 +874,10 @@ def run_rank_hold_backtest(
             and float(vix_by_date.loc[sig_date]) > config.vix_filter_percentile
         ):
             continue
-        # Too few names to rank: hold what is open, start nothing new.
-        if len(scored_day) < config.effective_min_cross_section:
+        # Entry selection is shared with the live path: the cross-section
+        # floor, the score floor and the rank offset all apply here too.
+        candidates = eligible_candidates(scored_day, config.selection_rules)
+        if not candidates:
             continue
         slots = config.top_n - len(open_pos)
         if slots <= 0:
@@ -888,12 +889,7 @@ def run_rank_hold_backtest(
         bought = 0
         # The score floor gates *buys* only; exits stay governed by exit_rank
         # so a held name is never stranded by a threshold change.
-        buy_candidates = ranked_tickers[config.rank_offset :]
-        if config.min_prob is not None:
-            eligible = set(
-                scored_day.loc[scored_day["prob"] >= config.min_prob, "ticker"]
-            )
-            buy_candidates = [t for t in buy_candidates if t in eligible]
+        buy_candidates = [c.ticker for c in candidates]
         for t in buy_candidates:
             if bought >= slots:
                 break

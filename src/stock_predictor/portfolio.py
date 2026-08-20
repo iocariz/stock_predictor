@@ -8,12 +8,20 @@ import tempfile
 import uuid
 from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, timezone
-from math import floor
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from stock_predictor.execution import (
+    CostModel,
+    SelectionRules,
+    Target,
+    eligible_candidates,
+    portfolio_weights,
+    rank_exits,
+    size_targets,
+)
 from stock_predictor.execution_calendar import (
     exit_date_iso_after_hold,
     extend_calendar,
@@ -200,27 +208,12 @@ def held_tickers(state: PortfolioState, as_of: str) -> set[str]:
 
 
 def _long_only_weights(probs: np.ndarray, weighting: str) -> np.ndarray:
-    """Non-negative weights summing to 1 (parity with the backtest engine).
+    """Deprecated alias for :func:`stock_predictor.execution.portfolio_weights`.
 
-    See :func:`stock_predictor.backtest._compute_weights`: normalizing signed
-    lambdarank scores by their sum produces short positions and unbounded
-    leverage, so those inputs are rejected rather than traded.
+    Kept so existing callers keep working; the live path and the backtest now
+    share one implementation instead of two copies that drifted.
     """
-    n = len(probs)
-    if n == 0:
-        return np.zeros(0, dtype=float)
-    if weighting != "probability":
-        return np.ones(n, dtype=float) / n
-    if np.any(probs < 0):
-        raise ValueError(
-            "weighting='probability' requires non-negative scores, got "
-            f"min={float(np.min(probs)):.6g}. Raw lambdarank scores are not "
-            "probabilities — use weighting='equal' with --rank-objective models."
-        )
-    total = float(probs.sum())
-    if not np.isfinite(total) or total <= 0:
-        return np.ones(n, dtype=float) / n
-    return probs / total
+    return portfolio_weights(probs, weighting)
 
 
 def generate_orders(
@@ -235,6 +228,9 @@ def generate_orders(
     as_of: str,
     trading_dates: np.ndarray,
     weighting: str = "equal",
+    rank_offset: int = 0,
+    min_prob: float | None = None,
+    min_cross_section: int | None = None,
     commission_per_share: float = 0.0,
     commission_per_order: float = 0.0,
     allow_buys: bool = True,
@@ -327,10 +323,17 @@ def generate_orders(
         cap_per_cohort = capital_available / available_slots
         cohort_id = uuid.uuid4().hex[:8]
 
-        eligible = list(picks)
+        # Selection is the shared core, so a score floor or rank band tuned in
+        # the backtest reaches the account instead of being silently dropped.
+        rules = SelectionRules(
+            top_n=top_n, rank_offset=rank_offset, min_prob=min_prob,
+            min_cross_section=min_cross_section, weighting=weighting,
+            exit_rank=max(top_n, 30),
+        )
+        candidates = eligible_candidates(pd.DataFrame(picks), rules)
         if not allow_duplicate_holdings:
-            eligible = [p for p in eligible if p["ticker"] not in already_held]
-        eligible = eligible[:top_n]
+            candidates = [c for c in candidates if c.ticker not in already_held]
+        eligible = candidates[:top_n]
         # Extend the calendar past the last downloaded session so entry (next
         # trading day after as_of) and expiry (holding_days sessions later)
         # always exist — the raw price calendar ends "today".
@@ -342,50 +345,37 @@ def generate_orders(
             else None
         )
         if eligible and entry is not None and expiry_iso is not None:
-            probs = np.array([float(p.get("prob", 1.0)) for p in eligible], dtype=float)
-            # Mirrors backtest._compute_weights: signed (lambdarank) scores
-            # would otherwise yield negative dollar targets and, when they
-            # nearly cancel, absurd position sizes.
-            wts = _long_only_weights(probs, weighting)
-
+            wts = portfolio_weights(
+                np.array([c.prob for c in eligible], dtype=float), weighting,
+            )
+            targets = [
+                Target(ticker=c.ticker,
+                       weight=float(w),
+                       price=float(prices.get(c.ticker, c.price)))
+                for c, w in zip(eligible, wts, strict=True)
+            ]
+            # whole_shares=True is the *only* thing that differs from the
+            # simulation here: an account cannot hold a fractional lot. The
+            # budget guard and the fee model are the same code, so commissions
+            # can no longer overdraw the account.
+            costs = CostModel(
+                slippage_bps=slippage_bps,
+                commission_per_share=commission_per_share,
+                commission_per_order=commission_per_order,
+            )
             entry_iso = entry.strftime("%Y-%m-%d")
-            for pick, w in zip(eligible, wts, strict=True):
-                ticker = pick["ticker"]
-                px = prices.get(ticker, pick.get("adj_close", 0))
-                if px <= 0:
-                    continue
-                buy_px = px * (1 + slippage_bps / 10_000)
-                dollar_amount = float(w) * cap_per_cohort
-                gross_shares = dollar_amount / buy_px
-                if gross_shares < 1:
-                    continue
-                shares = floor(gross_shares)
-                buy_comm = shares * commission_per_share + commission_per_order
-                cash_need = shares * buy_px + buy_comm
-                # Sizing used to ignore fees, so commissions could overdraw the
-                # account: $1,000 cash with $100/order produced -$200.
-                budget_left = capital_available - cash_used
-                if cash_need > budget_left:
-                    affordable = (budget_left - commission_per_order) / (
-                        buy_px + commission_per_share
-                    )
-                    shares = max(0, floor(affordable))
-                    if shares < 1:
-                        continue
-                    buy_comm = shares * commission_per_share + commission_per_order
-                    cash_need = shares * buy_px + buy_comm
-                    if cash_need > budget_left:
-                        continue
+            for lot in size_targets(targets, cap_per_cohort, costs, whole_shares=True):
+                shares = int(lot.shares)
                 buy_orders.append(Order(
-                    action="BUY", ticker=ticker, shares=shares,
-                    price=buy_px, cohort_id=cohort_id, reason="new_pick",
+                    action="BUY", ticker=lot.ticker, shares=shares,
+                    price=lot.fill_price, cohort_id=cohort_id, reason="new_pick",
                 ))
                 new_positions.append(Position(
-                    ticker=ticker, shares=shares, entry_price=buy_px,
+                    ticker=lot.ticker, shares=shares, entry_price=lot.fill_price,
                     entry_date=entry_iso, expiry_date=expiry_iso,
-                    cohort_id=cohort_id, last_price=float(px),
+                    cohort_id=cohort_id, last_price=float(lot.price),
                 ))
-                cash_used += cash_need
+                cash_used += lot.cost
 
     # Build new state, refreshing marks so a later run without a quote falls
     # back to the newest price seen rather than the entry price.
@@ -445,6 +435,9 @@ def generate_orders_rank_hold(
     slippage_bps: float,
     as_of: str,
     trading_dates: np.ndarray,
+    rank_offset: int = 0,
+    min_prob: float | None = None,
+    min_cross_section: int | None = None,
     commission_per_share: float = 0.0,
     commission_per_order: float = 0.0,
     allow_buys: bool = True,
@@ -466,15 +459,16 @@ def generate_orders_rank_hold(
     if commission_per_share < 0 or commission_per_order < 0:
         raise ValueError("commission_per_share and commission_per_order must be >= 0")
 
-    rank_of = {p["ticker"]: i + 1 for i, p in enumerate(ranked_picks)}
+    ranked_tickers = [p["ticker"] for p in ranked_picks]
+    # Exit logic is the shared core, so a simulated exit and a real one agree.
+    exiting = rank_exits({p.ticker for p in state.positions}, ranked_tickers, exit_rank)
 
-    # Sells: rank decayed or ticker no longer scored
     sell_orders: list[Order] = []
     kept_positions: list[Position] = []
     cash_from_sells = 0.0
     new_history = list(state.history)
     for p in state.positions:
-        if rank_of.get(p.ticker, exit_rank + 1) <= exit_rank:
+        if p.ticker not in exiting:
             kept_positions.append(p)
             continue
         px = prices.get(p.ticker, p.entry_price)
@@ -510,34 +504,40 @@ def generate_orders_rank_hold(
         if entry is not None:
             entry_iso = entry.strftime("%Y-%m-%d")
             cash_available = state.cash + cash_from_sells
-            per = cash_available / slots
             cohort_id = uuid.uuid4().hex[:8]
-            bought = 0
-            for pick in ranked_picks:
-                if bought >= slots:
-                    break
-                ticker = pick["ticker"]
-                if ticker in held:
-                    continue
-                px = prices.get(ticker, pick.get("adj_close", 0))
-                if px <= 0:
-                    continue
-                buy_px = px * (1 + slippage_bps / 10_000)
-                shares = floor(per / buy_px)
-                if shares < 1:
-                    continue
-                buy_comm = shares * commission_per_share + commission_per_order
+            # Entry selection shares the backtest's rules: the cross-section
+            # floor, the score floor and the rank offset all apply live too.
+            rules = SelectionRules(
+                top_n=top_n, rank_offset=rank_offset, min_prob=min_prob,
+                min_cross_section=min_cross_section, exit_rank=exit_rank,
+            )
+            costs = CostModel(
+                slippage_bps=slippage_bps,
+                commission_per_share=commission_per_share,
+                commission_per_order=commission_per_order,
+            )
+            candidates = [
+                c for c in eligible_candidates(pd.DataFrame(ranked_picks), rules)
+                if c.ticker not in held
+            ][:slots]
+            # Equal weight per free slot, then the shared whole-share sizer.
+            targets = [
+                Target(ticker=c.ticker, weight=1.0 / slots,
+                       price=float(prices.get(c.ticker, c.price)))
+                for c in candidates
+            ]
+            for lot in size_targets(targets, cash_available, costs, whole_shares=True):
+                shares = int(lot.shares)
                 buy_orders.append(Order(
-                    action="BUY", ticker=ticker, shares=shares,
-                    price=buy_px, cohort_id=cohort_id, reason="new_pick",
+                    action="BUY", ticker=lot.ticker, shares=shares,
+                    price=lot.fill_price, cohort_id=cohort_id, reason="new_pick",
                 ))
                 new_positions.append(Position(
-                    ticker=ticker, shares=shares, entry_price=buy_px,
+                    ticker=lot.ticker, shares=shares, entry_price=lot.fill_price,
                     entry_date=entry_iso, expiry_date=OPEN_ENDED_EXPIRY,
-                    cohort_id=cohort_id, last_price=float(px),
+                    cohort_id=cohort_id, last_price=float(lot.price),
                 ))
-                cash_used += shares * buy_px + buy_comm
-                bought += 1
+                cash_used += lot.cost
 
     kept_positions = [replace(p, last_price=mark_price(p, prices)) for p in kept_positions]
     new_cash = state.cash + cash_from_sells - cash_used
