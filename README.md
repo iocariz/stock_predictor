@@ -160,6 +160,7 @@ The alpha t-statistic is **Newey–West (HAC)**, with the lag window set to at l
 | `--max-cohorts` | 2 | Cohort mode: overlapping cohorts (cash / free slots per entry) |
 | `--vix-filter` | none | Skip rebalance (cohort) / block buys (rank-hold) when `vix_percentile` exceeds this. **Errors** if the panel has no `vix_percentile` column |
 | `--min-prob` | none | Score floor: never buy a name scoring below this. Baskets shrink and weights renormalize; a date with no eligible name does not trade |
+| `--min-cross-section` | `rank_offset + top_n` | Fewest scored names a date must carry before it may **open** positions. Exits are never gated, so a narrowing cross-section cannot strand a holding. Stops a ragged panel edge being traded as if it were a ranking |
 | `--rf-rate` | inferred | Annualized risk-free rate for Sharpe/Sortino. **Funding costs are on by default**: the panel's realized `irx_yield` (13-week T-bill) is charged per date when present, else a 4.5% cash proxy. Pass `0` to switch it off. The rate applied is printed in the report header |
 | `--benchmark-ticker` | SPY | yfinance symbol for buy-and-hold column |
 | `--no-benchmark` | off | Skip benchmark download (table shows N/A for benchmark) |
@@ -677,44 +678,115 @@ notebooks/               Exploration + full pipeline
 ## Limitations
 
 - **Stale artifacts.** Any `wf_scored.parquet` or report produced before the universe fix was built on an **alphabetically truncated** universe (`--sample-n` sliced a sorted ticker list, so a 500-cap run covered roughly A–POOL) with features computed *after* the PIT filter. Those panels are not comparable to current ones — on the same rules, the truncated panel showed +76.6% and Sharpe 1.05 where the corrected panel shows +22.2% and Sharpe 0.16. Regenerate before drawing any conclusion.
+
+  Panels produced before the **row-role fix** are stale in a second, quieter way: they are missing the final `--horizon` sessions entirely. Check with
+  `panel.groupby("date").size().tail(63)` — if the tail collapses to a handful of
+  names, the panel predates the fix and its most recent quarter is fiction.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
-- **Horizon is the biggest lever found.** Everything below was measured at a
-  10-session horizon, which is the wrong instrument for cross-sectional equity
-  signal. At `--horizon 63` on a 2019–2026 panel the same pipeline gives return
-  IC **+0.047** (vs +0.001), a long-short decile spread of **+18.2%/yr gross**,
-  and a HAC t of **+3.28** (vs +1.58). On strictly non-overlapping samples —
-  the only honest test at this horizon, since consecutive daily observations
-  share 62 of 63 days — that is **t = +2.36 across 30 independent periods**,
-  positive in 67% of quarters, and positive in *both* 2019–2022 (incl. COVID,
-  +14.9%/yr, t +1.74) and 2023+ (+22.0%/yr, t +3.48). It is the first result
-  here to hold sign and magnitude across two regimes.
+
+- **Row roles are separate, and used to be conflated.** `build_labeled_panel`
+  answered three different questions with one `dropna`, so a row missing a
+  *future* label was deleted as though its *past* features were invalid. The
+  rows deleted were the newest ones — precisely what a live model ranks. The
+  panel now carries two flags and drops neither role:
+
+  | flag | meaning | consumer |
+  |---|---|---|
+  | `is_tradable` | a positive price exists, so the row can be ranked and traded | scoring, backtest |
+  | `has_label` | a forward return exists, so the row can supervise training | training, IC/depth metrics |
+
+  `target_5pct` is `NaN`, not `0`, for unlabelled rows: an unknown future is not
+  a negative outcome. `select_training_rows` requires a label;
+  `select_scoring_rows` is the superset that does not. Pass
+  `drop_unlabeled=True` for the old behaviour.
+
+  This was a **backtest/live divergence**:
+  [`build_inference_panel`](src/stock_predictor/predict.py) is explicitly "no
+  forward return, no label", so the live path always scored the newest sessions
+  while the backtest deleted them. On the pre-fix panel the final 63 sessions
+  carried a median of **2 names against a universe median of 491**, and 61 dates
+  held fewer than 15 names.
+
+  **The fix restores data; it does not create alpha.** Measured on one panel,
+  full versus its `has_label` subset: return IC is bit-identical (unlabelled
+  rows are excluded from IC by construction), CAGR moves +12.2% → +12.4% and
+  Sharpe 0.68 → 0.69. Do not compare panels across a re-download to size this
+  effect — ticker set and price vintage move too, and that confound is larger
+  than the fix.
+
+  Both long-only engines also gained **`min_cross_section`** (default
+  `rank_offset + top_n`), which gates *entries* on a date having enough scored
+  names to rank at all. Exits are never gated, so a narrowing cross-section
+  cannot strand a position.
+- **Horizon is the biggest lever found.** The disclosure further down was
+  measured at a 10-session horizon, which is the wrong instrument for
+  cross-sectional equity signal. Figures below are the current control panel:
+  **639 tickers, 1,918 sessions, 2019-01-02 → 2026-08-19, `--horizon 63`**,
+  all fixes applied including row roles.
+
+  Return IC is **+0.0374 (HAC t +1.64)** and the long-short decile spread is
+  **+17.5%/yr gross**. On strictly non-overlapping samples — the only honest
+  test at this horizon, since consecutive daily observations share 62 of 63
+  days — that is **t = +2.31 across 30 independent periods**.
 
   Traded at 1.0x gross through [`long_short.py`](src/stock_predictor/long_short.py)
-  with 5bps slippage, short borrow and financing charged, the median across 21
-  rebalance-schedule offsets is **CAGR +13.1%, Sharpe 0.74, max drawdown −14.7%**,
-  every offset positive. It tolerates borrow to ~10%/yr before decaying to zero.
+  with 5bps slippage, per-name borrow and financing charged, the median across
+  21 rebalance-schedule offsets is **CAGR +12.4%, Sharpe 0.69, max drawdown
+  −16.1%**, every offset positive. Borrow tolerance is better than previously
+  stated: at a flat 10%/yr it still returns +11.5% CAGR (Sharpe 0.56), and
+  even at 20%/yr it is +6.0% (Sharpe 0.18) — the earlier "decays to zero by
+  ~10%" claim was measured on a different panel and does not hold here. That
+  curve is a single schedule, not the offset median, so read it as a shape.
 
-  Three things keep this short of a strategy. The **long-only** book — the one
-  the cohort engines simulate — still has alpha of only +3.7% (t +0.84): the
-  significant measure and the implementable one are different measures.
-  **Magnitude is schedule-sensitive** (Sharpe 0.49–1.18 across offsets; the
-  first schedule run gave 1.18, the maximum, so always sweep offsets before
-  quoting a number). Borrow is the one caveat that
-  **turned out to be backwards**: I assumed the short book skewed to
-  high-volatility, hard-to-borrow names, so a flat rate would be optimistic.
-  Measured with `--per-name-borrow`, the short book is *cheaper* than the
-  universe (mean 0.71% vs 1.23%, a 0.58x concentration) because the model
-  ranks volatility **positively** — the volatile, expensive-to-borrow names are
-  in the *long* book, where no borrow is paid. Per-name borrow moves median
-  Sharpe from 0.74 to 0.73. The assumption was plausible and wrong, and it was
-  in this README until it was measured.
+  Three things keep this short of a strategy.
 
-- **Fundamentals help the model, not the book.** SEC EDGAR point-in-time
-  features (`--fundamentals`) take **31–46% of total model gain**, all 11 used,
-  and give the only *stable* return IC across halves (+0.018 / +0.016). But the
-  price-only control beats them at horizon 63 on IC (+0.047 vs +0.032), spread
-  (+18.2% vs +12.5%) and post-cost Sharpe (0.74 vs 0.72), so they are not in the
-  default feature set.
+  The **long-only** book — the one the cohort engines simulate — remains the
+  weaker expression: the significant measure and the implementable one are
+  different measures.
+
+  **Magnitude is schedule-sensitive**: Sharpe ranges 0.44–0.91 across the 21
+  offsets and CAGR +8.9%–+16.6%. An early run once quoted the maximum, so
+  always sweep offsets before quoting a number.
+
+  **The regime split no longer holds magnitude.** 2019–2022 (incl. COVID) is
+  +11.7%/yr at t **+1.01** (n=16) against 2023+ at +24.4%/yr, t **+2.78**
+  (n=14). The sign holds in both halves; the size does not, and the early half
+  is not significant on its own. An earlier version of this README claimed the
+  result held "sign and magnitude across two regimes" — on the current panel
+  only the sign does.
+
+  Borrow is the caveat that **turned out to be backwards**: the assumption was
+  that the short book skewed to high-volatility, hard-to-borrow names, making a
+  flat rate optimistic. Measured with `--per-name-borrow`, the short book is
+  *cheaper* than the universe (0.83% vs 1.22%, a **0.68x** concentration)
+  because the model ranks volatility **positively** — the volatile,
+  expensive-to-borrow names sit in the *long* book, where no borrow is paid.
+  Per-name borrow moves median Sharpe from 0.71 to 0.69. The assumption was
+  plausible and wrong, and it was in this README until it was measured.
+
+  Depth profile at horizon 63 (excess vs universe, HAC t):
+  **top 5 +2.18% (t +1.40)**, **top 15 +2.96% (t +2.35)**,
+  **top 25 +2.74% (t +2.51)**, **top 50 +2.34% (t +2.58)**. The traded top-15
+  band clears |t| = 2 here, unlike at horizon 10 — but note the t-statistic
+  *rises* with depth while the excess falls, so significance is coming from
+  lower variance, not stronger signal.
+
+- **Fundamentals help the model, not the book — and are not robust.** SEC EDGAR
+  point-in-time features (`--fundamentals`) take **31–46% of total model gain**,
+  all 11 used. The price-only control beats them at horizon 63 on IC
+  (+0.0374 vs +0.0232), spread (+17.5% vs +9.3%/yr) and post-cost Sharpe
+  (0.69 vs 0.49), so they are not in the default feature set.
+
+  More damning than the level is the **instability**. Re-downloading the panel
+  — 7 added tickers, revised prices, 18 extra sessions, no code change — left
+  the control at Sharpe 0.69 → 0.69 but swung the fundamentals variant
+  **0.68 → 0.49**, with its long-short independent t falling 2.56 → 1.75. An
+  earlier version of this README described fundamentals as giving the only
+  *stable* IC across halves; that stability did not survive a re-download.
+  Coverage is the likely culprit: fundamentals reach only ~62% of the hybrid
+  universe, because the 220 Tiingo-recovered delisted names are absent from
+  the SEC ticker map — so the variant is partly a different universe, not just
+  a different feature set.
 
 - **Honest results disclosure.** On a corrected 2023–2026 walk-forward panel (544 tickers spanning the full alphabet, 100% of current index members, features staged before the PIT filter, purged splits, cost-inclusive NAV, HAC alpha t-stats, `--rf-rate 0.045`), **this model has no demonstrable stock-selection skill at the top of its ranking — the only part the strategy trades.**
 

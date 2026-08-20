@@ -99,3 +99,17 @@ def test_positions_still_exit_on_a_thin_day(engine) -> None:
     closed_after = [c for c in res.cohorts
                     if pd.Timestamp(c.exit_date) >= DATES[60]]
     assert closed_after, "a thin cross-section must not trap open positions"
+
+
+def test_cli_exposes_the_floor() -> None:
+    """--min-prob and --rank-offset are flags; this belongs beside them."""
+    from stock_predictor.backtest import _build_arg_parser
+
+    args = _build_arg_parser().parse_args(["panel.parquet", "--min-cross-section", "40"])
+    assert args.min_cross_section == 40
+
+
+def test_cli_default_leaves_the_floor_derived() -> None:
+    from stock_predictor.backtest import _build_arg_parser
+
+    assert _build_arg_parser().parse_args(["panel.parquet"]).min_cross_section is None

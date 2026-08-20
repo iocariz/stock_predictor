@@ -986,7 +986,8 @@ def _load_scored(path: Path) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
+def _build_arg_parser() -> argparse.ArgumentParser:
+    """Extracted from main() so the flag contract can be tested without running."""
     p = argparse.ArgumentParser(description="Run portfolio backtest on walk-forward scored data.")
     p.add_argument("scored_path", type=Path, help="Path to scored parquet or CSV")
     p.add_argument(
@@ -1043,6 +1044,17 @@ def main() -> None:
         "for classifiers and unbounded for --rank-objective models",
     )
     p.add_argument(
+        "--min-cross-section",
+        type=int,
+        default=None,
+        dest="min_cross_section",
+        help="Fewest scored names a date must carry before it may open "
+        "positions (default: rank_offset + top_n). Gates entries only; exits "
+        "are never blocked, so a narrowing cross-section cannot strand a "
+        "position. Guards against trading a ragged panel edge as if it were "
+        "a ranking",
+    )
+    p.add_argument(
         "--rf-rate",
         type=float,
         default=None,
@@ -1090,7 +1102,11 @@ def main() -> None:
         choices=["yfinance", "tiingo", "hybrid"],
         help="Data provider for benchmark download (default: yfinance)",
     )
-    args = p.parse_args()
+    return p
+
+
+def main() -> None:
+    args = _build_arg_parser().parse_args()
 
     from stock_predictor.data_provider import get_provider
 
@@ -1113,6 +1129,7 @@ def main() -> None:
         commission_per_order=args.commission_per_order,
         exit_rank=args.exit_rank,
         min_prob=args.min_prob,
+        min_cross_section=args.min_cross_section,
         rank_offset=args.rank_offset,
         risk_free_rate=args.rf_rate,
     )
