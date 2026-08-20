@@ -652,6 +652,12 @@ src/stock_predictor/
   long_short.py          Dollar-neutral long-short engine (borrow + turnover costs)
   borrow.py              Per-name short borrow: real rates, stylised proxy, or flat
   fundamentals.py        Point-in-time SEC EDGAR fundamentals (joined on filing date)
+                         Ticker->CIK is layered: SEC's published map, then EDGAR's
+                         company browser for what it misses (~10% of an S&P panel,
+                         AEP/EA/DFS included), cached with negative results in
+                         <edgar-cache>/cik_fallback.json. Gross profit and total
+                         liabilities are derived by accounting identity when the
+                         filer tags the components but not the total.
   stats.py               HAC / Newey-West helpers
   repro.py               Run manifests, hashing, Parquet snapshots
 scripts/
@@ -771,22 +777,34 @@ notebooks/               Exploration + full pipeline
   *rises* with depth while the excess falls, so significance is coming from
   lower variance, not stronger signal.
 
-- **Fundamentals help the model, not the book — and are not robust.** SEC EDGAR
-  point-in-time features (`--fundamentals`) take **31–46% of total model gain**,
-  all 11 used. The price-only control beats them at horizon 63 on IC
-  (+0.0374 vs +0.0232), spread (+17.5% vs +9.3%/yr) and post-cost Sharpe
-  (0.69 vs 0.49), so they are not in the default feature set.
+- **Fundamentals still trail the price-only control, but the gap was mostly a
+  coverage defect.** SEC EDGAR point-in-time features (`--fundamentals`) take
+  **31–46% of total model gain**, all 11 used.
 
-  More damning than the level is the **instability**. Re-downloading the panel
-  — 7 added tickers, revised prices, 18 extra sessions, no code change — left
-  the control at Sharpe 0.69 → 0.69 but swung the fundamentals variant
-  **0.68 → 0.49**, with its long-short independent t falling 2.56 → 1.75. An
-  earlier version of this README described fundamentals as giving the only
-  *stable* IC across halves; that stability did not survive a re-download.
-  Coverage is the likely culprit: fundamentals reach only ~62% of the hybrid
-  universe, because the 220 Tiingo-recovered delisted names are absent from
-  the SEC ticker map — so the variant is partly a different universe, not just
-  a different feature set.
+  An earlier version of this README called the variant *unstable*, on the
+  evidence that a re-download moved its Sharpe 0.68 → 0.49 while the control
+  held at 0.69. That reading was wrong. Most of the swing was missing data,
+  not instability. On an **identical panel** — same 639 tickers, same 941,381
+  rows, same sessions, only the fundamental values changed — repairing
+  coverage moves the variant:
+
+  | metric | old coverage | fixed coverage | control |
+  |---|---|---|---|
+  | return IC | +0.0232 (t +1.43) | **+0.0272 (t +1.81)** | +0.0374 (t +1.64) |
+  | top-15 excess | +2.12% (t +2.37) | **+2.39% (t +2.99)** | +2.96% (t +2.35) |
+  | L-S spread | +9.3%/yr (t +1.75) | **+12.4%/yr (t +2.54)** | +17.5%/yr (t +2.31) |
+  | Sharpe | 0.49 | **0.69** | 0.69 |
+
+  Sharpe recovers to exactly the control's. The control still wins on IC and
+  on spread magnitude, so fundamentals stay out of the default feature set —
+  but on *significance* the fundamentals variant is now the stronger of the
+  two (depth t +2.99 vs +2.35, long-short t +2.54 vs +2.31), earning smaller
+  excess returns with lower variance.
+
+  The lesson is methodological: a feature set that is silently 22% complete
+  will read as a weak or unstable signal, and the honest first move on a
+  disappointing feature block is to measure its coverage before concluding
+  anything about its content.
 
 - **Honest results disclosure.** On a corrected 2023–2026 walk-forward panel (544 tickers spanning the full alphabet, 100% of current index members, features staged before the PIT filter, purged splits, cost-inclusive NAV, HAC alpha t-stats, `--rf-rate 0.045`), **this model has no demonstrable stock-selection skill at the top of its ranking — the only part the strategy trades.**
 
