@@ -639,9 +639,13 @@ src/stock_predictor/
   training.py            Features, labels (binary + rank grades), purged CV,
                          Optuna (PR-AUC / NDCG), walk-forward, train/eval, model IO
   cli.py                 train-sp500 entry point
+  execution.py           ONE selection/sizing core: backtest, paper and live
+                         all call it, so a rule tuned in simulation reaches the
+                         account. Only `whole_shares` differs between them
   backtest.py            Backtest engines (cohort + rank-hold) + CLI
   backtest_reporting.py  Reports, relative-return metrics (IR/beta/alpha/t), plots
-  portfolio.py           Portfolio state, fixed & rank-hold orders, kill-switch
+  portfolio.py           Portfolio state, kill-switch, and order generation
+                         (selection delegated to execution.py)
   predict.py             Daily inference CLI (predict-sp500)
   execution_calendar.py  Trading-day calendar helpers (shared backtest/live)
   macro_merge.py         Yahoo ↔ FRED macro cross-fill
@@ -689,6 +693,30 @@ notebooks/               Exploration + full pipeline
   `panel.groupby("date").size().tail(63)` — if the tail collapses to a handful of
   names, the panel predates the fix and its most recent quarter is fiction.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
+
+- **One execution core.** The backtest, paper trading and live orders share
+  [`execution.py`](src/stock_predictor/execution.py): the same selection rules,
+  the same weights, the same fill prices, the same fee model. Each path used to
+  carry its own copy, kept in step by comments reading "mirrors the backtest",
+  and they drifted — `--min-prob`, `--rank-offset` and `--min-cross-section`
+  reached the simulation and never the live path, so a configuration could be
+  measured and then quietly not traded. `_compute_weights` and
+  `_long_only_weights` were the same algorithm in two files with two different
+  error messages.
+
+  Exactly one thing legitimately differs, and it is a single argument
+  (`whole_shares`): an account buys integer lots, a simulation need not. The
+  loop and where state lives differ too, and those belong to the callers.
+
+  `tests/test_execution_parity.py` asserts the two ends agree on a shared
+  scored cross-section across six configurations, and that the live CLI exposes
+  every selection rule the backtest can express — a rule you can measure but
+  not trade is the failure this prevents.
+
+  The refactor is behaviour-preserving for the simulation: on the 639-ticker
+  panel, all six configurations reproduce their pre-refactor metrics bit for
+  bit, except one `total_costs` differing by 1e-10 on a $30,956 figure from
+  summation order.
 
 - **Row roles are separate, and used to be conflated.** `build_labeled_panel`
   answered three different questions with one `dropna`, so a row missing a

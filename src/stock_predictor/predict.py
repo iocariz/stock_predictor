@@ -394,6 +394,17 @@ def parse_args() -> argparse.Namespace:
         dest="exit_rank",
         help="rank mode: sell held names ranked worse than this (>= top-n)",
     )
+    # These reach the shared execution core, so a configuration measured in
+    # the backtest can actually be traded. Before, they were simulation-only.
+    p.add_argument("--rank-offset", type=int, default=0, dest="rank_offset",
+                   help="Skip this many top-ranked names before selecting, so the "
+                        "book trades the band rank_offset+1..rank_offset+top_n")
+    p.add_argument("--min-prob", type=float, default=None, dest="min_prob",
+                   help="Score floor: never buy a name scoring below this")
+    p.add_argument("--min-cross-section", type=int, default=None,
+                   dest="min_cross_section",
+                   help="Fewest scored names a date must carry before opening "
+                        "positions (default: rank_offset + top_n)")
     p.add_argument("--max-drawdown", type=float, default=0.15, dest="max_drawdown")
     p.add_argument("--slippage-bps", type=float, default=5.0, dest="slippage_bps")
     p.add_argument("--skip-earnings", action="store_true", dest="skip_earnings")
@@ -578,6 +589,9 @@ def main() -> None:
             state, scored.to_dict("records"), latest_prices,
             top_n=args.top_n,
             exit_rank=args.exit_rank,
+            rank_offset=args.rank_offset,
+            min_prob=args.min_prob,
+            min_cross_section=args.min_cross_section,
             slippage_bps=args.slippage_bps,
             as_of=date.today().isoformat(),
             trading_dates=trading_dates,
@@ -594,6 +608,9 @@ def main() -> None:
             top_n=args.top_n,
             max_cohorts=args.max_cohorts,
             holding_days=args.holding_days,
+            rank_offset=args.rank_offset,
+            min_prob=args.min_prob,
+            min_cross_section=args.min_cross_section,
             slippage_bps=args.slippage_bps,
             as_of=date.today().isoformat(),
             trading_dates=trading_dates,
