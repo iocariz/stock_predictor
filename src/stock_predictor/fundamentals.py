@@ -25,9 +25,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +37,12 @@ import pandas as pd
 
 SEC_TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_COMPANY_FACTS = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+SEC_BROWSE_URL = (
+    "https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany"
+    "&CIK={ticker}&type=10-K&dateb=&owner=include&count=10&output=atom"
+)
+CIK_FALLBACK_CACHE = "cik_fallback.json"
+"""Filename, inside the EDGAR cache dir, of the resolved/unresolved ticker map."""
 def sec_user_agent() -> str:
     """User-Agent for SEC requests.
 
@@ -63,6 +71,16 @@ CONCEPT_TAGS: dict[str, tuple[str, ...]] = {
     ),
     "net_income": ("NetIncomeLoss", "ProfitLoss"),
     "gross_profit": ("GrossProfit",),
+    # Many filers report the cost line and never the gross-profit line, so
+    # gross margin is recoverable by identity. Accenture and Airbnb both do
+    # this; without it gross margin covered only 45% of panel rows.
+    "cost_of_revenue": (
+        "CostOfRevenue",
+        "CostOfGoodsAndServicesSold",
+        "CostOfServices",
+        "CostOfGoodsSold",
+        "CostOfSales",
+    ),
     "operating_income": ("OperatingIncomeLoss",),
     "equity": (
         "StockholdersEquity",
@@ -85,8 +103,8 @@ QUARTER_SPAN_DAYS = (80, 100)
 ANNUAL_SPAN_DAYS = (350, 380)
 
 FLOW_CONCEPTS = frozenset({
-    "revenue", "net_income", "gross_profit", "operating_income",
-    "cash_ops", "capex", "eps_diluted",
+    "revenue", "net_income", "gross_profit", "cost_of_revenue",
+    "operating_income", "cash_ops", "capex", "eps_diluted",
 })
 
 FUNDAMENTAL_FEATURE_COLS: list[str] = [
@@ -121,13 +139,126 @@ def _get_json(url: str, *, user_agent: str | None = None, timeout: int = 60):
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _get_text(url: str, *, user_agent: str | None = None, timeout: int = 60) -> str:
+    req = urllib.request.Request(
+        url, headers={"User-Agent": user_agent or sec_user_agent()},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", "replace")
+
+
 def load_cik_map(*, user_agent: str | None = None) -> dict[str, str]:
-    """Ticker -> zero-padded 10-digit CIK."""
+    """Ticker -> zero-padded 10-digit CIK, from SEC's published ticker file.
+
+    Incomplete in both directions that matter here. It lists only *current*
+    registrants, so acquired and delisted names are absent — the
+    survivorship-relevant tail. And it is not complete even for current ones:
+    AEP, EA, DFS and ANSS are all missing. Use :func:`build_cik_map`, which
+    falls back to EDGAR for whatever this misses.
+    """
     raw = _get_json(SEC_TICKER_MAP_URL, user_agent=user_agent)
     return {
         str(v["ticker"]).upper().replace(".", "-"): str(v["cik_str"]).zfill(10)
         for v in raw.values()
     }
+
+
+_CIK_RE = re.compile(r"<cik>(\d+)</cik>", re.I)
+
+
+def resolve_cik_via_edgar(
+    ticker: str, *, user_agent: str | None = None, timeout: int = 30,
+) -> str | None:
+    """Ticker -> CIK through EDGAR's company browser, or ``None``.
+
+    Resolves server-side, so it finds tickers absent from the published map,
+    including many that have been delisted. Never raises: one failed lookup
+    must not cost the rest of the universe.
+    """
+    try:
+        m = _CIK_RE.search(
+            _get_text(
+                SEC_BROWSE_URL.format(ticker=ticker.upper()),
+                user_agent=user_agent, timeout=timeout,
+            )
+        )
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError):
+        return None
+    return m.group(1).zfill(10) if m else None
+
+
+def load_cik_fallback_cache(path: Path | str) -> dict[str, str | None]:
+    """Read the resolved/unresolved ticker cache; missing or corrupt reads empty."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k).upper(): (str(v) if v is not None else None) for k, v in raw.items()}
+
+
+def save_cik_fallback_cache(path: Path | str, cache: dict[str, str | None]) -> None:
+    """Persist the cache. Best-effort: failing to write is never fatal."""
+    try:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh, indent=0, sort_keys=True)
+    except OSError:
+        pass
+
+
+def build_cik_map(
+    tickers: Iterable[str],
+    *,
+    primary: dict[str, str] | None = None,
+    cache: dict[str, str | None] | None = None,
+    user_agent: str | None = None,
+    pause_s: float = 0.15,
+) -> tuple[dict[str, str], dict[str, int]]:
+    """Resolve *tickers* to CIKs, falling back to EDGAR for whatever is missing.
+
+    Returns ``(ticker -> cik, stats)``. *cache* is mutated in place and records
+    negative results too — without that, every run re-spends the SEC rate limit
+    on the same permanently-unresolvable names.
+
+    Unresolved tickers are counted in *stats* rather than silently dropped: a
+    ticker with no CIK is a company whose fundamentals become NaN, and that is
+    a coverage fact the caller needs to see.
+    """
+    base = primary if primary is not None else load_cik_map(user_agent=user_agent)
+    cache = cache if cache is not None else {}
+    out: dict[str, str] = {}
+    stats = {"primary": 0, "cached": 0, "resolved": 0, "unresolved": 0}
+
+    for raw in tickers:
+        t = str(raw).strip().upper()
+        if not t:
+            continue
+        if t in base:
+            out[t] = base[t]
+            stats["primary"] += 1
+            continue
+        if t in cache:
+            hit = cache[t]
+            stats["cached"] += 1
+            if hit:
+                out[t] = hit
+            else:
+                stats["unresolved"] += 1
+            continue
+        cik = resolve_cik_via_edgar(t, user_agent=user_agent)
+        cache[t] = cik
+        if cik:
+            out[t] = cik
+            stats["resolved"] += 1
+        else:
+            stats["unresolved"] += 1
+        if pause_s:
+            time.sleep(pause_s)
+    return out, stats
 
 
 # ---------------------------------------------------------------------------
@@ -215,8 +346,12 @@ def fetch_fundamentals(
         cache_dir.mkdir(parents=True, exist_ok=True)
 
     cmap = cik_map
+    fallback_path = (cache_dir / CIK_FALLBACK_CACHE) if cache_dir else None
+    fallback = load_cik_fallback_cache(fallback_path) if fallback_path else {}
+    fallback_dirty = False
     frames: list[pd.DataFrame] = []
     unmapped: list[str] = []
+    recovered: list[str] = []
     failed: list[str] = []
     last_call = 0.0
 
@@ -233,6 +368,16 @@ def fetch_fundamentals(
             # Deferred: a fully cached universe needs no network at all.
             cmap = load_cik_map(user_agent=user_agent)
         cik = cmap.get(ticker.upper())
+        if cik is None:
+            # SEC's published map misses ~10% of an S&P panel, skewed toward
+            # acquired and delisted names. Ask EDGAR directly before giving up.
+            cik = fallback.get(ticker.upper())
+            if cik is None and ticker.upper() not in fallback:
+                cik = resolve_cik_via_edgar(ticker, user_agent=user_agent)
+                fallback[ticker.upper()] = cik
+                fallback_dirty = True
+            if cik:
+                recovered.append(ticker)
         if cik is None:
             unmapped.append(ticker)
             continue
@@ -253,8 +398,13 @@ def fetch_fundamentals(
         if progress_every and i % progress_every == 0:
             print(f"  EDGAR: {i}/{len(set(tickers))} tickers")
 
+    if fallback_dirty and fallback_path is not None:
+        save_cik_fallback_cache(fallback_path, fallback)
+    if recovered:
+        print(f"  EDGAR: recovered {len(recovered)} tickers absent from the SEC "
+              f"map (e.g. {', '.join(recovered[:6])})")
     if unmapped:
-        print(f"  EDGAR: {len(unmapped)} tickers not in the SEC map "
+        print(f"  EDGAR: {len(unmapped)} tickers unresolvable even via EDGAR "
               f"(e.g. {', '.join(unmapped[:6])})")
     if failed:
         print(f"  EDGAR: {len(failed)} fetch failures (e.g. {failed[0]})")
@@ -526,11 +676,23 @@ def add_fundamental_features(
     )
 
     out["fund_roe"] = _safe_div(net_income, equity, den_positive=True)
-    out["fund_gross_margin"] = _safe_div(raw("gross_profit"), revenue, den_positive=True)
+    # Filed value first, identity only where it is absent. Both fallbacks are
+    # exact accounting identities rather than estimates, so a derived figure
+    # is as good as a filed one -- but never overrides it.
+    gross_profit = raw("gross_profit").astype(float).fillna(
+        revenue.astype(float) - raw("cost_of_revenue").astype(float)
+    )
+    out["fund_gross_margin"] = _safe_div(gross_profit, revenue, den_positive=True)
     out["fund_operating_margin"] = _safe_div(
         raw("operating_income"), revenue, den_positive=True,
     )
-    out["fund_debt_to_equity"] = _safe_div(raw("liabilities"), equity, den_positive=True)
+    # Equity above assets means the two figures came from different filings,
+    # not a company with negative liabilities, so that derivation is dropped.
+    derived_liabilities = (assets.astype(float) - equity.astype(float)).where(
+        lambda x: x >= 0
+    )
+    liabilities = raw("liabilities").astype(float).fillna(derived_liabilities)
+    out["fund_debt_to_equity"] = _safe_div(liabilities, equity, den_positive=True)
     # Accruals: earnings not backed by cash. Negative is the healthier sign.
     out["fund_accruals"] = _safe_div(net_income - cash_ops, assets, den_positive=True)
 
