@@ -10,16 +10,30 @@ cd "$ROOT"
 : "${STATE:=portfolio_state.json}"
 : "${WF_SCORES:=artifacts/wf_scored.parquet}"
 : "${PLOTS_DIR:=artifacts/plots}"
-: "${TRAIN_PROVIDER:=yfinance}"
-: "${PREDICT_PROVIDER:=$TRAIN_PROVIDER}"
+# hybrid recovers delisted names from Tiingo, which an unbiased *training*
+# panel needs. Live scoring only ever trades current index members, and
+# yfinance serves 100% of those, so the daily run does not spend Tiingo quota
+# on names it could not buy.
+: "${TRAIN_PROVIDER:=hybrid}"
+: "${PREDICT_PROVIDER:=yfinance}"
 : "${SAMPLE_N:=10000}"
+# The label horizon. HOLDING_DAYS derives from it below so the exit rule and
+# the thing the model was trained to predict cannot drift apart: trading a
+# 63-day signal on a 10-day exit is the mismatch this file exists to prevent.
+: "${HORIZON:=63}"
+: "${OBJECTIVE:=rank}"
+# Tuning never improved the traded end of the ranking under any objective or
+# metric tried (README: "The label mattered; tuning did not"), and it costs
+# hours. Set USE_OPTUNA=1 to re-test that claim.
+: "${USE_OPTUNA:=0}"
+: "${SKIP_EARNINGS:=1}"
 # --- Strategy: ONE definition, read by both the backtest and the live path ---
 # These used to be passed to predict-sp500 only. backtest-sp500 got nothing, so
 # it measured its own defaults: setting TOP_N=25 traded 25 names against a
 # simulation of 15. Anything that changes what is held belongs here.
 : "${TOP_N:=15}"
 : "${MAX_COHORTS:=2}"
-: "${HOLDING_DAYS:=10}"
+: "${HOLDING_DAYS:=$HORIZON}"
 : "${SLIPPAGE_BPS:=5}"
 : "${WEIGHTING:=equal}"
 : "${EXIT_RANK:=40}"
@@ -62,11 +76,15 @@ strategy_flags() {
 }
 
 train_full() {
-  uv run train-sp500 \
+  local -a opts=(--horizon "$HORIZON" --wf-top-k "$TOP_N")
+  [[ "$OBJECTIVE" == "rank" ]] && opts+=(--rank-objective)
+  [[ "$USE_OPTUNA" == "0" ]] && opts+=(--no-optuna)
+  [[ "$SKIP_EARNINGS" == "1" ]] && opts+=(--skip-earnings)
+  ${DRY_RUN:+echo} uv run train-sp500 \
     --provider "$TRAIN_PROVIDER" \
-    --start "${TRAIN_START:-2018-01-01}" \
-    --train-end "${TRAIN_END:-2022-12-31}" \
-    --test-start "${TEST_START:-2023-01-01}" \
+    --start "${TRAIN_START:-2010-01-01}" \
+    --train-end "${TRAIN_END:-2024-12-31}" \
+    --test-start "${TEST_START:-2025-01-01}" \
     --sample-n "$SAMPLE_N" \
     --optuna-trials "$OPTUNA_TRIALS" \
     --ts-cv-splits "$TS_CV_SPLITS" \
@@ -75,6 +93,7 @@ train_full() {
     --output-model "$MODEL" \
     --wf-scores-path "$WF_SCORES" \
     --run-backtest \
+    "${opts[@]}" \
     $EXTRA_TRAIN_ARGS
 }
 

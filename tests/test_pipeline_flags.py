@@ -125,3 +125,53 @@ def test_the_training_sanity_backtest_declares_its_config() -> None:
     block = src[src.index("bt_config = BacktestConfig()") - 800:]
     assert "sanity backtest at defaults" in block
     assert re.search(r"run_pipeline\.sh", block), "point the reader at the real one"
+
+
+# ---------------------------------------------------------------------------
+# The holding period must track the label horizon
+# ---------------------------------------------------------------------------
+
+
+def test_holding_days_defaults_to_the_label_horizon() -> None:
+    """A 63-day signal traded on a 10-day exit is the mismatch this file
+    exists to prevent, so HOLDING_DAYS derives from HORIZON rather than
+    being a second number someone has to remember to change."""
+    for mode in ("backtest", "predict"):
+        assert _flag(_cmd(mode), "--holding-days") == "63"
+
+
+def test_changing_the_horizon_moves_the_holding_period_with_it() -> None:
+    env = {"HORIZON": "21"}
+    assert _flag(_cmd("backtest", **env), "--holding-days") == "21"
+    assert _flag(_cmd("predict", **env), "--holding-days") == "21"
+    assert _flag(_cmd("train-full", **env), "--horizon") == "21"
+
+
+def test_the_holding_period_can_still_be_overridden_deliberately() -> None:
+    """Deriving is the default, not a prohibition — but it must move both
+    sides together when set."""
+    env = {"HORIZON": "63", "HOLDING_DAYS": "10"}
+    assert _flag(_cmd("backtest", **env), "--holding-days") == "10"
+    assert _flag(_cmd("predict", **env), "--holding-days") == "10"
+
+
+def test_training_defaults_match_the_deployed_configuration() -> None:
+    """A monthly retrain must reproduce the model that is deployed, not
+    silently revert to an older configuration."""
+    cmd = _cmd("train-full")
+    assert "--rank-objective" in cmd
+    assert "--skip-earnings" in cmd
+    assert "--no-optuna" in cmd, "tuning never helped and costs hours"
+    assert _flag(cmd, "--horizon") == "63"
+    assert _flag(cmd, "--provider") == "hybrid"
+
+
+def test_training_uses_hybrid_and_live_uses_yfinance() -> None:
+    """An unbiased training panel needs the delisted names; a live run only
+    ever trades current members, so it should not spend Tiingo quota."""
+    assert _flag(_cmd("train-full"), "--provider") == "hybrid"
+    assert _flag(_cmd("predict"), "--provider") == "yfinance"
+
+
+def test_optuna_can_be_switched_back_on() -> None:
+    assert "--no-optuna" not in _cmd("train-full", USE_OPTUNA="1")
