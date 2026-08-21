@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-import uuid
 from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -21,6 +20,9 @@ from stock_predictor.execution import (
     portfolio_weights,
     rank_exits,
     size_targets,
+)
+from stock_predictor.execution import (
+    cohort_id as _cohort_id,
 )
 from stock_predictor.execution_calendar import (
     exit_date_iso_after_hold,
@@ -321,7 +323,6 @@ def generate_orders(
         # Dividing by max_cohorts under-deploys whenever a slot is occupied —
         # at steady state one always is, so the shortfall never gets invested.
         cap_per_cohort = capital_available / available_slots
-        cohort_id = uuid.uuid4().hex[:8]
 
         # Selection is the shared core, so a score floor or rank band tuned in
         # the backtest reaches the account instead of being silently dropped.
@@ -337,13 +338,22 @@ def generate_orders(
         # Extend the calendar past the last downloaded session so entry (next
         # trading day after as_of) and expiry (holding_days sessions later)
         # always exist — the raw price calendar ends "today".
-        cal = extend_calendar(trading_dates, holding_days + 5)
+        # Anchored at as_of, so a stale price panel does not eat the margin
+        # and leave expiry unplaceable.
+        cal = extend_calendar(trading_dates, holding_days + 5, anchor=as_of)
         entry = next_trading_day(as_of, cal)
         expiry_iso = (
             exit_date_iso_after_hold(entry, holding_days, cal)
             if entry is not None
             else None
         )
+        if entry is None or expiry_iso is None:
+            # Say so. This used to fall through to "no available cohort slots",
+            # which is a different and much less alarming statement.
+            print(
+                f"  Cannot place entry/expiry sessions for {as_of} "
+                f"(holding_days={holding_days}); no cohort opened."
+            )
         if eligible and entry is not None and expiry_iso is not None:
             wts = portfolio_weights(
                 np.array([c.prob for c in eligible], dtype=float), weighting,
@@ -364,7 +374,15 @@ def generate_orders(
                 commission_per_order=commission_per_order,
             )
             entry_iso = entry.strftime("%Y-%m-%d")
-            for lot in size_targets(targets, cap_per_cohort, costs, whole_shares=True):
+            lots = size_targets(targets, cap_per_cohort, costs, whole_shares=True)
+            # Derived from the decision, so a re-run of an unchanged signal
+            # names the same cohort the same way. holding_days is part of the
+            # identity: the same names held for 10 days is not the same
+            # position as the same names held for 63.
+            cohort_id = _cohort_id(
+                as_of, [lot.ticker for lot in lots], salt=str(holding_days),
+            )
+            for lot in lots:
                 shares = int(lot.shares)
                 buy_orders.append(Order(
                     action="BUY", ticker=lot.ticker, shares=shares,
@@ -504,7 +522,6 @@ def generate_orders_rank_hold(
         if entry is not None:
             entry_iso = entry.strftime("%Y-%m-%d")
             cash_available = state.cash + cash_from_sells
-            cohort_id = uuid.uuid4().hex[:8]
             # Entry selection shares the backtest's rules: the cross-section
             # floor, the score floor and the rank offset all apply live too.
             rules = SelectionRules(
@@ -526,7 +543,11 @@ def generate_orders_rank_hold(
                        price=float(prices.get(c.ticker, c.price)))
                 for c in candidates
             ]
-            for lot in size_targets(targets, cash_available, costs, whole_shares=True):
+            lots = size_targets(targets, cash_available, costs, whole_shares=True)
+            cohort_id = _cohort_id(
+                as_of, [lot.ticker for lot in lots], salt=f"rank{exit_rank}",
+            )
+            for lot in lots:
                 shares = int(lot.shares)
                 buy_orders.append(Order(
                     action="BUY", ticker=lot.ticker, shares=shares,

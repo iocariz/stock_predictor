@@ -79,9 +79,12 @@ def rig(tmp_path):
         )
     model_path = tmp_path / "m.pkl"
     with open(model_path, "wb") as fh:
+        # train_end is not optional in practice — build_model_meta always
+        # writes it — and the freshness gate treats an unknown age as stale.
         pickle.dump({"model": RankByTickerModel(),
                      "meta": {"feature_cols": cols, "horizon": 21,
-                              "seed": 42, "sample_n": N_TICKERS}}, fh)
+                              "seed": 42, "sample_n": N_TICKERS,
+                              "train_end": str(DATES[-1].date())}}, fh)
     state_path = tmp_path / "state.json"
     save_state(init_state(100_000.0), state_path)
     return model_path, state_path
@@ -230,3 +233,90 @@ def test_the_guard_can_be_switched_off(rig, capsys) -> None:
 def test_a_clean_panel_excludes_nothing(rig, capsys) -> None:
     _run(rig, "--force-rebalance")
     assert "Excluding" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Stale inputs block the run
+# ---------------------------------------------------------------------------
+
+
+def _stale_model(tmp_path, train_end: str):
+    """A model identical to the rig's, but trained long ago."""
+    from stock_predictor.predict import build_inference_panel
+
+    provider = _FakeProvider()
+    adj, vol = provider.download_equity_ohlcv(TICKERS, None, None)
+    with patch("stock_predictor.training.download_sector_map", return_value=_sectors()):
+        _, cols = build_inference_panel(
+            adj, vol, _stints(), start=str(DATES[0].date()), end=None,
+            skip_earnings=True, provider=provider, macro_merge=False,
+        )
+    p = tmp_path / "stale.pkl"
+    with open(p, "wb") as fh:
+        pickle.dump({"model": RankByTickerModel(),
+                     "meta": {"feature_cols": cols, "horizon": 21, "seed": 42,
+                              "sample_n": N_TICKERS, "train_end": train_end}}, fh)
+    return p
+
+
+def test_a_stale_model_blocks_the_run(rig, tmp_path, capsys) -> None:
+    """The real incident: a model 3.6 years past its training data, used to
+    pick trades, with nothing in the code path objecting."""
+    _, state_path = rig
+    model = _stale_model(tmp_path, "2015-01-01")
+    argv = ["predict-sp500", "--model", str(model), "--state", str(state_path),
+            "--sample-n", str(N_TICKERS), "--skip-earnings", "--no-macro-merge",
+            "--min-coverage", "0"]
+    with (
+        patch("sys.argv", argv),
+        patch.object(P, "get_provider", return_value=_FakeProvider()),
+        patch.object(P, "load_sp500_stints", return_value=_stints()),
+        patch("stock_predictor.training.download_sector_map", return_value=_sectors()),
+        pytest.raises(SystemExit) as exc,
+    ):
+        P.main()
+    assert "stale" in str(exc.value).lower()
+    assert "model_age" in capsys.readouterr().err
+
+
+def test_a_stale_model_can_be_overridden_visibly(rig, tmp_path, capsys) -> None:
+    _, state_path = rig
+    model = _stale_model(tmp_path, "2015-01-01")
+    argv = ["predict-sp500", "--model", str(model), "--state", str(state_path),
+            "--sample-n", str(N_TICKERS), "--skip-earnings", "--no-macro-merge",
+            "--min-coverage", "0", "--allow-stale"]
+    with (
+        patch("sys.argv", argv),
+        patch.object(P, "get_provider", return_value=_FakeProvider()),
+        patch.object(P, "load_sp500_stints", return_value=_stints()),
+        patch("stock_predictor.training.download_sector_map", return_value=_sectors()),
+    ):
+        P.main()
+    err = capsys.readouterr().err
+    assert "model_age" in err and "proceeding anyway" in err
+
+
+def test_a_fresh_model_is_not_blocked(rig, capsys) -> None:
+    """A recent train_end passes the default policy without any override."""
+    _run(rig)
+    assert "DAILY SIGNAL" in capsys.readouterr().out
+
+
+def test_the_gate_fires_before_any_order_is_generated(rig, tmp_path, capsys) -> None:
+    """Blocking after printing a signal would invite acting on it."""
+    _, state_path = rig
+    model = _stale_model(tmp_path, "2015-01-01")
+    argv = ["predict-sp500", "--model", str(model), "--state", str(state_path),
+            "--sample-n", str(N_TICKERS), "--skip-earnings", "--no-macro-merge",
+            "--min-coverage", "0", "--confirm"]
+    before = state_path.read_text()
+    with (
+        patch("sys.argv", argv),
+        patch.object(P, "get_provider", return_value=_FakeProvider()),
+        patch.object(P, "load_sp500_stints", return_value=_stints()),
+        patch("stock_predictor.training.download_sector_map", return_value=_sectors()),
+        pytest.raises(SystemExit),
+    ):
+        P.main()
+    assert "DAILY SIGNAL" not in capsys.readouterr().out
+    assert state_path.read_text() == before, "a blocked run must not touch state"

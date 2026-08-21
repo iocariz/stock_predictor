@@ -175,3 +175,33 @@ def test_training_uses_hybrid_and_live_uses_yfinance() -> None:
 
 def test_optuna_can_be_switched_back_on() -> None:
     assert "--no-optuna" not in _cmd("train-full", USE_OPTUNA="1")
+
+
+# ---------------------------------------------------------------------------
+# Training must not deploy itself
+# ---------------------------------------------------------------------------
+
+
+def test_training_writes_a_candidate_not_the_deployed_model() -> None:
+    """A retrain replacing the live model the moment it finishes is how an
+    unvalidated model reaches an account."""
+    cmd = _cmd("train-full")
+    assert _flag(cmd, "--output-model") == "artifacts/model_candidate.pkl"
+    assert _flag(cmd, "--output-model") != _flag(_cmd("predict"), "--model")
+
+
+def test_predict_still_loads_the_deployed_model() -> None:
+    assert _flag(_cmd("predict"), "--model") == "artifacts/model.pkl"
+
+
+def test_deploy_promotes_the_candidate_to_the_deployed_path() -> None:
+    cmd = _cmd("deploy")
+    assert "artifacts/model_candidate.pkl" in cmd
+    assert "artifacts/model.pkl" in cmd
+
+
+def test_deploy_enforces_the_holding_rule_horizon() -> None:
+    """The promotion gate that would have caught a horizon-10 model being
+    traded on a 63-day exit."""
+    assert _flag(_cmd("deploy"), "--expected-horizon") == "63"
+    assert _flag(_cmd("deploy", HORIZON="21"), "--expected-horizon") == "21"

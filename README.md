@@ -214,6 +214,9 @@ The alpha t-statistic is **Newey–West (HAC)**, with the lag window set to at l
 | `--min-prob` | none | Score floor: never buy a name scoring below this. Baskets shrink and weights renormalize; a date with no eligible name does not trade |
 | `--min-cross-section` | `rank_offset + top_n` | Fewest scored names a date must carry before it may **open** positions. Exits are never gated, so a narrowing cross-section cannot strand a holding. Stops a ragged panel edge being traded as if it were a ranking |
 | `--min-recent-coverage` | 0.8 | *(live only)* Fraction of the last 20 sessions a name needs before it may be **ranked**. Coverage and rankability are different questions — a name whose last three weeks are missing counts as downloaded, but its momentum features span the hole. `0` disables |
+| `--max-model-age-years` | 2.0 | *(live only)* Refuse to trade on a model whose training data ends more than this long ago. `0` disables |
+| `--max-data-age-sessions` | 3 | *(live only)* Refuse to trade on a price panel this many **exchange sessions** behind. `0` disables |
+| `--allow-stale` | off | Downgrade a staleness block to a warning — deliberately and visibly |
 | `--rf-rate` | inferred | Annualized risk-free rate for Sharpe/Sortino. **Funding costs are on by default**: the panel's realized `irx_yield` (13-week T-bill) is charged per date when present, else a 4.5% cash proxy. Pass `0` to switch it off. The rate applied is printed in the report header |
 | `--benchmark-ticker` | SPY | yfinance symbol for buy-and-hold column |
 | `--no-benchmark` | off | Skip benchmark download (table shows N/A for benchmark) |
@@ -749,6 +752,66 @@ notebooks/               Exploration + full pipeline
   `panel.groupby("date").size().tail(63)` — if the tail collapses to a handful of
   names, the panel predates the fix and its most recent quarter is fiction.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
+
+- **Training writes a candidate; promotion is a separate step.** `train-full`
+  used to write straight to the model the live path loads, so a retrain replaced
+  the model being traded the instant it finished — with no check that the new one
+  was loadable, fresh, or the right horizon. (A stray `train-full` in this repo's
+  history came within a download phase of doing exactly that.)
+
+  ```bash
+  ./scripts/run_pipeline.sh train-full   # -> artifacts/model_candidate.pkl
+  ./scripts/run_pipeline.sh deploy       # validates, archives, promotes
+  ```
+
+  Promotion refuses a candidate that does not load, lacks the metadata the live
+  path requires, fails the freshness policy, or whose **horizon does not match
+  the holding rule** — the exact defect this repo shipped, a horizon-10 model
+  traded on a 63-day exit. A refused promotion changes nothing, and the outgoing
+  model is archived so a bad one is reversible. `--force` overrides and still
+  reports and still archives.
+
+  Note the scheduled GitHub Actions retrain uploads an **artifact**; it cannot
+  deploy to the machine running `predict`. Promotion there is deliberate.
+
+- **The daily report names its own numbers.** It printed `P(+5%)=29.000` for a
+  lambdarank model — an unbounded ranking score labelled as a probability, on the
+  line an operator reads every morning. The label is now derived the same way the
+  score is: `predict_proba` means a probability, otherwise a score.
+
+- **Stale inputs block the live run.** A live run consumes a fitted model, a
+  price panel and a state file, all of which rot at different rates, and nothing
+  used to check any of them.
+
+  That was not hypothetical. **The model deployed here until 2026-08-21 had
+  `train_end` of 2022-12-31 — 3.64 years before it was used to pick trades — at
+  a 10-day horizon while the strategy traded 63.** It was caught by reading the
+  metadata by hand. `predict-sp500` printed the feature count and the horizon
+  and went ahead.
+
+  `predict-sp500` now refuses to trade when the model is older than
+  `--max-model-age-years` (default 2.0) or the panel is more than
+  `--max-data-age-sessions` behind (default 3). Data age is counted in
+  **exchange sessions**, so a long weekend does not read as a vendor outage.
+  An unknown age counts as stale — metadata without a `train_end` is not the
+  same as a fresh model. `--allow-stale` downgrades the block to a warning,
+  deliberately and visibly.
+
+  The gate runs **before any order is generated**, so a blocked run prints no
+  signal to be tempted by and does not touch the state file.
+
+- **A decision names itself the same way twice.** Cohort IDs were
+  `uuid.uuid4().hex[:8]`, so re-running an unchanged signal produced different
+  identifiers and nothing downstream could tell whether two runs had reached the
+  same conclusion. They are now a SHA-256 digest of the signal date, the sorted
+  basket and the holding rule — stable across processes, unlike `hash()`, whose
+  string seed is randomised per run.
+
+  Idempotency itself was already sound (`last_signal_date` blocks a second
+  cohort for the same `as_of`, and `save_state` writes atomically via
+  `os.replace`). What was missing was the ability to *verify* it. This is also
+  what a broker's client-order-ID has to be: the guarantee that a retry after a
+  timeout is recognised as the same order rather than a second one.
 
 - **Downloaded is not the same as rankable.** `check_download_coverage` asks
   whether a ticker came back from the vendor at all. It does not ask whether the

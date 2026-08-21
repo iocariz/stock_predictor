@@ -149,3 +149,34 @@ def test_offsets_land_on_real_sessions_after_extension() -> None:
     exit_ts = offset_trading_days(pd.Timestamp("2026-03-31"), 63, cal)
     assert exit_ts is not None
     assert is_trading_session(exit_ts)
+
+
+# ---------------------------------------------------------------------------
+# Data lag must not eat the placement margin
+# ---------------------------------------------------------------------------
+
+
+def test_the_extension_can_be_anchored_past_the_data_end() -> None:
+    """The calendar is extended from the last *data* session. When a run
+    happens several sessions later — stale vendor, a weekend backlog — that
+    lag consumed the margin and expiry placement silently returned None,
+    surfacing as "no available cohort slots" rather than as an error."""
+    hist = pd.DatetimeIndex(pd.bdate_range(end="2026-08-21", periods=200)).to_numpy()
+    lagged = extend_calendar(hist, 26, anchor="2026-09-04")
+    entry = pd.Timestamp("2026-09-08")
+    assert offset_trading_days(entry, 21, lagged) is not None
+
+
+def test_anchoring_is_a_floor_not_a_shift() -> None:
+    """An anchor at or before the data end changes nothing."""
+    hist = pd.DatetimeIndex(pd.bdate_range(end="2026-08-21", periods=50)).to_numpy()
+    plain = extend_calendar(hist, 10)
+    anchored = extend_calendar(hist, 10, anchor="2026-01-01")
+    assert list(pd.DatetimeIndex(plain)) == list(pd.DatetimeIndex(anchored))
+
+
+def test_an_anchored_calendar_still_holds_real_sessions() -> None:
+    hist = pd.DatetimeIndex(pd.bdate_range(end="2026-08-21", periods=50)).to_numpy()
+    out = pd.DatetimeIndex(extend_calendar(hist, 30, anchor="2026-09-04"))
+    assert out.is_monotonic_increasing and not out.duplicated().any()
+    assert all(is_trading_session(d) for d in out[-10:])
