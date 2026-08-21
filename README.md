@@ -227,7 +227,7 @@ The alpha t-statistic is **Newey–West (HAC)**, with the lag window set to at l
 
 #### Execution assumptions (backtest vs predict)
 
-- **Calendar:** Both paths use the **union of session dates present in the data** (scored panel for the backtest; downloaded OHLC index for `predict-sp500`, extended with future business days for entry/expiry placement), not a full exchange holiday calendar.
+- **Calendar:** Historical sessions are the **union of session dates present in the data** (ground truth for the past). *Future* sessions — the entry and expiry dates a live run must place beyond the end of the price history — come from the **NYSE exchange calendar** via `exchange_calendars`, not from business days. Business-day projection was wrong 3.6% of the time (156 of 4,337 days in this panel, ~9.1 a year): an entry could land on a closed market, and a 63-session expiry drifted ~2 sessions early. Early closes are not modelled — a shortened session still has a close, and every fill here is a close.
 - **Backtest:** Signal on date *T* → **entry** on the next session in that calendar → **exit** after `--holding-days` trading sessions (cohort mode) or on rank decay (rank-hold mode). Cohort returns are **fractional** weights; slippage is applied to historical **adj. close** bars.
 - **Funding:** Sharpe and Sortino are excess-return statistics, charged at the panel's realized 13-week T-bill rate (or 4.5% when a panel predates that column). Total return, CAGR and drawdown stay on raw returns.
 - **NAV accounting:** the daily NAV is a **cash ledger** — capital is debited at entry and credited back at exit as `capital × (1 + net_return)`, so realized P&L, exit slippage, and commissions all compound through cash. Total return, Sharpe, and drawdown reflect costs.
@@ -699,7 +699,8 @@ src/stock_predictor/
   portfolio.py           Portfolio state, kill-switch, and order generation
                          (selection delegated to execution.py)
   predict.py             Daily inference CLI (predict-sp500)
-  execution_calendar.py  Trading-day calendar helpers (shared backtest/live)
+  execution_calendar.py  Trading-day calendars. Past sessions from the data,
+                         future sessions from the real NYSE calendar
   macro_merge.py         Yahoo ↔ FRED macro cross-fill
   data_provider.py       Provider protocol + factory
   providers/             yfinance + Tiingo/FRED implementations
