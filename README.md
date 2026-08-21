@@ -93,7 +93,8 @@ with nothing looking wrong.
 
 | variable | default | applies to |
 |---|---|---|
-| `TOP_N`, `HOLDING_DAYS`, `MAX_COHORTS` | 15, 10, 2 | both |
+| `HORIZON` | 63 | training; **`HOLDING_DAYS` derives from it** |
+| `TOP_N`, `HOLDING_DAYS`, `MAX_COHORTS` | 15, `$HORIZON`, 2 | both |
 | `WEIGHTING`, `SLIPPAGE_BPS` | equal, 5 | both |
 | `EXIT_RANK`, `RANK_OFFSET` | 40, 0 | both |
 | `MIN_PROB`, `MIN_CROSS_SECTION` | unset (omitted) | both |
@@ -101,6 +102,20 @@ with nothing looking wrong.
 | `REBALANCE_DAY` | `Friday` (`any` to trade every session) | both |
 | `HOLD_MODE` | `fixed` (`rank` for rank-decay exits) | both |
 | `MAX_DD` | 0.15 | live only — the kill switch has no simulation twin |
+
+`HOLDING_DAYS` **derives from `HORIZON`** rather than being a second number to
+keep in step. Trading a 63-day signal on a 10-day exit is the same class of
+mismatch as measuring one configuration and trading another, and it is not
+something to rely on remembering. Override it explicitly if you want them to
+differ; it still moves both sides together.
+
+Training defaults reproduce the deployed model: `--rank-objective`,
+`--horizon 63`, `--skip-earnings`, `--no-optuna`, `--provider hybrid`, trained
+2010→2024. A monthly retrain therefore rebuilds the model that is deployed
+instead of silently reverting to an older configuration. `TRAIN_PROVIDER` is
+`hybrid` (an unbiased training panel needs the delisted names) while
+`PREDICT_PROVIDER` is `yfinance` (a live run only ever trades current index
+members, and should not spend Tiingo quota on names it could not buy).
 
 `REBALANCE_DAY` is the one that changed behaviour: `backtest-sp500` defaults to
 Friday and `predict-sp500` to *any* day, so a daily cron was opening cohorts on
