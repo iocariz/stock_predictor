@@ -705,6 +705,8 @@ scripts/
   run_pipeline.sh        train-full / backtest / predict orchestration
   backtest_sweep.py      Variant grids (default / vix / hold) + relative tables
   grid_search_sharpe.py  Config grid ranked by Sharpe, with alpha t-stats
+  insider_signal.py      SEC Form 3/4/5 insider buying vs a scored panel
+                         (tested and rejected -- see Limitations)
   signal_depth.py        Selection-depth / rank-IC / alpha-ladder diagnostics
 train_sp500.py           Thin launcher → cli
 backtest.py              Thin launcher → backtest
@@ -730,6 +732,45 @@ notebooks/               Exploration + full pipeline
   `panel.groupby("date").size().tail(63)` — if the tail collapses to a handful of
   names, the panel predates the fix and its most recent quarter is fiction.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
+
+- **Insider transactions were tested and rejected.** SEC Form 3/4/5 open-market
+  buying (the [insider transactions data sets](https://www.sec.gov/data-research/sec-markets-data/insider-transactions-data-sets))
+  is a well-documented factor and the data is *cleaner* than the fundamentals
+  already in use — `ISSUERTRADINGSYMBOL` gives the ticker directly, and both
+  `TRANS_DATE` and `FILING_DATE` are present with a median Form 4 lag of two
+  days, so the point-in-time join is exact. It still shows nothing here.
+
+  Measured over 2019-01-02 → 2026-08-19 (909,208 labelled rows, 632 tickers,
+  23,595 open-market purchases), joined on `FILING_DATE`, horizon 63:
+
+  | measure | value | HAC t |
+  |---|---|---|
+  | standalone rank IC, all names | +0.0045 | +0.64 |
+  | excess fwd return, any insider buy (~74 names/date) | +0.15% | +0.54 |
+  | excess fwd return, cluster buy ≥2 buyers (~25/date) | **−0.70%** | −1.68 |
+  | excess fwd return, ≥3 buyers (~12/date) | −0.38% | −0.69 |
+  | rank IC of buy *size* among buyers | −0.0240 | −1.49 |
+
+  For comparison the price-only model scores **+0.0374 (t +1.64)** on the same
+  panel. Nothing here clears |t| = 2 in either direction, so the honest reading
+  is *no detectable effect* — not that insider buying is bearish. The cluster
+  variant, which the literature reports as the strongest, is the most negative
+  cell in the table.
+
+  Two limits bound that conclusion. The signal is live on only **15.1%** of rows
+  (5.2% for clusters), and the documented effect is concentrated in small caps —
+  the S&P 500 was always the least favourable universe for it. And these excess
+  returns are **raw, not sector- or style-neutral**: insider clusters form after
+  drawdowns, so a negative reading across a mega-cap-led tape may be reporting a
+  value tilt rather than an insider effect.
+
+  One hard data constraint if you revisit this: the **10b5-1 flag (`AFF10B5ONE`)
+  does not exist in the datasets before 2023q1** — 17 of the 32 quarters here
+  lack the column entirely — so the discretionary-versus-scheduled split can
+  only be built on recent history.
+
+  Re-derive with [`scripts/insider_signal.py`](scripts/insider_signal.py); like
+  the rest of this section it is meant to be re-run, not trusted.
 
 - **One execution core.** The backtest, paper trading and live orders share
   [`execution.py`](src/stock_predictor/execution.py): the same selection rules,
