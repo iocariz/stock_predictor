@@ -405,6 +405,17 @@ def add_rank_labels(
     return df
 
 
+def score_label(model: object) -> str:
+    """What the number :func:`model_scores` returns should be called.
+
+    A classifier's output is a probability; a ranker's is an unbounded
+    lambdarank score. The daily report printed ``P(+5%)=29.000`` for a ranker,
+    which is not a 2900% chance of anything. Derived from the same attribute
+    the score itself is, so the two cannot disagree.
+    """
+    return "P(+5%)" if hasattr(model, "predict_proba") else "score"
+
+
 def model_scores(model: object, X: pd.DataFrame) -> np.ndarray:
     """Score rows with either model family.
 

@@ -39,6 +39,7 @@ from stock_predictor.training import (
     MACRO_FEATURE_COLS,
     build_feature_panel,
     model_scores,
+    score_label,
 )
 from stock_predictor.universe import (
     DEFAULT_MIN_COVERAGE,
@@ -619,9 +620,11 @@ def main() -> None:
     # Score
     print("Scoring universe...")
     scored = score_universe(model, panel, feature_cols)
+    label = score_label(model)
     print(f"  Scored {len(scored)} tickers. Top-5:")
     for _, row in scored.head(5).iterrows():
-        print(f"    {row['ticker']:<6s}  P(+5%)={row['prob']:.3f}  @ ${row['adj_close']:.2f}")
+        print(f"    {row['ticker']:<6s}  {label}={row['prob']:.3f}  "
+              f"@ ${row['adj_close']:.2f}")
 
     # Stale inputs are checked after the panel is built, so the data age is
     # measured on what would actually be traded on, and before any order is

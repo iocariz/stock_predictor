@@ -753,6 +753,32 @@ notebooks/               Exploration + full pipeline
   names, the panel predates the fix and its most recent quarter is fiction.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
 
+- **Training writes a candidate; promotion is a separate step.** `train-full`
+  used to write straight to the model the live path loads, so a retrain replaced
+  the model being traded the instant it finished — with no check that the new one
+  was loadable, fresh, or the right horizon. (A stray `train-full` in this repo's
+  history came within a download phase of doing exactly that.)
+
+  ```bash
+  ./scripts/run_pipeline.sh train-full   # -> artifacts/model_candidate.pkl
+  ./scripts/run_pipeline.sh deploy       # validates, archives, promotes
+  ```
+
+  Promotion refuses a candidate that does not load, lacks the metadata the live
+  path requires, fails the freshness policy, or whose **horizon does not match
+  the holding rule** — the exact defect this repo shipped, a horizon-10 model
+  traded on a 63-day exit. A refused promotion changes nothing, and the outgoing
+  model is archived so a bad one is reversible. `--force` overrides and still
+  reports and still archives.
+
+  Note the scheduled GitHub Actions retrain uploads an **artifact**; it cannot
+  deploy to the machine running `predict`. Promotion there is deliberate.
+
+- **The daily report names its own numbers.** It printed `P(+5%)=29.000` for a
+  lambdarank model — an unbounded ranking score labelled as a probability, on the
+  line an operator reads every morning. The label is now derived the same way the
+  score is: `predict_proba` means a probability, otherwise a score.
+
 - **Stale inputs block the live run.** A live run consumes a fitted model, a
   price panel and a state file, all of which rot at different rates, and nothing
   used to check any of them.

@@ -6,7 +6,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-: "${MODEL:=artifacts/model.pkl}"
+: "${MODEL:=artifacts/model.pkl}"            # what predict loads
+# Training writes a candidate, never the deployed model. Promotion is a
+# separate, validated step (`run_pipeline.sh deploy`), so a retrain cannot
+# replace the model being traded the instant it finishes.
+: "${CANDIDATE:=artifacts/model_candidate.pkl}"
 : "${STATE:=portfolio_state.json}"
 : "${WF_SCORES:=artifacts/wf_scored.parquet}"
 : "${PLOTS_DIR:=artifacts/plots}"
@@ -90,11 +94,19 @@ train_full() {
     --ts-cv-splits "$TS_CV_SPLITS" \
     --earnings-workers "$EARNINGS_WORKERS" \
     --plots-dir "$PLOTS_DIR" \
-    --output-model "$MODEL" \
+    --output-model "$CANDIDATE" \
     --wf-scores-path "$WF_SCORES" \
     --run-backtest \
     "${opts[@]}" \
     $EXTRA_TRAIN_ARGS
+}
+
+deploy_model() {
+  ${DRY_RUN:+echo} uv run python scripts/deploy_model.py \
+    "$CANDIDATE" "$MODEL" \
+    --expected-horizon "$HORIZON" \
+    --panel "$WF_SCORES" \
+    "$@"
 }
 
 backtest_only() {
@@ -135,14 +147,15 @@ Commands:
                  writes MODEL + WF_SCORES, runs in-process backtest)
   backtest       backtest-sp500 on WF_SCORES → PLOTS_DIR
   predict        Daily predict (dry run unless: predict --confirm)
+  deploy         Promote CANDIDATE to MODEL after validation (--force overrides)
 
 Environment (examples):
   MODEL=artifacts/model.pkl STATE=portfolio_state.json SAMPLE_N=10000
   TRAIN_PROVIDER=tiingo PREDICT_PROVIDER=tiingo
-  TRAIN_START=2018-01-01 TRAIN_END=2022-12-31 TEST_START=2023-01-01
+  TRAIN_START=2010-01-01 TRAIN_END=2024-12-31 TEST_START=2025-01-01
 
 Strategy (one definition, applied to BOTH the backtest and the live path):
-  TOP_N=15 HOLDING_DAYS=10 MAX_COHORTS=2 WEIGHTING=equal SLIPPAGE_BPS=5
+  HORIZON=63 TOP_N=15 HOLDING_DAYS=$HORIZON MAX_COHORTS=2 WEIGHTING=equal
   EXIT_RANK=40 RANK_OFFSET=0 MIN_PROB= MIN_CROSS_SECTION=
   REBALANCE_DAY=Friday  (use "any" to trade every session)
   HOLD_MODE=fixed|rank  COMMISSION_PER_SHARE=0 COMMISSION_PER_ORDER=0
@@ -157,6 +170,7 @@ EOF
 case "${1:-}" in
   train-full) train_full ;;
   backtest)   backtest_only ;;
+  deploy)     shift; deploy_model "$@" ;;
   predict)    predict_daily "${2:-}" ;;
   -h|--help|help) usage ;;
   *)

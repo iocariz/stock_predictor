@@ -102,6 +102,7 @@ jobs:
           uv run python scripts/grid_search_sharpe.py --help > /dev/null
           uv run python scripts/signal_depth.py --help > /dev/null
           uv run python scripts/insider_signal.py --help > /dev/null
+          uv run python scripts/deploy_model.py --help > /dev/null
 
       - name: Backtest and diagnostics on a synthetic panel
         run: |
