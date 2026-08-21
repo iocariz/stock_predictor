@@ -17,6 +17,7 @@ import pandas as pd
 
 from stock_predictor.data_provider import DataProvider, get_provider
 from stock_predictor.execution_calendar import trading_dates_from_index
+from stock_predictor.freshness import FreshnessPolicy, check_freshness, describe
 from stock_predictor.pit import (
     SP500_STINTS_URL,
     current_members,
@@ -400,6 +401,24 @@ def parse_args() -> argparse.Namespace:
     # These reach the shared execution core, so a configuration measured in
     # the backtest can actually be traded. Before, they were simulation-only.
     p.add_argument(
+        "--max-model-age-years", type=float, default=None,
+        dest="max_model_age_years",
+        help="Refuse to trade on a model whose training data ends more than "
+             "this long ago (default 2.0). The model deployed here until "
+             "2026-08-21 was 3.64 years stale and nothing said so. 0 disables.",
+    )
+    p.add_argument(
+        "--max-data-age-sessions", type=int, default=None,
+        dest="max_data_age_sessions",
+        help="Refuse to trade on a price panel more than this many exchange "
+             "sessions behind (default 3). 0 disables.",
+    )
+    p.add_argument(
+        "--allow-stale", action="store_true", dest="allow_stale",
+        help="Downgrade staleness from a block to a warning. Deliberate and "
+             "visible, rather than the silent default it used to be.",
+    )
+    p.add_argument(
         "--min-recent-coverage", type=float, default=DEFAULT_MIN_RECENT_COVERAGE,
         dest="min_recent_coverage",
         help="Fraction of the most recent sessions a name needs before it may "
@@ -603,6 +622,26 @@ def main() -> None:
     print(f"  Scored {len(scored)} tickers. Top-5:")
     for _, row in scored.head(5).iterrows():
         print(f"    {row['ticker']:<6s}  P(+5%)={row['prob']:.3f}  @ ${row['adj_close']:.2f}")
+
+    # Stale inputs are checked after the panel is built, so the data age is
+    # measured on what would actually be traded on, and before any order is
+    # generated.
+    policy_kwargs = {}
+    if args.max_model_age_years is not None:
+        policy_kwargs["max_model_age_years"] = args.max_model_age_years
+    if args.max_data_age_sessions is not None:
+        policy_kwargs["max_data_age_sessions"] = args.max_data_age_sessions
+    findings = check_freshness(
+        meta, pd.DatetimeIndex(adj_close.index), policy=FreshnessPolicy(**policy_kwargs),
+    )
+    if findings:
+        print(describe(findings), file=sys.stderr)
+        if not args.allow_stale:
+            sys.exit(
+                "Refusing to trade on stale inputs. Retrain, refresh the data, "
+                "or pass --allow-stale to proceed anyway."
+            )
+        print("  --allow-stale: proceeding anyway.", file=sys.stderr)
 
     # Current prices for valuation
     latest_prices = dict(zip(scored["ticker"], scored["adj_close"]))

@@ -25,6 +25,8 @@ Those belong to the callers. The selection does not.
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Iterable
 from dataclasses import dataclass
 from math import floor
 
@@ -291,3 +293,24 @@ def rank_exits(
     """
     rank_of = {t: i + 1 for i, t in enumerate(ranked_tickers)}
     return {t for t in held if rank_of.get(t, exit_rank + 1) > exit_rank}
+
+
+def cohort_id(as_of: str, tickers: Iterable[str], *, salt: str = "") -> str:
+    """A stable identifier for one trading decision.
+
+    The same signal date, the same basket and the same configuration must name
+    themselves the same way on every run. Cohort IDs used to be
+    ``uuid.uuid4().hex[:8]``, so a re-run of an unchanged decision produced a
+    different identifier and nothing downstream could tell whether two runs had
+    reached the same conclusion.
+
+    This is also what a broker's client-order-ID has to be: the guarantee that
+    a retry after a timeout is recognised as the same order rather than a
+    second one.
+
+    Names are sorted, because a basket is a set rather than a sequence, and
+    hashing is SHA-256 rather than :func:`hash`, whose string seed is
+    randomised per process.
+    """
+    payload = "|".join([as_of, salt, *sorted(str(t) for t in tickers)])
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
