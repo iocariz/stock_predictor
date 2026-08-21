@@ -9,6 +9,9 @@ description = "LightGBM ranker for S&P 500 equities: PIT universe, purged walk-f
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    # Real NYSE sessions, including Good Friday, Juneteenth, observed holidays
+    # and ad-hoc closures. Rules are bundled, so it works offline.
+    "exchange-calendars>=4.13",
     "ipykernel>=7.2.0",
     "jupyter>=1.1.1",
     "lightgbm>=4.6.0",

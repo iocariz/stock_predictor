@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from stock_predictor.execution_calendar import is_trading_session
 from stock_predictor.portfolio import (
     PortfolioState,
     Position,
@@ -298,9 +299,12 @@ def test_generate_orders_buys_when_calendar_ends_today() -> None:
     # Entry is the next session strictly after as_of (backtest parity):
     # Friday 2024-06-14 → Monday 2024-06-17.
     assert all(p.entry_date == "2024-06-17" for p in new_state.positions)
-    # Expiry is holding_days business sessions after entry.
-    expected_expiry = pd.bdate_range("2024-06-18", periods=10)[-1].strftime("%Y-%m-%d")
-    assert all(p.expiry_date == expected_expiry for p in new_state.positions)
+    # Expiry is holding_days real exchange sessions after entry, not business
+    # days: 2024-06-19 is Juneteenth, so counting weekdays lands a session
+    # early on 2024-07-01 instead of the correct 2024-07-02.
+    assert all(p.expiry_date == "2024-07-02" for p in new_state.positions)
+    assert is_trading_session("2024-07-02")
+    assert not is_trading_session("2024-06-19"), "Juneteenth is a market holiday"
 
 
 def test_generate_orders_entry_strictly_after_as_of() -> None:
