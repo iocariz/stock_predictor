@@ -213,6 +213,7 @@ The alpha t-statistic is **Newey–West (HAC)**, with the lag window set to at l
 | `--vix-filter` | none | Skip rebalance (cohort) / block buys (rank-hold) when `vix_percentile` exceeds this. **Errors** if the panel has no `vix_percentile` column |
 | `--min-prob` | none | Score floor: never buy a name scoring below this. Baskets shrink and weights renormalize; a date with no eligible name does not trade |
 | `--min-cross-section` | `rank_offset + top_n` | Fewest scored names a date must carry before it may **open** positions. Exits are never gated, so a narrowing cross-section cannot strand a holding. Stops a ragged panel edge being traded as if it were a ranking |
+| `--min-recent-coverage` | 0.8 | *(live only)* Fraction of the last 20 sessions a name needs before it may be **ranked**. Coverage and rankability are different questions — a name whose last three weeks are missing counts as downloaded, but its momentum features span the hole. `0` disables |
 | `--rf-rate` | inferred | Annualized risk-free rate for Sharpe/Sortino. **Funding costs are on by default**: the panel's realized `irx_yield` (13-week T-bill) is charged per date when present, else a 4.5% cash proxy. Pass `0` to switch it off. The rate applied is printed in the report header |
 | `--benchmark-ticker` | SPY | yfinance symbol for buy-and-hold column |
 | `--no-benchmark` | off | Skip benchmark download (table shows N/A for benchmark) |
@@ -748,6 +749,28 @@ notebooks/               Exploration + full pipeline
   `panel.groupby("date").size().tail(63)` — if the tail collapses to a handful of
   names, the panel predates the fix and its most recent quarter is fiction.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
+
+- **Downloaded is not the same as rankable.** `check_download_coverage` asks
+  whether a ticker came back from the vendor at all. It does not ask whether the
+  *recent* sessions its cross-sectional features are built from are present — and
+  a momentum feature computed across a three-week hole is not a slightly wrong
+  number, it is a different one.
+
+  Measured on this panel, **AVB and EQR — both continuous S&P 500 members — were
+  present on 1 and 2 of the 20 most recent sessions while counting as fully
+  covered**. Those holes move around: a later snapshot cleared AVB and flagged
+  EA instead, which is why this is a guard rather than an exclusion list.
+
+  `predict-sp500` now drops names below `--min-recent-coverage` (default 0.8 of
+  the last 20 sessions) before scoring. The check is scoped to names that survive
+  the **PIT filter**: applied to the raw download it flags every delisted symbol
+  at 0% — 192 of 845 on this universe — burying the two that matter. Against
+  current members it flags 2 of 503.
+
+  It is live-only by design. In a backtest the hole is historical and already
+  reflected in the prices; live, it means ranking on stale features for a
+  decision about to be acted on. Applying it retroactively would change measured
+  results, which is a separate decision from protecting the next trade.
 
 - **Insider transactions were tested and rejected.** SEC Form 3/4/5 open-market
   buying (the [insider transactions data sets](https://www.sec.gov/data-research/sec-markets-data/insider-transactions-data-sets))
