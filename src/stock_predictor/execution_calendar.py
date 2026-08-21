@@ -71,7 +71,11 @@ def trading_dates_from_index(index: pd.Index) -> np.ndarray:
 
 
 def extend_calendar(
-    trading_dates: np.ndarray, n_future: int, *, exchange: str = DEFAULT_EXCHANGE,
+    trading_dates: np.ndarray,
+    n_future: int,
+    *,
+    anchor: str | pd.Timestamp | None = None,
+    exchange: str = DEFAULT_EXCHANGE,
 ) -> np.ndarray:
     """Append the next *n_future* real exchange sessions to the known history.
 
@@ -79,10 +83,19 @@ def extend_calendar(
     price history, which necessarily ends today. Those are genuine sessions,
     not weekdays: an entry placed on a holiday is an order that cannot fill,
     and an expiry counted in weekdays closes the position early.
+
+    *anchor* guarantees *n_future* sessions beyond it as well as beyond the
+    last known session. Without it, a run made several sessions after the data
+    ends — a stale vendor, a backlog — spends the margin on catching up, and
+    expiry placement returns ``None``. That surfaced as "no available cohort
+    slots" rather than as an error, so a live run quietly bought nothing.
     """
     ts = pd.DatetimeIndex(trading_dates)
     if len(ts) == 0 or n_future <= 0:
         return ts.to_numpy()
+    if anchor is not None:
+        gap = max(0, len(exchange_sessions(ts[-1], anchor, exchange=exchange)) - 1)
+        n_future += gap
     # Ask for a generous calendar span and take the first n_future sessions
     # after the last known one. Weekends and holidays cost roughly 30% of
     # calendar days, so 2x plus a margin always covers the request.

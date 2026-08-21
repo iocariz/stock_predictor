@@ -338,13 +338,22 @@ def generate_orders(
         # Extend the calendar past the last downloaded session so entry (next
         # trading day after as_of) and expiry (holding_days sessions later)
         # always exist — the raw price calendar ends "today".
-        cal = extend_calendar(trading_dates, holding_days + 5)
+        # Anchored at as_of, so a stale price panel does not eat the margin
+        # and leave expiry unplaceable.
+        cal = extend_calendar(trading_dates, holding_days + 5, anchor=as_of)
         entry = next_trading_day(as_of, cal)
         expiry_iso = (
             exit_date_iso_after_hold(entry, holding_days, cal)
             if entry is not None
             else None
         )
+        if entry is None or expiry_iso is None:
+            # Say so. This used to fall through to "no available cohort slots",
+            # which is a different and much less alarming statement.
+            print(
+                f"  Cannot place entry/expiry sessions for {as_of} "
+                f"(holding_days={holding_days}); no cohort opened."
+            )
         if eligible and entry is not None and expiry_iso is not None:
             wts = portfolio_weights(
                 np.array([c.prob for c in eligible], dtype=float), weighting,
