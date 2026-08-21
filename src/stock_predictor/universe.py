@@ -21,6 +21,17 @@ import pandas as pd
 # departed-member gap is reported separately, never gated.
 DEFAULT_MIN_COVERAGE = 0.98
 
+DEFAULT_RECENT_SESSIONS = 20
+DEFAULT_MIN_RECENT_COVERAGE = 0.8
+"""Fraction of the most recent sessions a name needs before it can be ranked.
+
+Coverage and rankability are different questions. A ticker that came back from
+the vendor counts as covered even if its last three weeks are missing -- and a
+momentum feature computed across a three-week hole is not a slightly wrong
+number, it is a different one. Measured on this repo's panel, AVB and EQR were
+both continuous S&P 500 members present on 1 and 2 of the 20 most recent
+sessions, and both counted as fully covered."""
+
 
 class DownloadCoverageError(RuntimeError):
     """Raised when a price download returned too few of the requested tickers."""
@@ -133,3 +144,32 @@ def check_download_coverage(
         print(f"  Warning: missing {len(missing)}: {_preview(missing)}")
 
     return coverage
+
+
+def recent_coverage(
+    adj_close: pd.DataFrame, *, sessions: int = DEFAULT_RECENT_SESSIONS,
+) -> pd.Series:
+    """Fraction of the last *sessions* rows for which each ticker has a price.
+
+    A zero is treated as missing: it is a placeholder, not a quote, and it
+    divides badly in every ratio the feature set builds.
+    """
+    if len(adj_close) == 0:
+        return pd.Series(dtype=float)
+    window = adj_close.tail(sessions)
+    priced = window.notna() & (window > 0)
+    return priced.sum(axis=0) / len(window)
+
+
+def thin_recent_names(
+    adj_close: pd.DataFrame,
+    *,
+    sessions: int = DEFAULT_RECENT_SESSIONS,
+    min_fraction: float = DEFAULT_MIN_RECENT_COVERAGE,
+) -> list[str]:
+    """Tickers too sparsely priced lately to be ranked, sorted for stable reports.
+
+    The floor is inclusive: a name exactly at *min_fraction* is kept.
+    """
+    cov = recent_coverage(adj_close, sessions=sessions)
+    return sorted(str(t) for t in cov.index[cov < min_fraction])

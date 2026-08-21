@@ -41,8 +41,11 @@ from stock_predictor.training import (
 )
 from stock_predictor.universe import (
     DEFAULT_MIN_COVERAGE,
+    DEFAULT_MIN_RECENT_COVERAGE,
+    DEFAULT_RECENT_SESSIONS,
     check_download_coverage,
     sample_tickers,
+    thin_recent_names,
 )
 
 # ---------------------------------------------------------------------------
@@ -396,6 +399,15 @@ def parse_args() -> argparse.Namespace:
     )
     # These reach the shared execution core, so a configuration measured in
     # the backtest can actually be traded. Before, they were simulation-only.
+    p.add_argument(
+        "--min-recent-coverage", type=float, default=DEFAULT_MIN_RECENT_COVERAGE,
+        dest="min_recent_coverage",
+        help="Fraction of the most recent sessions a name needs before it may "
+             "be ranked (default: %(default)s). Coverage and rankability are "
+             "different questions: a name whose last three weeks are missing "
+             "counts as downloaded but its momentum features span the hole. "
+             "Pass 0 to disable.",
+    )
     p.add_argument("--rank-offset", type=int, default=0, dest="rank_offset",
                    help="Skip this many top-ranked names before selecting, so the "
                         "book trades the band rank_offset+1..rank_offset+top_n")
@@ -559,6 +571,31 @@ def main() -> None:
     if missing_feats:
         print(f"Warning: model expects features not in panel: {missing_feats}", file=sys.stderr)
         print("Run with matching --skip-earnings flag as training.", file=sys.stderr)
+
+    # A name can be fully "covered" by the download check and still be
+    # unrankable today: its recent sessions are what the cross-sectional
+    # features are built from. Drop those rather than rank them on a feature
+    # computed across the hole.
+    unrankable: list[str] = []
+    if args.min_recent_coverage > 0:
+        # Only names that survived the PIT filter are candidates. Judging the
+        # raw download instead flags every delisted symbol at 0% -- 192 of 845
+        # on this universe -- which buries the handful that actually matter.
+        live_names = [c for c in adj_close.columns if c in set(panel["ticker"])]
+        unrankable = thin_recent_names(
+            adj_close[live_names], sessions=DEFAULT_RECENT_SESSIONS,
+            min_fraction=args.min_recent_coverage,
+        )
+        if unrankable:
+            print(
+                f"  Excluding {len(unrankable)} name(s) with under "
+                f"{args.min_recent_coverage:.0%} of the last "
+                f"{DEFAULT_RECENT_SESSIONS} sessions priced: "
+                f"{', '.join(unrankable[:8])}"
+                + (" …" if len(unrankable) > 8 else ""),
+                file=sys.stderr,
+            )
+            panel = panel[~panel["ticker"].isin(unrankable)]
 
     # Score
     print("Scoring universe...")

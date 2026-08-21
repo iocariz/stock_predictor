@@ -175,3 +175,58 @@ def test_model_is_required_for_anything_but_init(tmp_path) -> None:
          pytest.raises(SystemExit) as exc:
         P.main()
     assert "--model is required" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Unrankable names are excluded from the live decision
+# ---------------------------------------------------------------------------
+
+
+class _HoleyProvider(_FakeProvider):
+    """A vendor that stops quoting T00 for the last three weeks.
+
+    Exactly what happened to AVB and EQR: continuous index members, fully
+    "covered" by the download check, present on 1 of the last 20 sessions.
+    """
+
+    def download_equity_ohlcv(self, tickers, start, end):
+        adj, vol = super().download_equity_ohlcv(tickers, start, end)
+        if "T00" in adj.columns:
+            adj.iloc[-19:, adj.columns.get_loc("T00")] = np.nan
+        return adj, vol
+
+
+def _run_holey(rig, *extra: str):
+    model_path, state_path = rig
+    argv = ["predict-sp500", "--model", str(model_path), "--state", str(state_path),
+            "--sample-n", str(N_TICKERS), "--skip-earnings", "--no-macro-merge",
+            "--min-coverage", "0", "--top-n", "5", *extra]
+    with (
+        patch("sys.argv", argv),
+        patch.object(P, "get_provider", return_value=_HoleyProvider()),
+        patch.object(P, "load_sp500_stints", return_value=_stints()),
+        patch("stock_predictor.training.download_sector_map", return_value=_sectors()),
+    ):
+        P.main()
+
+
+def test_a_name_with_a_recent_hole_is_not_ranked(rig, capsys) -> None:
+    """T00 is the model's top pick by construction, so if it still appears the
+    guard did not reach the decision."""
+    _run_holey(rig, "--force-rebalance")
+    out = capsys.readouterr()
+    assert "Excluding 1 name(s)" in out.err
+    assert "T00" in out.err
+    picks = out.out.split("NEW PICKS")[-1]
+    assert "T00" not in picks, "an unrankable name must not be bought"
+
+
+def test_the_guard_can_be_switched_off(rig, capsys) -> None:
+    """Deliberately, and visibly — not by accident."""
+    _run_holey(rig, "--force-rebalance", "--min-recent-coverage", "0")
+    assert "Excluding" not in capsys.readouterr().err
+
+
+def test_a_clean_panel_excludes_nothing(rig, capsys) -> None:
+    _run(rig, "--force-rebalance")
+    assert "Excluding" not in capsys.readouterr().err
