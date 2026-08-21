@@ -529,7 +529,19 @@ def main() -> None:
                 run_backtest,
             )
 
+            # Hardcoded defaults, deliberately: train-sp500 has no strategy
+            # flags, so this is a sanity check on the scores rather than a
+            # measurement of whatever you intend to trade. Say so, or the
+            # numbers below get quoted as if they were the strategy's.
             bt_config = BacktestConfig()
+            print(
+                f"  (sanity backtest at defaults: top_n={bt_config.top_n}, "
+                f"holding_days={bt_config.holding_days}, "
+                f"weighting={bt_config.weighting}, "
+                f"rebalance_day={bt_config.rebalance_day}. For the configuration "
+                "you trade, run backtest-sp500 via scripts/run_pipeline.sh, "
+                "which shares its flags with predict-sp500.)"
+            )
             bt_result = run_backtest(wf_scores, bt_config, provider=provider)
             print_report(bt_result)
             if args.plots_dir is not None:
