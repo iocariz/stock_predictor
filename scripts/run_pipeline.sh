@@ -13,6 +13,10 @@ cd "$ROOT"
 : "${CANDIDATE:=artifacts/model_candidate.pkl}"
 : "${STATE:=portfolio_state.json}"
 : "${WF_SCORES:=artifacts/wf_scored.parquet}"
+# Full unfiltered download, used to price fills. The scored panel is PIT
+# filtered, so a holding that leaves the index stops having rows and its last
+# in-index price is carried forward -- fills then execute at a stale quote.
+: "${EXECUTION_PRICES:=artifacts/hybrid_adj_close.parquet}"
 : "${PLOTS_DIR:=artifacts/plots}"
 # hybrid recovers delisted names from Tiingo, which an unbiased *training*
 # panel needs. Live scoring only ever trades current index members, and
@@ -114,8 +118,11 @@ backtest_only() {
   mapfile -t flags < <(strategy_flags)
   local -a mode=()
   [[ "$HOLD_MODE" == "rank" ]] && mode=(--mode rank-hold)
+  local -a exec_px=()
+  [[ -f "$EXECUTION_PRICES" ]] && exec_px=(--execution-prices "$EXECUTION_PRICES")
   ${DRY_RUN:+echo} uv run backtest-sp500 "$WF_SCORES" \
     --plots-dir "$PLOTS_DIR" \
+    "${exec_px[@]}" \
     "${flags[@]}" \
     "${mode[@]}"
 }

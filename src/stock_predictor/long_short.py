@@ -148,7 +148,7 @@ def run_long_short_backtest(
     provider: object | None = None,
 ) -> LongShortResult:
     """Simulate a dollar-neutral long-short book with borrow and trading costs."""
-    df, trading_dates, price_panel = _prepare_scored(scored_df)
+    df, trading_dates, price_panel, _actual = _prepare_scored(scored_df)
 
     # The hedge is a synthetic short in the benchmark, priced alongside the
     # stocks so it pays the same slippage, borrow and financing as any other
