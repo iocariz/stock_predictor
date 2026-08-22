@@ -43,6 +43,7 @@ from stock_predictor.universe import (
     DEFAULT_MIN_COVERAGE,
     check_download_coverage,
     sample_tickers,
+    universe_hash,
 )
 
 
@@ -267,6 +268,7 @@ def build_model_meta(
     optuna_best: dict,
     manual_params: dict,
     n_trees: int,
+    universe: list[str] | None = None,
     importance: dict,
     pr_auc: float,
     roc_auc: float,
@@ -293,6 +295,12 @@ def build_model_meta(
         "test_start": args.test_start,
         "sample_n": args.sample_n,
         "seed": args.seed,
+        # The tickers actually drawn, not the recipe for drawing them. Training
+        # samples the union over the whole window; a live run resampling a
+        # 400-day window with the same seed draws from a different population
+        # and gets a different set. Recording the draw removes the dependence.
+        "universe": sorted(universe) if universe else None,
+        "universe_hash": universe_hash(universe) if universe else None,
         "skip_earnings": args.skip_earnings,
         "optuna_best": optuna_best,
         "manual_params": manual_params,
@@ -556,6 +564,7 @@ def main() -> None:
             optuna_best=optuna_best,
             manual_params=manual_params,
             n_trees=n_trees,
+            universe=sample,
             importance=feature_importances(model, feature_cols),
             pr_auc=pr_auc,
             roc_auc=roc_auc,

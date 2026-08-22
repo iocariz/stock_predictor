@@ -152,11 +152,19 @@ def test_a_sell_with_no_matching_position_does_not_crash() -> None:
     assert "ZZZ" in out
 
 
-def test_the_kill_switch_is_stated_and_buys_are_suppressed() -> None:
+def test_a_halted_book_that_somehow_has_buys_says_so_loudly() -> None:
+    """This test used to assert the opposite — that a halted book hides its
+    buys — which is exactly how `--force-rebalance` trading through the kill
+    switch stayed invisible: the banner said "no new positions" beside a
+    summary line counting five of them.
+
+    Order generation now refuses to produce buys while halted. If the two ever
+    disagree again, the report must expose it rather than paper over it."""
     out = _report((Order("BUY", "BBB", 20, 50.0, "c2", "new_pick"),), halted=True)
     assert "KILL-SWITCH" in out
     assert "HALTED" in out
-    assert "NEW PICKS" not in out, "a halted book must not advertise buys"
+    assert "BBB" in out, "an order that exists must be visible"
+    assert "this is a bug" in out, "and must be flagged as one"
 
 
 def test_a_quiet_day_says_so_rather_than_printing_nothing() -> None:

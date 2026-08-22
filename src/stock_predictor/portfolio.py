@@ -310,7 +310,13 @@ def generate_orders(
         rebalance_day is not None
         and pd.Timestamp(as_of).day_name() != rebalance_day
     )
-    may_open = allow_buys and not (repeat_signal or off_schedule) or force
+    # `and` binds tighter than `or`, so
+    #     allow_buys and not (...) or force
+    # parsed as `(allow_buys and not ...) or force`, and force alone opened
+    # positions -- including through an engaged drawdown kill switch. force is
+    # about timing: it overrides the weekly schedule and the repeat-signal
+    # guard, never risk.
+    may_open = allow_buys and (force or not (repeat_signal or off_schedule))
     if repeat_signal and not force:
         print(f"  Signal for {as_of} already acted on; no new cohort "
               "(pass force=True to override).")
@@ -513,7 +519,13 @@ def generate_orders_rank_hold(
         rebalance_day is not None
         and pd.Timestamp(as_of).day_name() != rebalance_day
     )
-    may_open = allow_buys and not (repeat_signal or off_schedule) or force
+    # `and` binds tighter than `or`, so
+    #     allow_buys and not (...) or force
+    # parsed as `(allow_buys and not ...) or force`, and force alone opened
+    # positions -- including through an engaged drawdown kill switch. force is
+    # about timing: it overrides the weekly schedule and the repeat-signal
+    # guard, never risk.
+    may_open = allow_buys and (force or not (repeat_signal or off_schedule))
     slots = top_n - len(kept_positions)
     if slots > 0 and may_open:
         held = {p.ticker for p in kept_positions}

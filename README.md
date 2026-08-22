@@ -625,8 +625,8 @@ Training lives in `stock_predictor.training` and `stock_predictor.cli`; reproduc
 
 | Notebook | Purpose |
 |----------|---------|
-| `notebooks/exploration.ipynb` | EDA |
-| `notebooks/sp500_predictor.ipynb` | Full predictor pipeline |
+| `notebooks/exploration.ipynb` | **ARCHIVED** — invalid methodology, outputs cleared |
+| `notebooks/sp500_predictor.ipynb` | **ARCHIVED** — invalid methodology, outputs cleared |
 
 Ensure the repo root or `src` is on `PYTHONPATH`, or run notebooks from an environment where `uv sync` has been applied. Root shims re-export `stock_predictor.pit` and `stock_predictor.calendar_features` for older import paths.
 
@@ -748,10 +748,46 @@ notebooks/               Exploration + full pipeline
 
 - **Stale artifacts.** Any `wf_scored.parquet` or report produced before the universe fix was built on an **alphabetically truncated** universe (`--sample-n` sliced a sorted ticker list, so a 500-cap run covered roughly A–POOL) with features computed *after* the PIT filter. Those panels are not comparable to current ones — on the same rules, the truncated panel showed +76.6% and Sharpe 1.05 where the corrected panel shows +22.2% and Sharpe 0.16. Regenerate before drawing any conclusion.
 
+  **The notebooks are archived, not current.** Both implement the methodology
+  this section calls invalid — alphabetical truncation (`tickers[:SAMPLE_N]`),
+  the point-in-time filter applied *before* time-series features, unlabelled
+  rows dropped, and a row-based unpurged `TimeSeriesSplit`. They were committed
+  with executed outputs, so numbers produced by all four defects were on display
+  as findings. Outputs are now cleared and the banner names each defect; the
+  code is kept as a record of how the project started. `tests/test_notebooks_archived.py`
+  fails if outputs are ever committed again.
+
   Panels produced before the **row-role fix** are stale in a second, quieter way: they are missing the final `--horizon` sessions entirely. Check with
   `panel.groupby("date").size().tail(63)` — if the tail collapses to a handful of
   names, the panel predates the fix and its most recent quarter is fiction.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
+
+- **The live universe is the model's own draw, not a reseed.** Training samples
+  the union of tickers overlapping the whole training window; inference used to
+  resample a 400-day window with the same seed. **The same seed drawing from a
+  different population is a different draw.** Measured on the real stints at
+  `--sample-n 500`:
+
+  | | training draw | live draw | overlap |
+  |---|---|---|---|
+  | tickers | 500 | 500 | **307** |
+  | current index members | 305 | 473 | 289 |
+
+  Every cross-sectional feature is a rank *within the universe*, so a different
+  universe means different feature values for the same stock. `sample_n=10000`
+  draws everything and both sides end up with the same 503 current members,
+  which is why this stayed latent — the deployed configuration is uncapped.
+
+  Model metadata now records `universe` (the tickers actually drawn) and
+  `universe_hash`. A live run intersects that with current index membership
+  instead of reseeding. Members added *since* training are excluded rather than
+  silently joining the cross-section — the model has never ranked them — and the
+  run reports how many, so the monthly retrain has a visible purpose.
+
+  Models trained before this say so and fall back to reseeding, with a warning
+  when `--sample-n` is capped. `sample_mismatch_warning` compares sample
+  *sizes*; it would have stayed silent at 500 versus 500, which is why the draw
+  itself is now recorded.
 
 - **Dollar-neutral is not market-neutral.** Equalising notional equalises
   dollars, not exposure. This model ranks volatility *positively*, so the long

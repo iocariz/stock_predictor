@@ -320,3 +320,37 @@ def test_the_gate_fires_before_any_order_is_generated(rig, tmp_path, capsys) -> 
         P.main()
     assert "DAILY SIGNAL" not in capsys.readouterr().out
     assert state_path.read_text() == before, "a blocked run must not touch state"
+
+
+# ---------------------------------------------------------------------------
+# The kill switch outranks --force-rebalance
+# ---------------------------------------------------------------------------
+
+
+def _halted_state(state_path, capital: float = 100_000.0):
+    """A book whose high-water mark is far above its current value."""
+    from stock_predictor.portfolio import PortfolioState
+    save_state(PortfolioState(initial_capital=capital, cash=capital,
+                              high_watermark=capital * 4), state_path)
+
+
+def test_force_rebalance_cannot_trade_through_the_kill_switch(rig, capsys) -> None:
+    """`allow_buys` and `force` reach generate_orders independently, so this
+    is the seam where a precedence bug in their combination shows up."""
+    _, state_path = rig
+    _halted_state(state_path)
+    _run(rig, "--force-rebalance", "--confirm", "--max-drawdown", "0.15")
+
+    out = capsys.readouterr().out
+    assert "HALTED" in out
+    assert "KILL-SWITCH ENGAGED" in out
+    assert "NEW PICKS" not in out
+    assert "while halted" not in out, "no orders should have been generated at all"
+    assert load_state(state_path).positions == (), "a halted book bought anyway"
+
+
+def test_a_healthy_book_still_honours_force_rebalance(rig) -> None:
+    """The fix must not disarm force for its actual purpose."""
+    _, state_path = rig
+    _run(rig, "--force-rebalance", "--confirm")
+    assert len(load_state(state_path).positions) > 0
