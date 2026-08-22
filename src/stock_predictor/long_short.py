@@ -38,6 +38,7 @@ from stock_predictor.backtest import (
     daily_risk_free,
 )
 from stock_predictor.borrow import resolve_borrow_rates
+from stock_predictor.stats import market_exposure
 
 TRADING_DAYS = 252
 
@@ -69,6 +70,19 @@ class LongShortConfig:
     from a ``borrow_rate`` column on the panel if present, otherwise from the
     stylised proxy in :mod:`stock_predictor.borrow` — which is a sensitivity
     tool, not a measurement."""
+    hedge_beta: float | None = None
+    """Short this much benchmark exposure per unit of capital, as an overlay.
+
+    Dollar-neutral is not market-neutral. On the real panel this book carries
+    **beta +0.292 (t +4.76)**: the model ranks volatility positively, so the
+    long leg holds beta-1.27 names and the short leg beta-0.66 ones, and about
+    a quarter of the "neutral" return was market exposure.
+
+    Hedging through the index rather than by scaling the short book leaves the
+    stock selection untouched, keeps beta-estimation error out of position
+    sizing, and needs one liquid instrument instead of heavier single-name
+    shorts. ``None`` or 0 disables it, and the default is disabled: an
+    unhedged book is a defensible choice, an unstated one is not."""
     risk_free_rate: float = 0.045
     """Earned on the cash balance and used for Sharpe."""
     initial_capital: float = 100_000.0
@@ -86,6 +100,14 @@ class LongShortConfig:
             raise ValueError("short_borrow_annual must be >= 0")
         if self.min_names_per_side < 1:
             raise ValueError("min_names_per_side must be >= 1")
+        if self.hedge_beta is not None:
+            if self.hedge_beta < 0:
+                raise ValueError(f"hedge_beta must be >= 0, got {self.hedge_beta}")
+            if self.hedge_beta > 0 and not self.benchmark_ticker:
+                raise ValueError(
+                    "hedge_beta needs a benchmark_ticker to hedge with; "
+                    "ignoring the request silently would be worse than refusing it"
+                )
 
 
 @dataclass(frozen=True)
@@ -127,6 +149,33 @@ def run_long_short_backtest(
 ) -> LongShortResult:
     """Simulate a dollar-neutral long-short book with borrow and trading costs."""
     df, trading_dates, price_panel = _prepare_scored(scored_df)
+
+    # The hedge is a synthetic short in the benchmark, priced alongside the
+    # stocks so it pays the same slippage, borrow and financing as any other
+    # short rather than being a costless return adjustment.
+    hedge_beta = float(config.hedge_beta or 0.0)
+    hedge_ticker = config.benchmark_ticker or ""
+    bench_close = pd.Series(dtype=float)
+    if hedge_beta > 0:
+        if hedge_ticker in price_panel.columns:
+            raise ValueError(
+                f"benchmark {hedge_ticker!r} is also a name in the panel; "
+                "hedging it would double-count the position"
+            )
+        bench_close, _ = _download_benchmark(
+            pd.Timestamp(trading_dates[0]), pd.Timestamp(trading_dates[-1]),
+            hedge_ticker, config.initial_capital, provider=provider,
+        )
+        if bench_close.empty:
+            raise ValueError(
+                f"hedge_beta={hedge_beta} requested but the benchmark "
+                f"{hedge_ticker!r} could not be downloaded"
+            )
+        aligned = (bench_close.reindex(pd.DatetimeIndex(trading_dates).normalize())
+                   .ffill().bfill())
+        price_panel = price_panel.copy()
+        price_panel[hedge_ticker] = aligned.to_numpy()
+
     n_days = len(trading_dates)
     nav_index = pd.DatetimeIndex(trading_dates)
     by_date = df.groupby("date")
@@ -150,6 +199,7 @@ def run_long_short_backtest(
         )
     borrowed_rate_sum = 0.0
     borrowed_notional = 0.0
+    hedge_notional = 0.0
 
     cash = config.initial_capital
     shares: dict[str, float] = {}
@@ -205,6 +255,9 @@ def run_long_short_backtest(
                 s * prices.get(t, 0.0) for t, s in shares.items()
             )
             target = _target_book(by_date.get_group(signal_day), config, equity)
+            if target and hedge_beta > 0:
+                # Added after selection, so it never consumes a decile slot.
+                target[hedge_ticker] = -hedge_beta * equity
             if target:
                 n_rebal += 1
                 traded = set(target) | set(shares)
@@ -231,6 +284,8 @@ def run_long_short_backtest(
                         shares.pop(t, None)
                     else:
                         shares[t] = want
+                    if t == hedge_ticker and hedge_beta > 0:
+                        hedge_notional = abs(want * px)
 
         # Recorded after any fill, so nav[0] is untouched capital and the
         # opening trade's cost shows up in the first return rather than being
@@ -242,6 +297,7 @@ def run_long_short_backtest(
     metrics = _compute_metrics(daily_nav, [], risk_free_rate=config.risk_free_rate)
     metrics["n_rebalances"] = float(n_rebal)
     metrics["gross_leverage"] = config.long_weight + config.short_weight
+    metrics["hedge_beta"] = hedge_beta
     metrics["effective_borrow_rate"] = (
         borrowed_rate_sum / borrowed_notional if borrowed_notional > 0
         else config.short_borrow_annual
@@ -261,6 +317,14 @@ def run_long_short_backtest(
             bench_metrics = _compute_metrics(
                 bench_nav, [], risk_free_rate=config.risk_free_rate,
             )
+            # Dollar-neutral is not market-neutral; say what the beta is.
+            bench_ret = bench_nav.pct_change().dropna()
+            shared = daily_returns.index.intersection(bench_ret.index)
+            if len(shared) > 2:
+                metrics.update(market_exposure(
+                    daily_returns.loc[shared], bench_ret.loc[shared],
+                    overlap=config.rebalance_every,
+                ))
 
     return LongShortResult(
         config=config,
@@ -269,6 +333,7 @@ def run_long_short_backtest(
         metrics=metrics,
         turnover=pd.Series(turnover, index=nav_index, dtype=float),
         costs={
+            "hedge_notional": hedge_notional,
             "slippage": cost_slip,
             "commission": cost_comm,
             "borrow": cost_borrow,

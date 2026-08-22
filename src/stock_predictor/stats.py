@@ -11,6 +11,7 @@ correction instead.
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 
 
 def auto_hac_lags(n: int) -> int:
@@ -85,3 +86,42 @@ def downside_deviation(returns, target: float = 0.0) -> float:
         return float("nan")
     shortfall = np.minimum(arr - target, 0.0)
     return float(np.sqrt(np.mean(shortfall**2)))
+
+
+def market_exposure(
+    portfolio: "pd.Series | np.ndarray",
+    benchmark: "pd.Series | np.ndarray",
+    *,
+    overlap: int = 1,
+) -> dict[str, float]:
+    """Beta and annualised alpha of *portfolio* against *benchmark*.
+
+    Dollar-neutral is not market-neutral. Equalising notional equalises
+    dollars, not exposure, and a book whose long leg holds higher-beta names
+    than its short leg keeps a market position that a notional-based
+    description hides. Measuring it is the only way to know.
+
+    Standard errors are Newey--West, so overlapping holding periods do not
+    inflate significance.
+    """
+    y = np.asarray(getattr(portfolio, "to_numpy", lambda: portfolio)(), dtype=float)
+    x = np.asarray(getattr(benchmark, "to_numpy", lambda: benchmark)(), dtype=float)
+    n = min(len(y), len(x))
+    y, x = y[:n], x[:n]
+    nan = {"beta": float("nan"), "beta_t": float("nan"),
+           "alpha_ann": float("nan"), "alpha_t": float("nan")}
+    if n < 3 or not np.isfinite(y).all() or not np.isfinite(x).all():
+        return nan
+    design = np.column_stack([np.ones(n), x])
+    lags = max(auto_hac_lags(n), max(0, overlap - 1))
+    try:
+        coef, cov = hac_ols(y, design, lags)
+    except np.linalg.LinAlgError:
+        return nan
+    se = np.sqrt(np.diag(cov))
+    return {
+        "beta": float(coef[1]),
+        "beta_t": float(coef[1] / se[1]) if se[1] > 0 else float("nan"),
+        "alpha_ann": float(coef[0] * 252),
+        "alpha_t": float(coef[0] / se[0]) if se[0] > 0 else float("nan"),
+    }

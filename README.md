@@ -753,6 +753,45 @@ notebooks/               Exploration + full pipeline
   names, the panel predates the fix and its most recent quarter is fiction.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
 
+- **Dollar-neutral is not market-neutral.** Equalising notional equalises
+  dollars, not exposure. This model ranks volatility *positively*, so the long
+  leg holds beta-1.27 names and the short leg beta-0.66 ones, and the book keeps
+  a market position that a notional description hides.
+
+  Measured on the 2019–2026 panel at horizon 63 (single schedule offset — read
+  the rows against each other, not against the 21-offset medians quoted
+  elsewhere):
+
+  | config | beta | (t) | alpha/yr | (t) | CAGR | Sharpe | maxDD |
+  |---|---|---|---|---|---|---|---|
+  | unhedged | **+0.292** | +4.74 | +10.95% | +2.70 | +16.6% | 0.91 | −18.9% |
+  | `hedge_beta=0.29` | +0.025 | +0.44 | +11.67% | +2.93 | +12.1% | 0.66 | −20.8% |
+  | `hedge_beta=0.20` | +0.107 | +1.83 | +11.46% | +2.86 | +13.5% | 0.76 | −20.1% |
+  | `hedge_beta=0.40` | −0.075 | −1.37 | +11.90% | +3.02 | +10.3% | 0.52 | −22.0% |
+
+  Two things follow, and they point opposite ways.
+
+  **The alpha is real and survives hedging** — +10.95% (t +2.70) unhedged
+  becomes +11.67% (t +2.93) hedged. The edge is selection skill, not disguised
+  market exposure, which is the question the measurement was there to settle.
+
+  **Hedging still made this sample worse**: Sharpe 0.91 → 0.66, and max drawdown
+  slightly *deeper* at −20.8%. Over 2019–2026 the +0.29 beta was a tailwind, and
+  the overlay costs slippage and borrow. Hedging is not a way to improve a
+  backtest run over a bull market; it removes a risk you did not choose and are
+  not paid for skill on, and the sign of that trade flips in a falling market.
+
+  `hedge_beta` shorts the benchmark as an overlay — added *after* selection, so
+  it never consumes a decile slot, and priced through the same engine so it pays
+  the same slippage, borrow and financing as any other short. Hedging through
+  the index rather than by scaling the short book (which would need **1.93×**
+  short notional) leaves the selection untouched and keeps beta-estimation error
+  out of position sizing. It is **off by default**: an unhedged book is a
+  defensible choice, an unstated one is not.
+
+  Every long-short run now reports `beta`, `beta_t`, `alpha_ann` and `alpha_t`
+  whenever a benchmark is configured.
+
 - **Training writes a candidate; promotion is a separate step.** `train-full`
   used to write straight to the model the live path loads, so a retrain replaced
   the model being traded the instant it finished — with no check that the new one
