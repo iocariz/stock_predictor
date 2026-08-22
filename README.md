@@ -625,8 +625,8 @@ Training lives in `stock_predictor.training` and `stock_predictor.cli`; reproduc
 
 | Notebook | Purpose |
 |----------|---------|
-| `notebooks/exploration.ipynb` | EDA |
-| `notebooks/sp500_predictor.ipynb` | Full predictor pipeline |
+| `notebooks/exploration.ipynb` | **ARCHIVED** — invalid methodology, outputs cleared |
+| `notebooks/sp500_predictor.ipynb` | **ARCHIVED** — invalid methodology, outputs cleared |
 
 Ensure the repo root or `src` is on `PYTHONPATH`, or run notebooks from an environment where `uv sync` has been applied. Root shims re-export `stock_predictor.pit` and `stock_predictor.calendar_features` for older import paths.
 
@@ -747,6 +747,15 @@ notebooks/               Exploration + full pipeline
 ## Limitations
 
 - **Stale artifacts.** Any `wf_scored.parquet` or report produced before the universe fix was built on an **alphabetically truncated** universe (`--sample-n` sliced a sorted ticker list, so a 500-cap run covered roughly A–POOL) with features computed *after* the PIT filter. Those panels are not comparable to current ones — on the same rules, the truncated panel showed +76.6% and Sharpe 1.05 where the corrected panel shows +22.2% and Sharpe 0.16. Regenerate before drawing any conclusion.
+
+  **The notebooks are archived, not current.** Both implement the methodology
+  this section calls invalid — alphabetical truncation (`tickers[:SAMPLE_N]`),
+  the point-in-time filter applied *before* time-series features, unlabelled
+  rows dropped, and a row-based unpurged `TimeSeriesSplit`. They were committed
+  with executed outputs, so numbers produced by all four defects were on display
+  as findings. Outputs are now cleared and the banner names each defect; the
+  code is kept as a record of how the project started. `tests/test_notebooks_archived.py`
+  fails if outputs are ever committed again.
 
   Panels produced before the **row-role fix** are stale in a second, quieter way: they are missing the final `--horizon` sessions entirely. Check with
   `panel.groupby("date").size().tail(63)` — if the tail collapses to a handful of
