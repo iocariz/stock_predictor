@@ -312,8 +312,17 @@ def format_signal_report(
         out.append("")
 
     if halted:
+        # Stated regardless, but it must not suppress orders that exist. The
+        # report once printed this banner beside "5 buys" while --confirm
+        # persisted them, because it assumed halted implied no buys.
         out += ["*** KILL-SWITCH ENGAGED — no new positions ***", ""]
-    elif buys:
+        if buys:
+            out += [
+                f"!!! {len(buys)} BUY order(s) generated while halted — this is "
+                "a bug; do not execute:",
+                "",
+            ]
+    if buys:
         out.append("NEW PICKS (buy at open):")
         out.append(f"  {'Rank':>4s}  {'Ticker':<6s}  {'Score':>7s}  {'Shares':>6s}  {'~Cost':>8s}")
         for i, o in enumerate(buys, 1):
@@ -324,7 +333,7 @@ def format_signal_report(
                 f"${o.shares * o.price:>7,.0f}"
             )
         out.append("")
-    elif not sells:
+    elif not sells and not halted:
         out += ["No orders today (no expirations, no available cohort slots).", ""]
 
     non_expiring = [p for p in state.positions if p.expiry_date > today]
