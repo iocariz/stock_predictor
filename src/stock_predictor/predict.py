@@ -46,8 +46,10 @@ from stock_predictor.universe import (
     DEFAULT_MIN_RECENT_COVERAGE,
     DEFAULT_RECENT_SESSIONS,
     check_download_coverage,
+    resolve_live_universe,
     sample_tickers,
     thin_recent_names,
+    universe_drift,
 )
 
 # ---------------------------------------------------------------------------
@@ -552,14 +554,41 @@ def main() -> None:
     lookback = 400
     start_date = (date.today() - timedelta(days=lookback)).isoformat()
     tickers = tickers_overlapping_window(stints, start_date, None)
-    # Reuse training's seed so the live universe is the same draw the model
-    # was fitted on; an unrelated sample changes every cross-sectional feature.
-    seed = resolve_universe_seed(args.seed, meta)
-    sample = sample_tickers(tickers, args.sample_n, seed=seed)
-    print(f"  Universe: {len(sample)} tickers (seeded sample, seed={seed})")
-    mismatch = sample_mismatch_warning(args.sample_n, meta)
-    if mismatch:
-        print(f"  Warning: {mismatch}", file=sys.stderr)
+    live_members = current_members(stints)
+    trained_on = meta.get("universe")
+    if trained_on:
+        # Use the draw the model was actually fitted on. Reseeding here samples
+        # a 400-day population rather than the training window's union, so the
+        # same seed yields a different set -- at sample_n=500 only 307 of 500
+        # names overlapped, changing every cross-sectional rank the model reads.
+        sample = resolve_live_universe(trained_on, live_members)
+        drift = universe_drift(trained_on, live_members)
+        print(f"  Universe: {len(sample)} tickers from the model's own draw "
+              f"(hash {meta.get('universe_hash', '?')})")
+        if drift["current_not_in_training"]:
+            print(
+                f"  Note: {int(drift['current_not_in_training'])} current index "
+                f"member(s) postdate this model and are not traded "
+                f"({drift['coverage_of_current']:.0%} of current membership "
+                "covered). Retrain to pick them up.",
+                file=sys.stderr,
+            )
+    else:
+        # Models trained before the universe was recorded cannot have their
+        # draw reproduced; say so rather than pretend the seed is enough.
+        seed = resolve_universe_seed(args.seed, meta)
+        sample = sample_tickers(tickers, args.sample_n, seed=seed)
+        print(f"  Universe: {len(sample)} tickers (reseeded, seed={seed})")
+        if args.sample_n < len(tickers):
+            print(
+                "  Warning: this model records no training universe, and a "
+                "capped --sample-n reseeded from a different population is NOT "
+                "the draw it was fitted on. Retrain to record it.",
+                file=sys.stderr,
+            )
+        mismatch = sample_mismatch_warning(args.sample_n, meta)
+        if mismatch:
+            print(f"  Warning: {mismatch}", file=sys.stderr)
 
     adj_close, volume = download_recent_prices(sample, lookback_days=lookback, provider=provider)
     print(f"  Downloaded: {adj_close.shape[0]} days x {adj_close.shape[1]} tickers")

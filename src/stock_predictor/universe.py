@@ -14,6 +14,9 @@ Two guards that keep the traded universe honest:
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Iterable
+
 import numpy as np
 import pandas as pd
 
@@ -173,3 +176,53 @@ def thin_recent_names(
     """
     cov = recent_coverage(adj_close, sessions=sessions)
     return sorted(str(t) for t in cov.index[cov < min_fraction])
+
+
+def universe_hash(tickers: Iterable[str]) -> str:
+    """Stable digest of a ticker set, order-independent.
+
+    SHA-256 rather than :func:`hash`, whose string seed is randomised per
+    process, so the same universe hashes the same way across runs.
+    """
+    payload = "|".join(sorted(str(t) for t in tickers))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def resolve_live_universe(
+    training_universe: Iterable[str], current: Iterable[str],
+) -> list[str]:
+    """Names the model was fitted on that the index still holds.
+
+    Training samples from the union covering the whole training window;
+    inference used to resample from a 400-day window with the same seed, which
+    is a different draw from a different population -- at ``sample_n=500``,
+    only 307 of 500 names overlapped. Every cross-sectional feature is a rank
+    within the universe, so that changes the inputs the model reads.
+
+    Recording what was actually drawn removes the dependence on reproducing a
+    sample. Members added since training are excluded rather than silently
+    joining the cross-section: the model has never ranked them, and a monthly
+    retrain is what brings them in.
+    """
+    keep = sorted(set(str(t) for t in training_universe) & set(str(c) for c in current))
+    if not keep:
+        raise ValueError(
+            "no overlap between the model's training universe and current "
+            "index membership; the model is too old to trade"
+        )
+    return keep
+
+
+def universe_drift(
+    training_universe: Iterable[str], current: Iterable[str],
+) -> dict[str, float]:
+    """How far current membership has moved from what the model was fitted on."""
+    train = {str(t) for t in training_universe}
+    now = {str(c) for c in current}
+    tradable = train & now
+    return {
+        "tradable": float(len(tradable)),
+        "current_not_in_training": float(len(now - train)),
+        "training_no_longer_current": float(len(train - now)),
+        "coverage_of_current": float(len(tradable) / len(now)) if now else 0.0,
+    }

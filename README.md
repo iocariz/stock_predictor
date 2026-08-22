@@ -753,6 +753,33 @@ notebooks/               Exploration + full pipeline
   names, the panel predates the fix and its most recent quarter is fiction.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
 
+- **The live universe is the model's own draw, not a reseed.** Training samples
+  the union of tickers overlapping the whole training window; inference used to
+  resample a 400-day window with the same seed. **The same seed drawing from a
+  different population is a different draw.** Measured on the real stints at
+  `--sample-n 500`:
+
+  | | training draw | live draw | overlap |
+  |---|---|---|---|
+  | tickers | 500 | 500 | **307** |
+  | current index members | 305 | 473 | 289 |
+
+  Every cross-sectional feature is a rank *within the universe*, so a different
+  universe means different feature values for the same stock. `sample_n=10000`
+  draws everything and both sides end up with the same 503 current members,
+  which is why this stayed latent — the deployed configuration is uncapped.
+
+  Model metadata now records `universe` (the tickers actually drawn) and
+  `universe_hash`. A live run intersects that with current index membership
+  instead of reseeding. Members added *since* training are excluded rather than
+  silently joining the cross-section — the model has never ranked them — and the
+  run reports how many, so the monthly retrain has a visible purpose.
+
+  Models trained before this say so and fall back to reseeding, with a warning
+  when `--sample-n` is capped. `sample_mismatch_warning` compares sample
+  *sizes*; it would have stayed silent at 500 versus 500, which is why the draw
+  itself is now recorded.
+
 - **Dollar-neutral is not market-neutral.** Equalising notional equalises
   dollars, not exposure. This model ranks volatility *positively*, so the long
   leg holds beta-1.27 names and the short leg beta-0.66 ones, and the book keeps
