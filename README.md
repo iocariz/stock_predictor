@@ -762,6 +762,46 @@ notebooks/               Exploration + full pipeline
   names, the panel predates the fix and its most recent quarter is fiction.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
 
+- **A position that cannot be sold has to go somewhere.** Rejecting unpriceable
+  fills was correct, but it left capital locked in holdings that could never
+  exit — on the current panel, **1068 deferred exits**. `specs.md` sets the
+  rules: delisting treatment must use *explicit evidence* or an *explicit
+  conservative fallback* (`:181`), a data gap is never itself proof (`:587`),
+  and the policy must be documented, configurable, and in the diagnostics
+  (`:249`).
+
+  Three outcomes, in order of preference:
+
+  1. **Evidence** — `--delisting-proceeds` takes `(ticker, date, proceeds)`: a
+     cash acquisition price, or zero for a bankruptcy. Applied point-in-time, so
+     a deal settling next month cannot pay today.
+  2. **A named fallback after a grace period** — default `write_off` at zero
+     once a holding has been unpriceable for `--delisting-grace-sessions` (63,
+     about a quarter). Shorter gaps are halts or vendor outages, not delistings.
+     Zero is the conservative choice: a stock you cannot sell is not worth its
+     last quote.
+  3. **`--delisting-fallback hold`** — keep it indefinitely and leave the
+     capital visibly stuck.
+
+  Inventing a price is never an option. Forward-filled quotes may *value* a
+  position; they may not dispose of one.
+
+  | policy | deferred | written off | CAGR | Sharpe | maxDD |
+  |---|---|---|---|---|---|
+  | hold forever | 1068 | 0 | +16.19% | 0.49 | −50.7% |
+  | write_off after 63 sessions | 0 | 6 | +17.28% | 0.50 | −52.3% |
+  | **write_off + execution prices** | **0** | **0** | **+22.95%** | **0.62** | −52.3% |
+
+  The third row is the one that matters. **With the full unfiltered download
+  nothing gets stuck or written off at all**, because almost nothing in this
+  universe is genuinely unpriceable — it was only unpriceable in the *PIT
+  filtered* panel. Rank-hold was being clogged: rejected exits kept dead names
+  in the book, consuming slots that should have rotated into fresh picks. Run
+  the backtest with `--execution-prices` and the delisting policy barely fires.
+
+  Reported per run: `exits_deferred`, `disposals_by_evidence`,
+  `disposals_written_off`, `disposal_proceeds`.
+
 - **A fill needs a quote on the session it executes.** The price panel is
   forward-filled so open positions can be *marked* between quotes. Execution
   read straight from it, so a leg with no quote on its entry or exit session

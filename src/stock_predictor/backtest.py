@@ -12,12 +12,17 @@ Example:
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from stock_predictor.delisting import (
+    DelistingPolicy,
+    disposal_value,
+    load_proceeds,
+)
 from stock_predictor.execution import (
     CostModel,
     SelectionRules,
@@ -102,6 +107,13 @@ class BacktestConfig:
     score — so a threshold is only comparable across runs of the same model
     family and configuration."""
 
+    delisting_policy: DelistingPolicy = field(default_factory=DelistingPolicy)
+    """How to dispose of a holding that can no longer be priced.
+
+    Rejecting unpriceable fills leaves capital locked in positions that can
+    never exit. specs.md requires explicit evidence or an explicit conservative
+    fallback, and forbids treating a data gap as proof of delisting -- hence
+    the grace period. See :mod:`stock_predictor.delisting`."""
     reject_stale_fills: bool = True
     """Refuse to fill a leg with no quote on the session it executes.
 
@@ -862,6 +874,7 @@ def run_rank_hold_backtest(
     *,
     provider: object | None = None,
     execution_prices: pd.DataFrame | None = None,
+    delisting_proceeds: pd.DataFrame | None = None,
 ) -> BacktestResult:
     """Rank-based holding: buy the top-N, sell only when a name's rank decays.
 
@@ -886,6 +899,14 @@ def run_rank_hold_backtest(
     )
     tally = {"requested": 0, "filled": 0, "rejected": 0}
     deferred_exits = 0
+    # Sessions since each ticker last had a real quote, per session. The grace
+    # period is expressed in sessions, so counting exit *attempts* (weekly)
+    # against it would be off by the rebalance interval.
+    _pos = np.arange(len(actual), dtype=float)
+    _last_priced = actual.mul(_pos, axis=0).where(actual).cummax()
+    disposals: dict[str, int] = {}
+    proceeds_cash = 0.0
+    proceeds_evidence = load_proceeds(delisting_proceeds)
     _validate_weighting(df, config)
     risk_free = _resolve_risk_free(df, config)
     n_days = len(trading_dates)
@@ -924,8 +945,42 @@ def run_rank_hold_backtest(
                 # No quote on the exit session: keep the position rather than
                 # exiting flat at the entry price, which invents a fill.
                 tally["rejected"] += 1
-                deferred_exits += 1
-                open_pos[t] = pos
+                # Deferred, not abandoned -- but a position that stays
+                # unpriceable has to be resolved eventually, by evidence or by
+                # a named policy. A gap alone is never proof (specs.md:587).
+                last = (
+                    _last_priced.at[entry_date, t]
+                    if t in _last_priced.columns and entry_date in _last_priced.index
+                    else float("nan")
+                )
+                gap = e_idx + 1 if last != last else int(e_idx - last)
+                disposal = disposal_value(
+                    t, entry_date, evidence=proceeds_evidence,
+                    sessions_unpriced=gap,
+                    policy=config.delisting_policy,
+                )
+                if disposal is None:
+                    deferred_exits += 1
+                    open_pos[t] = pos
+                    continue
+                px, source = disposal
+                disposals[source] = disposals.get(source, 0) + 1
+                proceeds_cash += pos["shares"] * px
+                cash += pos["shares"] * px
+                cash_flow[e_idx] += pos["shares"] * px
+                closed.append(Cohort(
+                    signal_date=pos["signal_date"], entry_date=pos["entry_date"],
+                    exit_date=entry_date, tickers=(t,), weights=(1.0,),
+                    entry_prices=(pos["entry_price"],), exit_prices=(px,),
+                    capital=pos["basis"],
+                    gross_return=px / pos["raw_entry"] - 1.0,
+                    cost=0.0,
+                    net_return=(pos["shares"] * px) / pos["basis"] - 1.0,
+                ))
+                for iv in intervals:
+                    if iv[2] == t and iv[1] is None:
+                        iv[1] = e_idx
+                        break
                 continue
             tally["filled"] += 1
             px = float(price_panel.at[entry_date, t]) if t in price_panel.columns else float("nan")
@@ -1047,6 +1102,10 @@ def run_rank_hold_backtest(
     # keeps capital tied up in a position that cannot be priced, which is
     # honest but not free -- delisting proceeds are still unmodelled.
     metrics["exits_deferred"] = float(deferred_exits)
+    # specs.md:249 -- delistings appear in the diagnostics, by source.
+    metrics["disposals_by_evidence"] = float(disposals.get("evidence", 0))
+    metrics["disposals_written_off"] = float(disposals.get("write_off", 0))
+    metrics["disposal_proceeds"] = float(proceeds_cash)
     metrics["n_open_positions"] = float(len(open_pos))
 
     start_date = pd.Timestamp(trading_dates[0])
@@ -1145,6 +1204,33 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Score floor: never buy a name scoring below this (default: off). "
         "Compared against the panel's raw 'prob' column, which is uncalibrated "
         "for classifiers and unbounded for --rank-objective models",
+    )
+    p.add_argument(
+        "--delisting-proceeds",
+        type=Path,
+        default=None,
+        dest="delisting_proceeds",
+        help="Parquet/CSV of (ticker, date, proceeds) giving explicit disposal "
+        "evidence — a cash acquisition price, or zero for a bankruptcy. Used "
+        "in preference to any fallback, point-in-time",
+    )
+    p.add_argument(
+        "--delisting-fallback",
+        choices=["write_off", "hold"],
+        default="write_off",
+        dest="delisting_fallback",
+        help="What to do with a holding still unpriceable after the grace "
+        "period (default: %(default)s). 'hold' leaves the capital visibly "
+        "stuck instead",
+    )
+    p.add_argument(
+        "--delisting-grace-sessions",
+        type=int,
+        default=63,
+        dest="delisting_grace_sessions",
+        help="Sessions of silence tolerated before the fallback applies "
+        "(default: %(default)s). A shorter gap is a halt or an outage, not a "
+        "delisting",
     )
     p.add_argument(
         "--allow-stale-fills",
@@ -1253,6 +1339,10 @@ def main() -> None:
         min_prob=args.min_prob,
         min_cross_section=args.min_cross_section,
         reject_stale_fills=not args.allow_stale_fills,
+        delisting_policy=DelistingPolicy(
+            fallback=args.delisting_fallback,
+            grace_sessions=args.delisting_grace_sessions,
+        ),
         rank_offset=args.rank_offset,
         risk_free_rate=args.rf_rate,
     )
@@ -1262,8 +1352,17 @@ def main() -> None:
         exec_px = pd.read_parquet(args.execution_prices)
         print(f"Execution prices from {args.execution_prices} "
               f"({exec_px.shape[0]} dates x {exec_px.shape[1]} tickers)")
-    result = backtest_fn(scored, config, provider=bt_provider,
-                         execution_prices=exec_px)
+    kwargs = {"execution_prices": exec_px}
+    if args.delisting_proceeds is not None:
+        path = args.delisting_proceeds
+        ev = (pd.read_parquet(path) if str(path).endswith(".parquet")
+              else pd.read_csv(path))
+        print(f"Delisting evidence from {path} ({len(ev)} rows)")
+        if backtest_fn is run_rank_hold_backtest:
+            kwargs["delisting_proceeds"] = ev
+        else:
+            print("  (cohort engine has fixed exits; evidence is unused)")
+    result = backtest_fn(scored, config, provider=bt_provider, **kwargs)
     print_report(result)
 
     if args.plots_dir is not None:
