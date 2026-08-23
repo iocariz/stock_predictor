@@ -590,7 +590,20 @@ def main() -> None:
         if mismatch:
             print(f"  Warning: {mismatch}", file=sys.stderr)
 
-    adj_close, volume = download_recent_prices(sample, lookback_days=lookback, provider=provider)
+    # A holding is a position, not a candidate. It must be priced even after it
+    # leaves the index, or its exit falls through to a fabricated fill. The
+    # entry universe is the model's draw intersected with current membership,
+    # which by construction excludes departed names.
+    held = sorted({p.ticker for p in state.positions})
+    orphaned = [t for t in held if t not in set(sample)]
+    if orphaned:
+        print(f"  Adding {len(orphaned)} held ticker(s) outside the entry "
+              f"universe so they can be priced: {', '.join(orphaned[:8])}"
+              + (" …" if len(orphaned) > 8 else ""))
+    download = sorted(set(sample) | set(held))
+    adj_close, volume = download_recent_prices(
+        download, lookback_days=lookback, provider=provider,
+    )
     print(f"  Downloaded: {adj_close.shape[0]} days x {adj_close.shape[1]} tickers")
     check_download_coverage(
         sample, adj_close,
@@ -684,8 +697,16 @@ def main() -> None:
             )
         print("  --allow-stale: proceeding anyway.", file=sys.stderr)
 
-    # Current prices for valuation
+    # Quotes come from the raw download, not the scored panel. The panel is
+    # point-in-time filtered, so a departed holding has no row in it and would
+    # read as "no quote" even when it was downloaded successfully.
     latest_prices = dict(zip(scored["ticker"], scored["adj_close"]))
+    if len(adj_close):
+        last_seen = adj_close.ffill().iloc[-1]
+        for t in held:
+            px = last_seen.get(t)
+            if px is not None and pd.notna(px) and float(px) > 0:
+                latest_prices[t] = float(px)
 
     # Kill-switch check
     halted, nav, dd = check_kill_switch(state, latest_prices, args.max_drawdown)

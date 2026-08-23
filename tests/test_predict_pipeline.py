@@ -354,3 +354,57 @@ def test_a_healthy_book_still_honours_force_rebalance(rig) -> None:
     _, state_path = rig
     _run(rig, "--force-rebalance", "--confirm")
     assert len(load_state(state_path).positions) > 0
+
+
+# ---------------------------------------------------------------------------
+# Held tickers are priced regardless of the entry universe
+# ---------------------------------------------------------------------------
+
+
+def test_a_holding_outside_the_entry_universe_is_still_downloaded(rig, capsys) -> None:
+    """The entry universe is the model's draw intersected with current index
+    membership, so a holding that *left* the index is excluded by construction.
+    Without its quote the exit falls through to a fabricated fill."""
+    from stock_predictor.portfolio import PortfolioState, Position
+
+    _, state_path = rig
+    departed = Position("T00", 10, 100.0, "2020-01-02",
+                        str(DATES[-1].date()), "c1", last_price=40.0)
+    save_state(PortfolioState(cash=50_000.0, positions=(departed,)), state_path)
+
+    class _NoT00(_FakeProvider):
+        """T00 has left the index: the PIT stints no longer list it."""
+
+    stints_without = _stints()
+    stints_without = stints_without[stints_without.ticker != "T00"]
+
+    argv = ["predict-sp500", "--model", str(rig[0]), "--state", str(state_path),
+            "--sample-n", str(N_TICKERS), "--skip-earnings", "--no-macro-merge",
+            "--min-coverage", "0", "--top-n", "5"]
+    with (
+        patch("sys.argv", argv),
+        patch.object(P, "get_provider", return_value=_NoT00()),
+        patch.object(P, "load_sp500_stints", return_value=stints_without),
+        patch("stock_predictor.training.download_sector_map", return_value=_sectors()),
+    ):
+        P.main()
+
+    out = capsys.readouterr().out
+    assert "held ticker(s) outside the entry universe" in out
+    assert "T00" in out
+
+
+def test_an_unpriceable_holding_is_deferred_not_sold(rig, capsys) -> None:
+    """The end-to-end shape of the fabricated-proceeds bug."""
+    from stock_predictor.portfolio import PortfolioState, Position
+
+    _, state_path = rig
+    ghost = Position("NOSUCH", 10, 100.0, "2020-01-02",
+                     str(DATES[-1].date()), "c1", last_price=40.0)
+    save_state(PortfolioState(cash=0.0, positions=(ghost,)), state_path)
+    _run(rig, "--confirm")
+
+    after = load_state(state_path)
+    assert after.cash == 0.0, "credited cash for a fill that never happened"
+    assert [p.ticker for p in after.positions] == ["NOSUCH"]
+    assert "defer" in capsys.readouterr().out.lower()

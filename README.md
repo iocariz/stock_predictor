@@ -762,6 +762,35 @@ notebooks/               Exploration + full pipeline
   names, the panel predates the fix and its most recent quarter is fiction.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
 
+- **A missing quote is not a fill.** Both live order generators priced exits
+  with `prices.get(ticker, entry_price)`. When a holding had no quote the exit
+  executed **at the entry price** — not even at the `last_price` the position
+  already carries — the position was removed, and the cash was credited.
+
+  A probe: 10 shares, entry $100, last observed $40, no current quote produced
+  `SELL 10 @ $100.00`, crediting **$1,000** for something last seen worth $400.
+
+  It was reachable because the live download covers the model's universe
+  intersected with current index membership, so a holding that *left* the index
+  is not downloaded and therefore has no quote. That intersection was introduced
+  to fix universe reproduction; it narrowed the download and widened this hole.
+
+  Three changes:
+
+  - **Held tickers are downloaded regardless of the entry universe.** A holding
+    is a position, not a candidate.
+  - **Quotes come from the raw download, not the scored panel.** The panel is
+    PIT-filtered, so a departed holding has no row in it and would read as "no
+    quote" even when downloaded successfully.
+  - **Without a valid quote the exit is deferred and the position retained.**
+    Zero and NaN do not count as quotes. `mark_price` still falls back for
+    *marking*, which is an estimate; a fill is not.
+
+  A permanently unquotable holding therefore stays in the book and is reported
+  every run, rather than being converted into cash that does not exist. That is
+  the correct answer — you still own it — and it needs an operator decision, not
+  a synthetic sale.
+
 - **Selection and valuation are different questions.** The backtest priced fills
   from the *scored* panel, which is point-in-time filtered, and forward-filled it
   unconditionally. A holding that left the index — or was delisted, halted, or
