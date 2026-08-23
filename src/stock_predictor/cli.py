@@ -114,6 +114,16 @@ def parse_args() -> argparse.Namespace:
         help="Save walk-forward scored panel to this parquet path",
     )
     p.add_argument(
+        "--execution-prices-path",
+        type=Path,
+        default=None,
+        dest="execution_prices_path",
+        help="Write the unfiltered adj_close panel (dates x tickers) from THIS "
+        "run's download, for backtest-sp500 --execution-prices. Nothing used to "
+        "produce this file, so the backtest silently paired whatever stale "
+        "parquet happened to be on disk, or fell back to forward-filled prices",
+    )
+    p.add_argument(
         "--snapshot-dir",
         type=Path,
         default=None,
@@ -388,6 +398,21 @@ def main() -> None:
         n_tk = fundamentals["ticker"].nunique() if len(fundamentals) else 0
         print(f"  {len(fundamentals):,} facts for {n_tk} tickers")
 
+    # The execution panel is this run's own download, before any PIT filter:
+    # what a holding was actually worth, including after it left the index.
+    if args.execution_prices_path is not None:
+        args.execution_prices_path.parent.mkdir(parents=True, exist_ok=True)
+        adj_close.to_parquet(args.execution_prices_path)
+        print(f"  Saved execution prices to {args.execution_prices_path} "
+              f"({adj_close.shape[0]} dates x {adj_close.shape[1]} tickers)")
+        if manifest is not None and snapshot_root is not None:
+            meta = repro.snapshot_parquet(
+                repro.wide_prices_to_long(adj_close, volume),
+                snapshot_root / "execution_prices.parquet",
+            )
+            repro.register_snapshot(manifest, "execution_prices", meta)
+            repro.write_manifest(snapshot_root / "manifest.json", manifest)
+
     labeled = build_labeled_panel(adj_close, None, horizon, threshold)
     print(f"  Positive rate: {labeled['target_5pct'].mean():.4%}")
 
@@ -550,7 +575,10 @@ def main() -> None:
                 "you trade, run backtest-sp500 via scripts/run_pipeline.sh, "
                 "which shares its flags with predict-sp500.)"
             )
-            bt_result = run_backtest(wf_scores, bt_config, provider=provider)
+            bt_result = run_backtest(
+                wf_scores, bt_config, provider=provider,
+                execution_prices=adj_close,
+            )
             print_report(bt_result)
             if args.plots_dir is not None:
                 plot_backtest(bt_result, args.plots_dir)

@@ -16,7 +16,7 @@ cd "$ROOT"
 # Full unfiltered download, used to price fills. The scored panel is PIT
 # filtered, so a holding that leaves the index stops having rows and its last
 # in-index price is carried forward -- fills then execute at a stale quote.
-: "${EXECUTION_PRICES:=artifacts/hybrid_adj_close.parquet}"
+: "${EXECUTION_PRICES:=artifacts/execution_prices.parquet}"
 : "${PLOTS_DIR:=artifacts/plots}"
 # hybrid recovers delisted names from Tiingo, which an unbiased *training*
 # panel needs. Live scoring only ever trades current index members, and
@@ -100,6 +100,7 @@ train_full() {
     --plots-dir "$PLOTS_DIR" \
     --output-model "$CANDIDATE" \
     --wf-scores-path "$WF_SCORES" \
+    --execution-prices-path "$EXECUTION_PRICES" \
     --run-backtest \
     "${opts[@]}" \
     $EXTRA_TRAIN_ARGS
@@ -118,8 +119,15 @@ backtest_only() {
   mapfile -t flags < <(strategy_flags)
   local -a mode=()
   [[ "$HOLD_MODE" == "rank" ]] && mode=(--mode rank-hold)
-  local -a exec_px=()
-  [[ -f "$EXECUTION_PRICES" ]] && exec_px=(--execution-prices "$EXECUTION_PRICES")
+  # Absent used to mean "silently fall back to forward-filled prices", which
+  # is a different backtest, not a smaller one.
+  if [[ ! -f "$EXECUTION_PRICES" && -z "${DRY_RUN:-}" ]]; then
+    echo "ERROR: no execution price panel at $EXECUTION_PRICES." >&2
+    echo "  Produce one with: ./scripts/run_pipeline.sh train-full" >&2
+    echo "  (it writes EXECUTION_PRICES from the same download as the scores)" >&2
+    return 1
+  fi
+  local -a exec_px=(--execution-prices "$EXECUTION_PRICES")
   ${DRY_RUN:+echo} uv run backtest-sp500 "$WF_SCORES" \
     --plots-dir "$PLOTS_DIR" \
     "${exec_px[@]}" \
