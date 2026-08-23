@@ -123,9 +123,23 @@ jobs:
               for di, d in enumerate(dates)
               for i in range(n)
           ]
-          pd.DataFrame(rows).to_parquet("ci_panel.parquet", index=False)
+          panel = pd.DataFrame(rows)
+          panel.to_parquet("ci_panel.parquet", index=False)
+          # The execution panel a real run would emit alongside the scores:
+          # unfiltered, wider and longer than the scored panel.
+          panel.pivot_table(index="date", columns="ticker",
+                            values="adj_close", aggfunc="first"
+                            ).to_parquet("ci_exec.parquet")
           PY
-          uv run backtest-sp500 ci_panel.parquet --no-benchmark --rf-rate 0.045
-          uv run backtest-sp500 ci_panel.parquet --no-benchmark --mode rank-hold --exit-rank 25
-          uv run backtest-sp500 ci_panel.parquet --no-benchmark --min-prob 0.6
+          EX="--execution-prices ci_exec.parquet"
+          uv run backtest-sp500 ci_panel.parquet --no-benchmark --rf-rate 0.045 $EX
+          uv run backtest-sp500 ci_panel.parquet --no-benchmark --mode rank-hold --exit-rank 25 $EX
+          uv run backtest-sp500 ci_panel.parquet --no-benchmark --min-prob 0.6 $EX
+          # A run without an execution panel must refuse rather than quietly
+          # fall back to forward-filled prices.
+          if uv run backtest-sp500 ci_panel.parquet --no-benchmark > /dev/null 2>&1; then
+            echo "ERROR: backtest accepted a missing execution panel" >&2
+            exit 1
+          fi
+          uv run backtest-sp500 ci_panel.parquet --no-benchmark --allow-price-mismatch > /dev/null
           uv run python scripts/signal_depth.py ci_panel.parquet --no-benchmark --buckets 5,15
