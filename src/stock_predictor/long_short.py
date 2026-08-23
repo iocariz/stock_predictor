@@ -34,6 +34,7 @@ from stock_predictor.backtest import (
     _apply_slippage,
     _compute_metrics,
     _download_benchmark,
+    _fill_metrics,
     _prepare_scored,
     daily_risk_free,
 )
@@ -83,6 +84,13 @@ class LongShortConfig:
     sizing, and needs one liquid instrument instead of heavier single-name
     shorts. ``None`` or 0 disables it, and the default is disabled: an
     unhedged book is a defensible choice, an unstated one is not."""
+    reject_stale_fills: bool = True
+    """Refuse to trade a name with no quote on the rebalance session.
+
+    The price panel is forward-filled so open positions can be *marked*
+    between quotes; executing against a carried-forward price fills at a price
+    that did not exist that session. This engine previously ignored both the
+    distinction and the diagnostics."""
     risk_free_rate: float = 0.045
     """Earned on the cash balance and used for Sharpe."""
     initial_capital: float = 100_000.0
@@ -146,9 +154,13 @@ def run_long_short_backtest(
     config: LongShortConfig = LongShortConfig(),
     *,
     provider: object | None = None,
+    execution_prices: pd.DataFrame | None = None,
 ) -> LongShortResult:
     """Simulate a dollar-neutral long-short book with borrow and trading costs."""
-    df, trading_dates, price_panel, _actual = _prepare_scored(scored_df)
+    df, trading_dates, price_panel, actual = _prepare_scored(
+        scored_df, execution_prices,
+    )
+    tally = {"requested": 0, "filled": 0, "rejected": 0}
 
     # The hedge is a synthetic short in the benchmark, priced alongside the
     # stocks so it pays the same slippage, borrow and financing as any other
@@ -175,6 +187,11 @@ def run_long_short_backtest(
                    .ffill().bfill())
         price_panel = price_panel.copy()
         price_panel[hedge_ticker] = aligned.to_numpy()
+        # The hedge is a real instrument with real quotes; mark it as such, or
+        # the stale-fill rejection treats the overlay as unpriceable and it
+        # never trades.
+        actual = actual.copy()
+        actual[hedge_ticker] = aligned.notna().to_numpy() & (aligned > 0).to_numpy()
 
     n_days = len(trading_dates)
     nav_index = pd.DatetimeIndex(trading_dates)
@@ -263,8 +280,19 @@ def run_long_short_backtest(
                 traded = set(target) | set(shares)
                 for t in sorted(traded):
                     px = prices.get(t, np.nan)
+                    tally["requested"] += 1
                     if px != px or px <= 0:
+                        tally["rejected"] += 1
                         continue
+                    # A carried-forward price marks a position; it does not
+                    # fill one. This engine ignored the distinction entirely.
+                    if config.reject_stale_fills and not (
+                        t in actual.columns and day in actual.index
+                        and bool(actual.at[day, t])
+                    ):
+                        tally["rejected"] += 1
+                        continue
+                    tally["filled"] += 1
                     want = target.get(t, 0.0) / px
                     have = shares.get(t, 0.0)
                     delta = want - have
@@ -298,6 +326,7 @@ def run_long_short_backtest(
     metrics["n_rebalances"] = float(n_rebal)
     metrics["gross_leverage"] = config.long_weight + config.short_weight
     metrics["hedge_beta"] = hedge_beta
+    metrics.update(_fill_metrics(tally))
     metrics["effective_borrow_rate"] = (
         borrowed_rate_sum / borrowed_notional if borrowed_notional > 0
         else config.short_borrow_annual

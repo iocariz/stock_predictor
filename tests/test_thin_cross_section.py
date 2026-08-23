@@ -92,13 +92,33 @@ def test_a_wide_panel_is_unaffected(engine) -> None:
 
 
 @ENGINES
-def test_positions_still_exit_on_a_thin_day(engine) -> None:
-    """Gating entries must never strand a holding. A position opened while the
-    panel was wide has to be closable after it narrows."""
-    res = engine(_panel(wide_until=60), _cfg(holding_days=3))
+def test_positions_still_exit_when_they_can_be_priced(engine) -> None:
+    """Gating entries must never strand a holding that can be priced.
+
+    Fills now require a real quote on the execution session, so the thin tail
+    alone cannot support exits — that is the point. Supplying execution prices
+    covering the tail restores them, which is the intended workflow.
+    """
+    full = _panel(wide_until=len(DATES))
+    prices = full.pivot_table(index="date", columns="ticker",
+                              values="adj_close", aggfunc="first")
+    res = engine(_panel(wide_until=60, thin=2), _cfg(holding_days=3),
+                 execution_prices=prices)
     closed_after = [c for c in res.cohorts
                     if pd.Timestamp(c.exit_date) >= DATES[60]]
-    assert closed_after, "a thin cross-section must not trap open positions"
+    assert closed_after, "priced holdings must still be able to exit"
+
+
+@ENGINES
+def test_an_unpriceable_holding_is_deferred_and_reported(engine) -> None:
+    """The other half: a name that stops being quoted cannot be exited at all.
+    specs.md forbids filling from a previous price, so the position is held and
+    the deferral is reported rather than being sold at an invented price."""
+    res = engine(_panel(wide_until=60, thin=2), _cfg(holding_days=3))
+    assert res.metrics["fills_rejected"] > 0
+    assert res.metrics["fills_requested"] == (
+        res.metrics["fills_filled"] + res.metrics["fills_rejected"]
+    )
 
 
 def test_cli_exposes_the_floor() -> None:
