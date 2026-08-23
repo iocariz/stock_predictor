@@ -102,6 +102,14 @@ class BacktestConfig:
     score — so a threshold is only comparable across runs of the same model
     family and configuration."""
 
+    reject_stale_fills: bool = True
+    """Refuse to fill a leg with no quote on the session it executes.
+
+    The price panel is forward-filled so open positions can be *marked* between
+    quotes. Executing against a carried-forward price is a different thing: it
+    fills at a price that did not exist on that session. specs.md requires every
+    requested fill to record Filled or Rejected, and forward filling to be
+    confined to aged valuation marks. Set False to reproduce the old behaviour."""
     min_cross_section: int | None = None
     """Fewest scored names a date must carry before it may open positions.
 
@@ -268,6 +276,17 @@ def _cohort_commission_dollars(
 # ---------------------------------------------------------------------------
 
 
+def _fill_metrics(tally: dict[str, int]) -> dict[str, float]:
+    """Every requested fill accounted for, as specs.md requires."""
+    req = float(tally["requested"])
+    return {
+        "fills_requested": req,
+        "fills_filled": float(tally["filled"]),
+        "fills_rejected": float(tally["rejected"]),
+        "fill_reject_rate": float(tally["rejected"] / req) if req else 0.0,
+    }
+
+
 def _build_cohort(
     signal_date: pd.Timestamp,
     price_panel: pd.DataFrame,
@@ -275,6 +294,8 @@ def _build_cohort(
     config: BacktestConfig,
     trading_dates: np.ndarray,
     capital: float,
+    actual: pd.DataFrame | None = None,
+    tally: dict[str, int] | None = None,
 ) -> Cohort | None:
     entry_date = next_trading_day(signal_date, trading_dates)
     if entry_date is None:
@@ -296,13 +317,32 @@ def _build_cohort(
 
     for cand in picks:
         t = cand.ticker
+        if tally is not None:
+            tally["requested"] += 2      # an entry and an exit
         try:
             ep = price_panel.at[entry_date, t]
             xp = price_panel.at[exit_date, t]
         except KeyError:
+            if tally is not None:
+                tally["rejected"] += 2
             continue
         if np.isnan(ep) or np.isnan(xp):
+            if tally is not None:
+                tally["rejected"] += 2
             continue
+        # A carried-forward price is a valuation mark, not a fill.
+        if config.reject_stale_fills and actual is not None:
+            real = all(
+                t in actual.columns and when in actual.index
+                and bool(actual.at[when, t])
+                for when in (entry_date, exit_date)
+            )
+            if not real:
+                if tally is not None:
+                    tally["rejected"] += 2
+                continue
+        if tally is not None:
+            tally["filled"] += 2
         tickers.append(t)
         entry_prices.append(_apply_slippage(ep, config.slippage_bps, +1))
         exit_prices.append(_apply_slippage(xp, config.slippage_bps, -1))
@@ -736,7 +776,7 @@ def run_backtest(
     df, trading_dates, price_panel, actual = _prepare_scored(
         scored_df, execution_prices,
     )
-    stale_fills = 0
+    tally = {"requested": 0, "filled": 0, "rejected": 0}
     _validate_weighting(df, config)
     risk_free = _resolve_risk_free(df, config)
 
@@ -777,29 +817,19 @@ def run_backtest(
         scored_day = by_date.get_group(sig_date)
         cohort = _build_cohort(
             sig_date, price_panel, scored_day, config, trading_dates, capital,
+            actual=actual, tally=tally,
         )
         if cohort is not None:
             cohorts.append(cohort)
             cash -= capital
 
     # Daily NAV
-    # A leg priced from a forward-filled quote is a guess, not a fill. On the
-    # real panel this hit 40 of 840 legs before the row-role fix, 10 after.
-    for c in cohorts:
-        for t in c.tickers:
-            for when in (c.entry_date, c.exit_date):
-                if not (t in actual.columns and when in actual.index
-                        and bool(actual.at[when, t])):
-                    stale_fills += 1
-
     daily_nav = _build_daily_nav(cohorts, trading_dates, price_panel, config)
     daily_returns = daily_nav.pct_change().dropna()
 
     # Metrics
     metrics = _compute_metrics(daily_nav, cohorts, risk_free_rate=risk_free)
-    legs = sum(len(c.tickers) for c in cohorts) * 2
-    metrics["stale_fills"] = float(stale_fills)
-    metrics["stale_fill_rate"] = float(stale_fills / legs) if legs else 0.0
+    metrics.update(_fill_metrics(tally))
 
     start_date = pd.Timestamp(trading_dates[0])
     end_date = pd.Timestamp(trading_dates[-1])
@@ -854,7 +884,8 @@ def run_rank_hold_backtest(
     df, trading_dates, price_panel, actual = _prepare_scored(
         scored_df, execution_prices,
     )
-    stale_fills = 0
+    tally = {"requested": 0, "filled": 0, "rejected": 0}
+    deferred_exits = 0
     _validate_weighting(df, config)
     risk_free = _resolve_risk_free(df, config)
     n_days = len(trading_dates)
@@ -886,9 +917,17 @@ def run_rank_hold_backtest(
         # Shared with the live path so a simulated exit and a real one agree.
         for t in sorted(rank_exits(set(open_pos), ranked_tickers, config.exit_rank)):
             pos = open_pos.pop(t)
-            if not (t in actual.columns and entry_date in actual.index
-                    and bool(actual.at[entry_date, t])):
-                stale_fills += 1
+            tally["requested"] += 1
+            real = (t in actual.columns and entry_date in actual.index
+                    and bool(actual.at[entry_date, t]))
+            if config.reject_stale_fills and not real:
+                # No quote on the exit session: keep the position rather than
+                # exiting flat at the entry price, which invents a fill.
+                tally["rejected"] += 1
+                deferred_exits += 1
+                open_pos[t] = pos
+                continue
+            tally["filled"] += 1
             px = float(price_panel.at[entry_date, t]) if t in price_panel.columns else float("nan")
             if px != px or px <= 0:
                 px = pos["raw_entry"]  # last resort: exit flat
@@ -946,6 +985,16 @@ def run_rank_hold_backtest(
                 break
             if t in open_pos or t not in price_panel.columns:
                 continue
+            tally["requested"] += 1
+            if config.reject_stale_fills and not (
+                t in actual.columns and entry_date in actual.index
+                and bool(actual.at[entry_date, t])
+            ):
+                # Buys were never counted at all, so a name bought at a
+                # carried-forward price reported nothing.
+                tally["rejected"] += 1
+                continue
+            tally["filled"] += 1
             px = float(price_panel.at[entry_date, t])
             if px != px or px <= 0:
                 continue
@@ -991,10 +1040,13 @@ def run_rank_hold_backtest(
 
     metrics = _compute_metrics(daily_nav, closed, risk_free_rate=risk_free)
     metrics["total_costs"] = total_costs  # include open positions' entry costs
-    metrics["stale_fills"] = float(stale_fills)
-    metrics["stale_fill_rate"] = (
-        float(stale_fills / (2 * len(closed))) if closed else 0.0
-    )
+    # The old denominator was 2 * len(closed), which ignored every entry for a
+    # position still open.
+    metrics.update(_fill_metrics(tally))
+    # specs.md: missing exits must appear in the diagnostics. A deferred exit
+    # keeps capital tied up in a position that cannot be priced, which is
+    # honest but not free -- delisting proceeds are still unmodelled.
+    metrics["exits_deferred"] = float(deferred_exits)
     metrics["n_open_positions"] = float(len(open_pos))
 
     start_date = pd.Timestamp(trading_dates[0])
@@ -1095,6 +1147,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "for classifiers and unbounded for --rank-objective models",
     )
     p.add_argument(
+        "--allow-stale-fills",
+        action="store_true",
+        dest="allow_stale_fills",
+        help="Fill against a forward-filled price when the session has no "
+        "quote (the old behaviour). Off by default: specs.md requires a "
+        "missing entry or exit price to create a rejected fill",
+    )
+    p.add_argument(
         "--execution-prices",
         type=Path,
         default=None,
@@ -1192,6 +1252,7 @@ def main() -> None:
         exit_rank=args.exit_rank,
         min_prob=args.min_prob,
         min_cross_section=args.min_cross_section,
+        reject_stale_fills=not args.allow_stale_fills,
         rank_offset=args.rank_offset,
         risk_free_rate=args.rf_rate,
     )

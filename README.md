@@ -762,6 +762,45 @@ notebooks/               Exploration + full pipeline
   names, the panel predates the fix and its most recent quarter is fiction.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
 
+- **A fill needs a quote on the session it executes.** The price panel is
+  forward-filled so open positions can be *marked* between quotes. Execution
+  read straight from it, so a leg with no quote on its entry or exit session
+  filled at an earlier price. Counting those afterwards — which an earlier
+  change did — makes the problem visible without preventing it, and `specs.md`
+  is explicit: the scored panel must not be forward-filled to create execution
+  prices, and every requested fill must record Filled or Rejected.
+
+  Three gaps the counting missed entirely: rank-hold **buys** were never
+  counted; the rank-hold denominator was `2 × len(closed)`, ignoring every entry
+  for a position still open; and the **long-short engine ignored execution
+  prices and the diagnostics together**.
+
+  | engine / mode | requested | rejected | rate | CAGR | Sharpe |
+  |---|---|---|---|---|---|
+  | cohort, fill-stale (old) | 1680 | 0 | 0.00% | +17.27% | 0.52 |
+  | cohort, reject | 1680 | 20 | 1.19% | +17.73% | 0.53 |
+  | cohort, reject + exec prices | 1680 | 4 | 0.24% | +17.46% | 0.52 |
+  | **L-S, fill-stale (old)** | 4918 | 0 | 0.00% | +16.64% | 0.91 |
+  | **L-S, reject** | 5401 | **538** | **9.96%** | +16.54% | 0.91 |
+  | L-S, reject + exec prices | 5071 | 170 | 3.35% | +16.66% | 0.91 |
+
+  **Nearly 10% of long-short fills were against carried-forward prices** — the
+  engine behind every headline number here, and the only one with no
+  diagnostics. The P&L effect is small because errors wash out across ~500
+  names, but a tenth of the trades were not real.
+
+  Fills are now rejected rather than faked, in all three engines.
+  `--execution-prices` supplies the full unfiltered download and removes most
+  rejections; `--allow-stale-fills` restores the old behaviour explicitly.
+  Every run reports `fills_requested`, `fills_filled`, `fills_rejected` and
+  `fill_reject_rate`, and rank-hold reports `exits_deferred`.
+
+  A rank-hold exit that cannot be priced is **deferred and the position
+  retained**, rather than exiting flat at the entry price. That ties up capital
+  in a position that cannot be sold, which is honest but not free — **delisting
+  proceeds remain unmodelled**, and that gap is now visible in the diagnostics
+  instead of hidden behind a forward fill.
+
 - **A missing quote is not a fill.** Both live order generators priced exits
   with `prices.get(ticker, entry_price)`. When a holding had no quote the exit
   executed **at the entry price** — not even at the `last_price` the position

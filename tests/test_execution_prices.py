@@ -67,21 +67,21 @@ CFG = dict(top_n=5, holding_days=20, max_overlapping_cohorts=2,
 # ---------------------------------------------------------------------------
 
 
-def test_stale_fills_are_counted_not_silent() -> None:
+def test_unpriceable_fills_are_rejected_not_silent() -> None:
     res = run_backtest(_scored(), BacktestConfig(**CFG))
-    assert res.metrics["stale_fills"] > 0
-    assert res.metrics["stale_fill_rate"] > 0
+    assert res.metrics["fills_rejected"] > 0
+    assert res.metrics["fill_reject_rate"] > 0
 
 
 def test_a_complete_panel_reports_no_stale_fills() -> None:
     res = run_backtest(_scored(drop_from=None), BacktestConfig(**CFG))
-    assert res.metrics["stale_fills"] == 0
-    assert res.metrics["stale_fill_rate"] == 0.0
+    assert res.metrics["fills_rejected"] == 0
+    assert res.metrics["fill_reject_rate"] == 0.0
 
 
 def test_rank_hold_counts_them_too() -> None:
     res = run_rank_hold_backtest(_scored(), BacktestConfig(exit_rank=10, **CFG))
-    assert "stale_fills" in res.metrics
+    assert "fills_rejected" in res.metrics
 
 
 # ---------------------------------------------------------------------------
@@ -97,21 +97,31 @@ def test_execution_prices_are_used_when_supplied() -> None:
     real = run_backtest(scored, BacktestConfig(**CFG),
                         execution_prices=_truth(scored))
     assert real.metrics["total_return"] != pytest.approx(stale.metrics["total_return"])
-    assert real.metrics["stale_fills"] < stale.metrics["stale_fills"]
+    assert real.metrics["fills_rejected"] < stale.metrics["fills_rejected"]
 
 
-def test_supplying_prices_does_not_change_selection() -> None:
-    """Valuation must not leak into what gets picked."""
+def test_supplying_prices_only_ever_adds_fills() -> None:
+    """The *ranking* is unchanged — execution prices do not reorder anything.
+
+    What they change is which legs can fill: a leg with no quote on its session
+    is rejected, so supplying prices can only turn rejections into fills, never
+    the reverse. This test used to assert the cohorts were identical, which was
+    true when prices affected valuation alone.
+    """
     scored = _scored()
     a = run_backtest(scored, BacktestConfig(**CFG))
     b = run_backtest(scored, BacktestConfig(**CFG), execution_prices=_truth(scored))
-    assert [c.tickers for c in a.cohorts] == [c.tickers for c in b.cohorts]
+    assert b.metrics["fills_filled"] >= a.metrics["fills_filled"]
+    assert b.metrics["fills_rejected"] <= a.metrics["fills_rejected"]
+    filled_a = {t for c in a.cohorts for t in c.tickers}
+    filled_b = {t for c in b.cohorts for t in c.tickers}
+    assert filled_a <= filled_b, "supplying prices must not remove a fill"
 
 
 def test_a_complete_execution_panel_removes_the_staleness() -> None:
     scored = _scored()
     res = run_backtest(scored, BacktestConfig(**CFG), execution_prices=_truth(scored))
-    assert res.metrics["stale_fills"] == 0
+    assert res.metrics["fills_rejected"] == 0
 
 
 def test_execution_prices_may_cover_only_some_names() -> None:
@@ -119,7 +129,7 @@ def test_execution_prices_may_cover_only_some_names() -> None:
     scored = _scored()
     partial = _truth(scored)[[LEAVER]]
     res = run_backtest(scored, BacktestConfig(**CFG), execution_prices=partial)
-    assert res.metrics["stale_fills"] == 0
+    assert res.metrics["fills_rejected"] == 0
 
 
 def test_rank_hold_accepts_execution_prices_too() -> None:
@@ -127,10 +137,10 @@ def test_rank_hold_accepts_execution_prices_too() -> None:
     cfg = BacktestConfig(exit_rank=10, **CFG)
     a = run_rank_hold_backtest(scored, cfg)
     b = run_rank_hold_backtest(scored, cfg, execution_prices=_truth(scored))
-    assert b.metrics["stale_fills"] <= a.metrics["stale_fills"]
+    assert b.metrics["fills_rejected"] <= a.metrics["fills_rejected"]
 
 
 def test_an_empty_execution_panel_is_ignored_not_fatal() -> None:
     res = run_backtest(_scored(), BacktestConfig(**CFG),
                        execution_prices=pd.DataFrame())
-    assert res.metrics["stale_fills"] > 0
+    assert res.metrics["fills_rejected"] > 0
