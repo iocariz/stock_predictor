@@ -762,6 +762,36 @@ notebooks/               Exploration + full pipeline
   names, the panel predates the fix and its most recent quarter is fiction.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
 
+- **Scores and execution prices come from the same run, and it is checked.**
+  `run_pipeline.sh` defaulted `EXECUTION_PRICES` to a parquet path and used it
+  *if the file existed* — but **nothing in the package, the scripts, or CI ever
+  wrote that file.** Where it existed it was a leftover from an ad-hoc fetch,
+  and the pipeline paired it with fresh scores without comment:
+
+  ```
+  scores            409 sessions, 2025-01-02 -> 2026-08-20
+  execution prices 4181 sessions, 2010-01-04 -> 2026-08-18
+  ```
+
+  Two scored sessions had no execution row. Absence degraded just as quietly:
+  the backtest fell back to forward-filled prices, which on the rank-hold engine
+  is the difference between **+17.28% and +22.95%** — a gap that reads as a
+  strategy result and is really a missing file.
+
+  - `train-sp500 --execution-prices-path` writes the unfiltered `adj_close`
+    panel from **this run's own download**, and records it in the run manifest
+    with a hash alongside the other snapshots.
+  - `run_pipeline.sh train-full` writes it; `backtest` consumes the same path
+    and **fails loudly** if it is absent instead of quietly proceeding.
+  - `backtest-sp500` validates date coverage, ticker coverage and schema before
+    running, and refuses on mismatch unless `--allow-price-mismatch`.
+  - `train-sp500 --run-backtest` uses the panel it just downloaded rather than
+    none at all.
+
+  The execution panel is expected to be *wider and longer* than the scored
+  panel — it is the full download, the scored panel is point-in-time filtered —
+  so only the reverse, a scored row with no execution row, is a fault.
+
 - **A position that cannot be sold has to go somewhere.** Rejecting unpriceable
   fills was correct, but it left capital locked in holdings that could never
   exit — on the current panel, **1068 deferred exits**. `specs.md` sets the

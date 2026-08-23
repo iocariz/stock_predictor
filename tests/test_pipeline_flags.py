@@ -205,3 +205,28 @@ def test_deploy_enforces_the_holding_rule_horizon() -> None:
     traded on a 63-day exit."""
     assert _flag(_cmd("deploy"), "--expected-horizon") == "63"
     assert _flag(_cmd("deploy", HORIZON="21"), "--expected-horizon") == "21"
+
+
+# ---------------------------------------------------------------------------
+# Scores and execution prices come from the same run
+# ---------------------------------------------------------------------------
+
+
+def test_training_writes_the_execution_panel_it_will_be_measured_against() -> None:
+    """Nothing used to produce one, so the backtest paired whatever stale
+    parquet was on disk — or silently fell back to forward-filled prices."""
+    assert _flag(_cmd("train-full"), "--execution-prices-path") is not None
+
+
+def test_the_backtest_consumes_the_panel_training_wrote() -> None:
+    written = _flag(_cmd("train-full"), "--execution-prices-path")
+    consumed = _flag(_cmd("backtest"), "--execution-prices")
+    assert written == consumed, "the producer and consumer must agree on the path"
+
+
+def test_the_execution_panel_path_moves_with_the_override() -> None:
+    env = {"EXECUTION_PRICES": "artifacts/other.parquet"}
+    assert _flag(_cmd("train-full", **env), "--execution-prices-path") == \
+        "artifacts/other.parquet"
+    assert _flag(_cmd("backtest", **env), "--execution-prices") == \
+        "artifacts/other.parquet"

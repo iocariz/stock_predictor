@@ -12,12 +12,17 @@ Example:
 from __future__ import annotations
 
 import argparse
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from stock_predictor.bundle import (
+    describe_bundle,
+    validate_execution_panel,
+)
 from stock_predictor.delisting import (
     DelistingPolicy,
     disposal_value,
@@ -1206,6 +1211,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "for classifiers and unbounded for --rank-objective models",
     )
     p.add_argument(
+        "--allow-price-mismatch",
+        action="store_true",
+        dest="allow_price_mismatch",
+        help="Proceed when the execution panel does not cover the scored panel. "
+        "Off by default: a stale or absent panel silently changes results",
+    )
+    p.add_argument(
         "--delisting-proceeds",
         type=Path,
         default=None,
@@ -1352,6 +1364,19 @@ def main() -> None:
         exec_px = pd.read_parquet(args.execution_prices)
         print(f"Execution prices from {args.execution_prices} "
               f"({exec_px.shape[0]} dates x {exec_px.shape[1]} tickers)")
+    # Nothing used to produce an execution panel, so the backtest paired
+    # whatever stale parquet was on disk -- or, absent one, fell back to
+    # forward-filled prices, which on rank-hold is +17.28% against +22.95%.
+    findings = validate_execution_panel(scored, exec_px)
+    if findings:
+        print(describe_bundle(findings))
+        if not args.allow_price_mismatch:
+            sys.exit(
+                "Refusing to backtest against a mismatched execution panel. "
+                "Regenerate it with train-sp500 --execution-prices-path, or "
+                "pass --allow-price-mismatch to proceed."
+            )
+        print("  --allow-price-mismatch: proceeding anyway.")
     kwargs = {"execution_prices": exec_px}
     if args.delisting_proceeds is not None:
         path = args.delisting_proceeds
