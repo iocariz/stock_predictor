@@ -555,8 +555,14 @@ def _align_benchmark_to_nav(
 
 def _prepare_scored(
     scored_df: pd.DataFrame,
-) -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame]:
-    """Validate a scored panel and return (df, trading_dates, ffilled price panel)."""
+    execution_prices: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame, pd.DataFrame]:
+    """Validate a scored panel.
+
+    Returns ``(df, trading_dates, price_panel, actual)`` where *price_panel* is
+    forward-filled for lookup and *actual* marks which of those prices were
+    really observed rather than carried forward.
+    """
     if scored_df is None or len(scored_df) == 0:
         raise ValueError("scored_df is empty")
 
@@ -577,10 +583,32 @@ def _prepare_scored(
     if len(trading_dates) < 2:
         raise ValueError("Need at least two distinct dates in scored_df")
 
-    price_panel = df.pivot_table(
+    raw = df.pivot_table(
         index="date", columns="ticker", values="adj_close", aggfunc="first",
-    ).sort_index().ffill()
-    return df, trading_dates, price_panel
+    ).sort_index()
+
+    # The scored panel is point-in-time filtered, so a holding that leaves the
+    # index simply stops having rows. Forward-filling then carries its last
+    # in-index price forward indefinitely and fills execute against it. The PIT
+    # filter decides what may be *selected*; it does not decide what a holding
+    # is *worth*. An unfiltered execution panel, when supplied, prices the fills.
+    if execution_prices is not None and len(execution_prices):
+        ex = execution_prices.copy()
+        ex.index = pd.DatetimeIndex(ex.index).normalize()
+        ex = ex.reindex(raw.index)
+        # One pass: assigning column by column across a wide panel fragments
+        # the frame and is quadratic in the number of tickers.
+        shared = raw.columns.intersection(ex.columns)
+        extra = ex.columns.difference(raw.columns)
+        if len(shared):
+            raw[shared] = raw[shared].where(raw[shared].notna(), ex[shared])
+        if len(extra):
+            raw = pd.concat([raw, ex[extra]], axis=1)
+
+    # Which prices are real, so a fill against a carried-forward one is counted
+    # rather than passing silently.
+    actual = raw.notna() & (raw > 0)
+    return df, trading_dates, raw.ffill(), actual
 
 
 def _vix_percentile_by_date(df: pd.DataFrame, config: BacktestConfig) -> pd.Series | None:
@@ -702,9 +730,13 @@ def run_backtest(
     config: BacktestConfig = BacktestConfig(),
     *,
     provider: object | None = None,
+    execution_prices: pd.DataFrame | None = None,
 ) -> BacktestResult:
     """Run the weekly-rebalance cohort backtest on walk-forward scored data."""
-    df, trading_dates, price_panel = _prepare_scored(scored_df)
+    df, trading_dates, price_panel, actual = _prepare_scored(
+        scored_df, execution_prices,
+    )
+    stale_fills = 0
     _validate_weighting(df, config)
     risk_free = _resolve_risk_free(df, config)
 
@@ -751,11 +783,23 @@ def run_backtest(
             cash -= capital
 
     # Daily NAV
+    # A leg priced from a forward-filled quote is a guess, not a fill. On the
+    # real panel this hit 40 of 840 legs before the row-role fix, 10 after.
+    for c in cohorts:
+        for t in c.tickers:
+            for when in (c.entry_date, c.exit_date):
+                if not (t in actual.columns and when in actual.index
+                        and bool(actual.at[when, t])):
+                    stale_fills += 1
+
     daily_nav = _build_daily_nav(cohorts, trading_dates, price_panel, config)
     daily_returns = daily_nav.pct_change().dropna()
 
     # Metrics
     metrics = _compute_metrics(daily_nav, cohorts, risk_free_rate=risk_free)
+    legs = sum(len(c.tickers) for c in cohorts) * 2
+    metrics["stale_fills"] = float(stale_fills)
+    metrics["stale_fill_rate"] = float(stale_fills / legs) if legs else 0.0
 
     start_date = pd.Timestamp(trading_dates[0])
     end_date = pd.Timestamp(trading_dates[-1])
@@ -787,6 +831,7 @@ def run_rank_hold_backtest(
     config: BacktestConfig = BacktestConfig(),
     *,
     provider: object | None = None,
+    execution_prices: pd.DataFrame | None = None,
 ) -> BacktestResult:
     """Rank-based holding: buy the top-N, sell only when a name's rank decays.
 
@@ -806,7 +851,10 @@ def run_rank_hold_backtest(
     and comparisons work unchanged; ``metrics["total_costs"]`` additionally
     includes entry costs of positions still open at the end.
     """
-    df, trading_dates, price_panel = _prepare_scored(scored_df)
+    df, trading_dates, price_panel, actual = _prepare_scored(
+        scored_df, execution_prices,
+    )
+    stale_fills = 0
     _validate_weighting(df, config)
     risk_free = _resolve_risk_free(df, config)
     n_days = len(trading_dates)
@@ -838,6 +886,9 @@ def run_rank_hold_backtest(
         # Shared with the live path so a simulated exit and a real one agree.
         for t in sorted(rank_exits(set(open_pos), ranked_tickers, config.exit_rank)):
             pos = open_pos.pop(t)
+            if not (t in actual.columns and entry_date in actual.index
+                    and bool(actual.at[entry_date, t])):
+                stale_fills += 1
             px = float(price_panel.at[entry_date, t]) if t in price_panel.columns else float("nan")
             if px != px or px <= 0:
                 px = pos["raw_entry"]  # last resort: exit flat
@@ -940,6 +991,10 @@ def run_rank_hold_backtest(
 
     metrics = _compute_metrics(daily_nav, closed, risk_free_rate=risk_free)
     metrics["total_costs"] = total_costs  # include open positions' entry costs
+    metrics["stale_fills"] = float(stale_fills)
+    metrics["stale_fill_rate"] = (
+        float(stale_fills / (2 * len(closed))) if closed else 0.0
+    )
     metrics["n_open_positions"] = float(len(open_pos))
 
     start_date = pd.Timestamp(trading_dates[0])
@@ -1040,6 +1095,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "for classifiers and unbounded for --rank-objective models",
     )
     p.add_argument(
+        "--execution-prices",
+        type=Path,
+        default=None,
+        dest="execution_prices",
+        help="Wide parquet of adj_close (dates x tickers) covering the FULL "
+        "download, used to price fills. The scored panel is point-in-time "
+        "filtered, so a holding that leaves the index stops having rows and "
+        "its last in-index price is carried forward — fills then execute "
+        "against a stale quote. See metrics['stale_fill_rate']",
+    )
+    p.add_argument(
         "--min-cross-section",
         type=int,
         default=None,
@@ -1130,7 +1196,13 @@ def main() -> None:
         risk_free_rate=args.rf_rate,
     )
     backtest_fn = run_rank_hold_backtest if args.mode == "rank-hold" else run_backtest
-    result = backtest_fn(scored, config, provider=bt_provider)
+    exec_px = None
+    if args.execution_prices is not None:
+        exec_px = pd.read_parquet(args.execution_prices)
+        print(f"Execution prices from {args.execution_prices} "
+              f"({exec_px.shape[0]} dates x {exec_px.shape[1]} tickers)")
+    result = backtest_fn(scored, config, provider=bt_provider,
+                         execution_prices=exec_px)
     print_report(result)
 
     if args.plots_dir is not None:

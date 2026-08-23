@@ -199,6 +199,15 @@ def print_report(result: BacktestResult) -> None:
         f"slippage={c.slippage_bps:.0f}bps, max_cohorts={c.max_overlapping_cohorts}"
         f"{band}{floor}{rf}{comm}"
     )
+    stale = float(m.get("stale_fills", 0.0) or 0.0)
+    if stale:
+        # A leg priced from a carried-forward quote is a guess, not a fill.
+        print(
+            f"Warning: {int(stale)} fill(s) "
+            f"({m.get('stale_fill_rate', 0.0):.2%} of legs) were priced from a "
+            "forward-filled quote — the holding had no row on that date. Pass "
+            "--execution-prices with the full download to price them properly."
+        )
     print()
     print(f"{'':20s} {'STRATEGY':>{col_w}s}  {bench_hdr:>{col_w}s}")
     print("-" * (22 + 2 + col_w * 2 + 2))

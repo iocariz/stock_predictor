@@ -762,6 +762,38 @@ notebooks/               Exploration + full pipeline
   names, the panel predates the fix and its most recent quarter is fiction.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
 
+- **Selection and valuation are different questions.** The backtest priced fills
+  from the *scored* panel, which is point-in-time filtered, and forward-filled it
+  unconditionally. A holding that left the index — or was delisted, halted, or
+  had a data gap — stopped having rows, and its last in-index price was carried
+  forward indefinitely. Exits executed against that stale quote; rank-hold fell
+  back to the entry price outright.
+
+  Measured on `artifacts/final/wf_control.parquet`: **40 of 840 cohort legs had
+  no row at their exit date, affecting 11 of 56 cohorts.** DELL exited at a
+  forward-filled 237.64 against a true 456.79 — 92% on one leg.
+
+  | panel | execution source | stale legs | rate | CAGR | Sharpe |
+  |---|---|---|---|---|---|
+  | pre-row-role | scored panel | 41 | 2.44% | +12.21% | 0.39 |
+  | pre-row-role | real prices | 1 | 0.06% | **+13.58%** | 0.43 |
+  | current | scored panel | 10 | 0.60% | +17.27% | 0.52 |
+  | current | real prices | 2 | 0.12% | +17.35% | 0.52 |
+
+  **It cost 1.37pp of CAGR on the old panel and 0.08pp on the current one** —
+  the row-role fix had already removed most of it, since restoring the tail gave
+  most holdings a real row again. The mechanism remained, and per-leg error is
+  unbounded.
+
+  `--execution-prices` takes the full unfiltered download and prices fills from
+  it; `run_pipeline.sh backtest` passes `artifacts/hybrid_adj_close.parquet`
+  automatically when present. Every run reports `stale_fills` and
+  `stale_fill_rate`, and the report warns when any fill was a guess.
+
+  **Two legs remain unpriceable even with full history** — genuinely delisted
+  with no recoverable quote. Those need explicit delisting proceeds, which are
+  still not modelled.
+
 - **The live universe is the model's own draw, not a reseed.** Training samples
   the union of tickers overlapping the whole training window; inference used to
   resample a 400-day window with the same seed. **The same seed drawing from a
