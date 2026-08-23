@@ -139,6 +139,25 @@ def save_state(state: PortfolioState, path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def valid_quote(prices: dict[str, float], ticker: str) -> float | None:
+    """A tradable price for *ticker*, or ``None``.
+
+    Zero is a placeholder rather than a price and NaN divides badly, so neither
+    counts. This is deliberately stricter than :func:`mark_price`: marking a
+    position is an estimate, executing against it is not.
+    """
+    px = prices.get(ticker)
+    if px is None:
+        return None
+    try:
+        px = float(px)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(px) or px <= 0:
+        return None
+    return px
+
+
 def mark_price(position: Position, prices: dict[str, float]) -> float:
     """Live quote, else the last one seen, else entry price.
 
@@ -283,8 +302,15 @@ def generate_orders(
     # Sell orders for expirations
     sell_orders: list[Order] = []
     cash_from_sells = 0.0
+    deferred: list[Position] = []
     for p in expiring:
-        px = prices.get(p.ticker, p.entry_price)
+        # A missing quote is not a fill. Falling back to entry_price invented
+        # proceeds -- 10 shares entered at $100 and last seen at $40 sold for
+        # $1,000 -- so the exit is deferred and the position retained instead.
+        px = valid_quote(prices, p.ticker)
+        if px is None:
+            deferred.append(p)
+            continue
         sell_px = px * (1 - slippage_bps / 10_000)
         sell_comm = p.shares * commission_per_share + commission_per_order
         sell_orders.append(Order(
@@ -292,6 +318,13 @@ def generate_orders(
             price=sell_px, cohort_id=p.cohort_id, reason="expiration",
         ))
         cash_from_sells += p.shares * sell_px - sell_comm
+
+    if deferred:
+        print(
+            f"  Deferring {len(deferred)} exit(s) with no quote; positions "
+            f"retained: {', '.join(sorted(p.ticker for p in deferred))}"
+        )
+    expiring = [p for p in expiring if p not in deferred]
 
     # How many cohort slots are available after removing expired ones?
     # Expired cohort IDs are no longer active
@@ -489,13 +522,19 @@ def generate_orders_rank_hold(
 
     sell_orders: list[Order] = []
     kept_positions: list[Position] = []
+    deferred: list[Position] = []
     cash_from_sells = 0.0
     new_history = list(state.history)
     for p in state.positions:
         if p.ticker not in exiting:
             kept_positions.append(p)
             continue
-        px = prices.get(p.ticker, p.entry_price)
+        px = valid_quote(prices, p.ticker)
+        if px is None:
+            # No quote, no sale: keep it and try again next run.
+            deferred.append(p)
+            kept_positions.append(p)
+            continue
         sell_px = px * (1 - slippage_bps / 10_000)
         sell_comm = p.shares * commission_per_share + commission_per_order
         sell_orders.append(Order(
@@ -509,6 +548,12 @@ def generate_orders_rank_hold(
             "tickers": [p.ticker],
             "pnl": round(p.shares * sell_px - sell_comm - p.shares * p.entry_price, 2),
         })
+
+    if deferred:
+        print(
+            f"  Deferring {len(deferred)} exit(s) with no quote; positions "
+            f"retained: {', '.join(sorted(p.ticker for p in deferred))}"
+        )
 
     # Buys: fill open slots from the top of the ranking
     buy_orders: list[Order] = []
