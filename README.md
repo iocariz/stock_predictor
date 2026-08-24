@@ -762,6 +762,38 @@ notebooks/               Exploration + full pipeline
   names, the panel predates the fix and its most recent quarter is fiction.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
 
+- **Evaluation and production refit are separate stages.** Three faults, all
+  from the same change:
+
+  - Training writes `model_candidate.pkl`; the scheduled workflow uploaded
+    `artifacts/model.pkl` with `if-no-files-found: error`. **On a clean runner
+    the monthly job failed** — the artifact it wanted was never produced.
+  - `TRAIN_END` defaulted to a **fixed** `2024-12-31`, so every scheduled retrain
+    refit the same window. The cron ran monthly and learned nothing.
+  - Purging removes another `horizon` sessions before `test_start`, so the
+    model's last real training signal was **2024-10-01** while its metadata
+    reported 2024-12-31 — and the freshness gate read the metadata, understating
+    staleness by a whole quarter.
+
+  ```bash
+  ./scripts/run_pipeline.sh evaluate   # holds a window back; the walk-forward measures it
+  ./scripts/run_pipeline.sh refit      # trains through the newest labellable date
+  ./scripts/run_pipeline.sh deploy     # validated promotion
+  ```
+
+  They want different windows and cannot be the same run: one holds data back to
+  measure, the other uses everything it can label. `--train-through-latest`
+  ignores `--train-end` and fits through `HORIZON` sessions behind the last
+  session, so a refit's window **moves**. On the current panel that is
+  2026-05-18 against a fixed 2024-12-31 — **407 extra training sessions.**
+  The walk-forward in a refit run measures nothing, by construction; use
+  `evaluate` for that.
+
+  Metadata now records **`fitted_through`** as well as `train_end`, and the
+  freshness gate prefers it. Scheduled runs set `REFIT=1`, and the workflow
+  uploads the whole bundle — candidate model, its metadata, the scores, and the
+  execution panel — so an artifact can be verified rather than just downloaded.
+
 - **Scores and execution prices come from the same run, and it is checked.**
   `run_pipeline.sh` defaulted `EXECUTION_PRICES` to a parquet path and used it
   *if the file existed* — but **nothing in the package, the scripts, or CI ever

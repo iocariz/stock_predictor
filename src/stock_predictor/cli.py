@@ -114,6 +114,15 @@ def parse_args() -> argparse.Namespace:
         help="Save walk-forward scored panel to this parquet path",
     )
     p.add_argument(
+        "--train-through-latest",
+        action="store_true",
+        dest="train_through_latest",
+        help="Ignore --train-end and fit through the newest date a label can "
+        "exist for (HORIZON sessions behind the last session). For a "
+        "production refit: the walk-forward in such a run measures nothing, "
+        "so evaluate with a held-back window separately",
+    )
+    p.add_argument(
         "--execution-prices-path",
         type=Path,
         default=None,
@@ -269,6 +278,22 @@ def build_run_extra(
     }
 
 
+def latest_trainable_end(sessions, horizon: int):
+    """Newest session that can still carry a label.
+
+    A label looks *horizon* sessions ahead, so the most recent trainable date
+    is that far behind the last session available. A scheduled refit that
+    hard-codes a date instead learns nothing new each month.
+    """
+    idx = pd.DatetimeIndex(sessions).sort_values()
+    if len(idx) <= horizon:
+        raise ValueError(
+            f"not enough history: {len(idx)} sessions for a {horizon}-session "
+            "label horizon"
+        )
+    return pd.Timestamp(idx[-(horizon + 1)])
+
+
 def build_model_meta(
     args: argparse.Namespace,
     *,
@@ -279,6 +304,7 @@ def build_model_meta(
     manual_params: dict,
     n_trees: int,
     universe: list[str] | None = None,
+    fitted_through=None,
     importance: dict,
     pr_auc: float,
     roc_auc: float,
@@ -294,6 +320,13 @@ def build_model_meta(
     """
     return {
         "feature_cols": feature_cols,
+        # What the model actually learned through. Purging removes `horizon`
+        # sessions before test_start, so this trails train_end by a quarter at
+        # horizon 63 -- and the freshness gate was reading the optimistic date.
+        "fitted_through": (
+            str(pd.Timestamp(fitted_through).date())
+            if fitted_through is not None else None
+        ),
         "objective": objective,
         "label_target": args.label_target,
         "optuna_metric": tune_metric,
@@ -412,6 +445,15 @@ def main() -> None:
             )
             repro.register_snapshot(manifest, "execution_prices", meta)
             repro.write_manifest(snapshot_root / "manifest.json", manifest)
+
+    if args.train_through_latest:
+        # A scheduled refit that hard-codes train_end learns nothing new.
+        train_end = str(latest_trainable_end(adj_close.index, horizon).date())
+        test_start = str(
+            pd.Timestamp(train_end) + pd.Timedelta(days=1)
+        )[:10]
+        print(f"  Refit mode: training through {train_end} "
+              f"(newest labellable session)")
 
     labeled = build_labeled_panel(adj_close, None, horizon, threshold)
     print(f"  Positive rate: {labeled['target_5pct'].mean():.4%}")
@@ -593,6 +635,7 @@ def main() -> None:
             manual_params=manual_params,
             n_trees=n_trees,
             universe=sample,
+            fitted_through=train["date"].max() if len(train) else None,
             importance=feature_importances(model, feature_cols),
             pr_auc=pr_auc,
             roc_auc=roc_auc,

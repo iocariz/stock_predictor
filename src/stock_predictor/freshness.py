@@ -62,7 +62,10 @@ def _model_age_years(meta: dict, as_of: pd.Timestamp) -> float | None:
     ``None`` means the age could not be established, which is a finding in its
     own right — an unknown age is not the same as a fresh one.
     """
-    raw = meta.get("train_end")
+    # fitted_through is what the model actually learned through; train_end is
+    # only what was requested, and purging pushes the two apart by the label
+    # horizon. Reading train_end understated staleness by a whole quarter.
+    raw = meta.get("fitted_through") or meta.get("train_end")
     if raw is None:
         return None
     stamp = pd.to_datetime(raw, errors="coerce")
@@ -99,7 +102,8 @@ def check_freshness(
         elif age > policy.max_model_age_years:
             out.append(Finding(
                 "model_age",
-                f"model trained to {model_meta.get('train_end')} — "
+                f"model fitted through "
+                f"{model_meta.get('fitted_through') or model_meta.get('train_end')} — "
                 f"{age:.2f} years before this run",
                 age, policy.max_model_age_years,
             ))

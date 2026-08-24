@@ -29,6 +29,15 @@ cd "$ROOT"
 # the thing the model was trained to predict cannot drift apart: trading a
 # 63-day signal on a 10-day exit is the mismatch this file exists to prevent.
 : "${HORIZON:=63}"
+# Evaluation holds data back so the walk-forward has something to measure.
+# A production refit does not: it should learn through the newest labellable
+# date, which moves. A fixed TRAIN_END made every scheduled retrain refit the
+# same window, so the monthly cron learned nothing new.
+: "${TRAIN_END:=2024-12-31}"
+: "${TEST_START:=2025-01-01}"
+# refit mode: train through the newest date a label can exist for, which is
+# HORIZON sessions behind the last session available.
+: "${REFIT:=0}"
 : "${OBJECTIVE:=rank}"
 # Tuning never improved the traded end of the ranking under any objective or
 # metric tried (README: "The label mattered; tuning did not"), and it costs
@@ -85,14 +94,19 @@ strategy_flags() {
 
 train_full() {
   local -a opts=(--horizon "$HORIZON" --wf-top-k "$TOP_N")
+  if [[ "$REFIT" == "1" ]]; then
+    # Everything labellable; no held-back window, so the walk-forward in this
+    # run is not a measurement. Use `evaluate` for that.
+    opts+=(--train-through-latest)
+  fi
   [[ "$OBJECTIVE" == "rank" ]] && opts+=(--rank-objective)
   [[ "$USE_OPTUNA" == "0" ]] && opts+=(--no-optuna)
   [[ "$SKIP_EARNINGS" == "1" ]] && opts+=(--skip-earnings)
   ${DRY_RUN:+echo} uv run train-sp500 \
     --provider "$TRAIN_PROVIDER" \
     --start "${TRAIN_START:-2010-01-01}" \
-    --train-end "${TRAIN_END:-2024-12-31}" \
-    --test-start "${TEST_START:-2025-01-01}" \
+    --train-end "$TRAIN_END" \
+    --test-start "$TEST_START" \
     --sample-n "$SAMPLE_N" \
     --optuna-trials "$OPTUNA_TRIALS" \
     --ts-cv-splits "$TS_CV_SPLITS" \
@@ -162,6 +176,8 @@ Commands:
                  writes MODEL + WF_SCORES, runs in-process backtest)
   backtest       backtest-sp500 on WF_SCORES → PLOTS_DIR
   predict        Daily predict (dry run unless: predict --confirm)
+  evaluate       Train with a held-back window: the walk-forward measures it
+  refit          Train through the newest labellable date: the model to deploy
   deploy         Promote CANDIDATE to MODEL after validation (--force overrides)
 
 Environment (examples):
@@ -184,6 +200,8 @@ EOF
 
 case "${1:-}" in
   train-full) train_full ;;
+  evaluate)   REFIT=0 train_full ;;
+  refit)      REFIT=1 train_full ;;
   backtest)   backtest_only ;;
   deploy)     shift; deploy_model "$@" ;;
   predict)    predict_daily "${2:-}" ;;
