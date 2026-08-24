@@ -186,6 +186,8 @@ def score_universe(
     panel: pd.DataFrame,
     feature_cols: list[str],
     score_date: pd.Timestamp | None = None,
+    *,
+    price_col: str = "adj_close",
 ) -> pd.DataFrame:
     """Score the universe on a single date. Returns (ticker, prob, adj_close)."""
     if score_date is None:
@@ -204,9 +206,18 @@ def score_universe(
         panel = _forward_fill_date_level_features(panel, feature_cols, score_date)
         day = panel[panel["date"] == score_date].copy()
 
-    # Drop rows where the ticker itself has no data (all ticker-level features
-    # are NaN).  LightGBM handles partial NaN natively (e.g. missing VIX) so
-    # we only require that the ticker has price-derived features.
+    # A price is required to rank. Dropping only rows whose ticker-level
+    # features are *all* NaN kept unpriced names alive, because date-level
+    # calendar features like days_to_fomc are not in MACRO_FEATURE_COLS and so
+    # counted as ticker-level. Such a row was then ranked, entered
+    # latest_prices as NaN, and inflated the width min_cross_section measures.
+    px = pd.to_numeric(day[price_col], errors="coerce")
+    day = day[px.notna() & (px > 0)]
+    if day.empty:
+        raise ValueError(f"No usable price on {score_date}")
+
+    # Beyond the price, LightGBM handles partial NaN natively (e.g. a missing
+    # VIX), so a name is kept as long as it has some price-derived feature.
     ticker_cols = [c for c in feature_cols if c not in MACRO_FEATURE_COLS and c != "sector"]
     day = day.dropna(subset=ticker_cols, how="all")
     if day.empty:
@@ -740,7 +751,11 @@ def main() -> None:
             force=args.force_rebalance,
         )
     else:
-        picks = scored.head(args.top_n * 2).to_dict("records")  # extra candidates in case some filtered
+        # The complete cross-section, as rank-hold already does. Truncating to
+        # top_n * 2 broke every rule that reads beyond the head: a rank_offset
+        # of 10 on 10 rows selects nothing, and 10 rows sits below the
+        # cross-section floor of rank_offset + top_n.
+        picks = scored.to_dict("records")
         orders, new_state = generate_orders(
             state, picks, latest_prices,
             top_n=args.top_n,
