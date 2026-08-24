@@ -177,8 +177,14 @@ def test_walk_forward_early_stops_on_the_aligned_metric() -> None:
     )
     assert len(metrics) > 0
     assert len(scores) > 0
-    # Models that stop at one or two trees are untrained, not tuned.
-    assert metrics["n_trees"].min() >= 3, metrics["n_trees"].tolist()
+    # The regression was a *systematic* collapse, so that is what is asserted.
+    # A single fold stopping at 2 trees on synthetic noise is legitimate: the
+    # old `min >= 3` floor passed only because best_iteration_ was being
+    # incremented by one, and this fold was really stopping at 2 all along.
+    # (On this panel the misaligned metric gives *higher* counts, so a floor
+    # never discriminated alignment here in the first place.)
+    assert metrics["n_trees"].max() >= 10, metrics["n_trees"].tolist()
+    assert metrics["n_trees"].mean() >= 5, metrics["n_trees"].tolist()
 
 
 def test_final_rank_model_early_stops_on_the_aligned_metric() -> None:

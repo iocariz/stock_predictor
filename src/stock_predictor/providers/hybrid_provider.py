@@ -20,7 +20,9 @@ restarting.
 
 from __future__ import annotations
 
+import json
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -33,6 +35,21 @@ from stock_predictor.providers.yfinance_provider import (
 
 TIINGO_PRICES = "https://api.tiingo.com/tiingo/daily/{ticker}/prices"
 DEFAULT_CACHE = Path("artifacts/tiingo_cache")
+
+CACHE_SCHEMA_VERSION = 1
+"""Bump when the cached frame's columns or adjustment basis change, so old
+files are refetched instead of silently mixing two schemas in one panel."""
+
+MANIFEST_NAME = "_manifest.json"
+"""Records the range each cached file was *asked* for, which is the only thing
+that answers "does this file cover the new request?". The data's own range
+cannot: a ticker that IPO'd in 2015 legitimately has no 2010 rows, and
+comparing against requested dates alone would refetch it forever."""
+
+DEFAULT_EMPTY_TTL_DAYS = 7
+"""How long a known miss is trusted. Caching misses stops a rate-limited run
+from re-asking for names Tiingo does not have; caching them forever turns one
+bad afternoon into a permanently absent ticker."""
 
 
 class HybridProvider:
@@ -62,6 +79,7 @@ class HybridProvider:
         self.pause_s = pause_s
         self._yf = yf_provider or YFinanceProvider(batch_size=batch_size)
         self._session = None
+        self.empty_ttl_days = DEFAULT_EMPTY_TTL_DAYS
 
     # -- Tiingo ------------------------------------------------------------
 
@@ -111,20 +129,75 @@ class HybridProvider:
             return pd.DataFrame()
         return pd.DataFrame()
 
+    # -- cache bookkeeping -------------------------------------------------
+
+    def _manifest_path(self) -> Path:
+        return self.cache_dir / MANIFEST_NAME
+
+    def _read_manifest(self) -> dict:
+        path = self._manifest_path()
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}          # a corrupt manifest costs a refetch, not a crash
+
+    def _write_manifest(self, manifest: dict) -> None:
+        try:
+            self._manifest_path().write_text(json.dumps(manifest, indent=2, default=str))
+        except OSError:
+            pass               # the cache is an optimisation; failing to note it is not fatal
+
+    def _cache_is_usable(
+        self, ticker: str, cached: Path, df: pd.DataFrame, start: str, end: str,
+        manifest: dict,
+    ) -> bool:
+        """Does this cached file answer *this* request?
+
+        The old key was the ticker alone, so the first call's range became the
+        answer to every later one: ask for 2010-2026 after a 2024-only fetch
+        and you silently got two years of history for a sixteen-year request.
+        """
+        entry = manifest.get(ticker)
+        if entry is not None:
+            if int(entry.get("schema", 0)) != CACHE_SCHEMA_VERSION:
+                return False
+            if entry.get("empty"):
+                fetched = pd.to_datetime(entry.get("fetched"), errors="coerce", utc=True)
+                if pd.isna(fetched):
+                    return False
+                age = datetime.now(timezone.utc) - fetched.to_pydatetime()
+                return age < timedelta(days=self.empty_ttl_days)
+            return (
+                str(entry.get("start", "9999")) <= str(start)
+                and str(entry.get("end", "0000")) >= str(end)
+            )
+        # Legacy file written before the manifest existed. Its own dates are a
+        # conservative lower bound on what was requested, so a sub-range of the
+        # data it holds is still safe to serve.
+        if df.empty:
+            return False
+        dates = pd.to_datetime(df["date"])
+        return dates.min() <= pd.Timestamp(start) and dates.max() >= pd.Timestamp(end)
+
     def fetch_missing(
         self, tickers: list[str], start: str, end: str | None,
     ) -> dict[str, pd.DataFrame]:
         """Cached per-ticker fetch. Stops cleanly when the rate limit is hit."""
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        end_key = str(end) if end else datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        manifest = self._read_manifest()
         out: dict[str, pd.DataFrame] = {}
         fetched = 0
         for i, t in enumerate(sorted(set(tickers)), 1):
             cached = self.cache_dir / f"{t}.parquet"
             if cached.exists():
                 df = pd.read_parquet(cached)
-                if not df.empty:
-                    out[t] = df
-                continue
+                if self._cache_is_usable(t, cached, df, str(start), end_key, manifest):
+                    if not df.empty:
+                        out[t] = df
+                    continue
             try:
                 df = self._fetch_one(t, start, end)
             except TiingoRateLimited:
@@ -133,6 +206,14 @@ class HybridProvider:
                       "Cached so far; re-run to resume.")
                 break
             df.to_parquet(cached, index=False)  # cache misses too, to avoid re-asking
+            manifest[t] = {
+                "start": str(start),
+                "end": end_key,
+                "empty": bool(df.empty),
+                "schema": CACHE_SCHEMA_VERSION,
+                "fetched": datetime.now(timezone.utc).isoformat(),
+            }
+            self._write_manifest(manifest)
             fetched += 1
             if not df.empty:
                 out[t] = df

@@ -23,11 +23,23 @@ from stock_predictor.deploy import PromotionError, promote_model
 SESSIONS = pd.bdate_range(end="2026-08-21", periods=300)
 
 
+class _Scorer:
+    """Minimal stand-in for a fitted model.
+
+    It has to expose a scoring method: promotion refuses an object that
+    unpickles cleanly but cannot score a cross-section, which is what a bare
+    ``object()`` is.
+    """
+
+    def predict(self, X):        # noqa: N803 - sklearn's parameter name
+        return [0.0] * len(X)
+
+
 def _write(path: Path, *, horizon: int = 63, train_end: str = "2024-12-31",
            features=("ret_1d",)) -> Path:
     meta = {"feature_cols": list(features), "horizon": horizon,
             "train_end": train_end, "objective": "rank"}
-    path.write_bytes(pickle.dumps({"model": object(), "meta": meta}))
+    path.write_bytes(pickle.dumps({"model": _Scorer(), "meta": meta}))
     path.with_suffix(".meta.json").write_text(json.dumps(meta))
     return path
 
@@ -94,7 +106,9 @@ def test_an_unloadable_candidate_is_refused(tmp_path) -> None:
 
 def test_a_candidate_without_the_required_metadata_is_refused(tmp_path) -> None:
     bad = tmp_path / "candidate.pkl"
-    bad.write_bytes(pickle.dumps({"model": object(), "meta": {"horizon": 63}}))
+    meta = {"horizon": 63}          # no feature_cols
+    bad.write_bytes(pickle.dumps({"model": _Scorer(), "meta": meta}))
+    bad.with_suffix(".meta.json").write_text(json.dumps(meta))
     with pytest.raises(PromotionError, match="feature_cols"):
         promote_model(bad, tmp_path / "model.pkl",
                       archive_dir=tmp_path / "archive", sessions=SESSIONS)

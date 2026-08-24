@@ -812,7 +812,11 @@ def monthly_walk_forward(
                 **es_kw,
             )
             bi = es_model.best_iteration_
-            n_trees = int(bi) + 1 if bi is not None else int(es_model.n_estimators_)
+            # best_iteration_ is already the effective tree count -- it equals
+            # n_estimators_ and booster_.num_trees(). The +1 that used to be
+            # here handed the production refit one tree the early-stopping
+            # split never justified. See tests/test_reported_defects.py.
+            n_trees = int(bi) if bi is not None else int(es_model.n_estimators_)
             train_sorted = train_df.sort_values(date_col, kind="stable")
             g_full = train_sorted.groupby(date_col).size().to_numpy()
             final_rank = lgb.LGBMRanker(
@@ -859,7 +863,7 @@ def monthly_walk_forward(
                 # No early stop triggered: use every tree the ES model trained.
                 n_trees = int(clf.n_estimators_)
             else:
-                n_trees = int(bi) + 1
+                n_trees = int(bi)
             neg_f, pos_f = int((train_df[target_col] == 0).sum()), int((train_df[target_col] == 1).sum())
             if neg_f == 0 or pos_f == 0:
                 continue
@@ -1516,7 +1520,7 @@ def train_final_model(
         **({"eval_metric": "average_precision"} if not es_kw else es_kw),
     )
     best_iter = es_model.best_iteration_
-    n_trees = int(best_iter) + 1 if best_iter is not None else params.get("n_estimators", 500)
+    n_trees = int(best_iter) if best_iter is not None else params.get("n_estimators", 500)
     print(f"Best iteration (from val split): {n_trees}")
 
     y_train = train["target_5pct"]
@@ -1582,7 +1586,7 @@ def train_final_rank_model(
         **es_kw,
     )
     best_iter = es_model.best_iteration_
-    n_trees = int(best_iter) + 1 if best_iter is not None else int(es_model.n_estimators_)
+    n_trees = int(best_iter) if best_iter is not None else int(es_model.n_estimators_)
     label = {"ndcg": f"NDCG@{eval_k}", "topn_excess": f"top-{eval_k} excess",
              "topn_ir": f"top-{eval_k} excess IR"}[metric]
     print(f"Best iteration (from val split, {label}): {n_trees}")
