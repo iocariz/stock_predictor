@@ -762,6 +762,40 @@ notebooks/               Exploration + full pipeline
   names, the panel predates the fix and its most recent quarter is fiction.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
 
+- **A missing bar is not a delisting, and a 2-session return is not a label.**
+  Terminal-label construction treated *any* ticker whose last quote preceded the
+  panel end as delisted, and replaced every missing forward return before it
+  with the return to that final quote. Measured on the real panel:
+
+  ```
+  rows given a terminal label: 9,453 (0.340%)
+  effective horizon: min 1 | median 33 | max 2059   (all used as 63-session targets)
+    146 labels measured a single session
+  tickers labelled delisted: 155
+    ...still current index members: 3   AVB, EA, EQR
+  ```
+
+  **AVB, EA and EQR are current S&P 500 members** — the same three the recent-
+  coverage guard flags for vendor gaps — being labelled as delisted. And the
+  2059-session maximum is not a terminal case at all: it is an *interior* gap,
+  where a row years earlier is handed a return to the final quote.
+  `specs.md:587` is explicit that missing terminal vendor data is not
+  automatically a delisting.
+
+  Terminal labels now require **evidence** — the same `(ticker, date, proceeds)`
+  channel the delisting policy uses — and the filled window is bounded to the
+  last `horizon` sessions before the event, so a label measures what it claims
+  to. Without evidence the tail stays **censored**.
+
+  `terminal_fill="assume_delisted"` restores the old heuristic for reproducing
+  older panels. It is unsound and named so.
+
+  **This reintroduces survivorship bias in the labels** until corporate-action
+  evidence is supplied: departed members' terminal declines and buyout premiums
+  are no longer in the training targets. On the real panel it removes 9,140
+  labels (98.51% → 98.18% of rows). That bias is now *stated* rather than
+  papered over with a guess about which of 155 tickers actually died.
+
 - **Evaluation and production refit are separate stages.** Three faults, all
   from the same change:
 

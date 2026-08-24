@@ -68,7 +68,8 @@ def test_unlabelled_rows_carry_no_target() -> None:
 def test_untradable_rows_are_excluded_entirely() -> None:
     px = _prices()
     px.loc[DATES[20:], "ALSO"] = np.nan
-    panel = build_labeled_panel(px, None, horizon=10, threshold=0.05)
+    panel = build_labeled_panel(px, None, horizon=10, threshold=0.05,
+        terminal_fill="assume_delisted")
     also = panel[panel.ticker == "ALSO"]
     assert also["date"].max() == DATES[19], "no price, no row"
     assert also["is_tradable"].all()
@@ -79,7 +80,8 @@ def test_a_delisted_name_keeps_a_label_through_its_final_quarter() -> None:
     labelled to the price a holder would realize."""
     px = _prices()
     px.loc[DATES[25:], "ALSO"] = np.nan
-    panel = build_labeled_panel(px, None, horizon=10, threshold=0.05)
+    panel = build_labeled_panel(px, None, horizon=10, threshold=0.05,
+        terminal_fill="assume_delisted")
     also = panel[panel.ticker == "ALSO"]
     labelled = also[also["has_label"]]
     assert labelled["date"].max() == DATES[23], "final session carries no return"

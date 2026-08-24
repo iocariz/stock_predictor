@@ -895,38 +895,73 @@ def monthly_walk_forward(
 
 
 def _terminal_forward_returns(
-    long: pd.DataFrame, horizon: int, *, price_col: str = "adj_close",
+    long: pd.DataFrame,
+    horizon: int,
+    *,
+    price_col: str = "adj_close",
+    evidence: dict[str, tuple[pd.Timestamp, float]] | None = None,
+    assume_delisted: bool = False,
 ) -> pd.Series:
-    """Forward return to a delisted name's final quote, for its last rows.
+    """Forward returns for the sessions that end a holding.
 
     A ``horizon``-session forward return does not exist for the final sessions
-    of a company that stops trading, so those rows are dropped — removing
-    precisely the terminal decline (or buyout premium) that makes departed
-    members worth having in the panel at all. Here they are measured to the
-    last price a holder could actually have realized.
+    of a company that stops trading, and dropping those rows removes precisely
+    the terminal decline (or buyout premium) that makes departed members worth
+    keeping. But *inferring* the delisting from a missing bar is not sound, and
+    the earlier version of this did exactly that. Measured on the real panel it
+    labelled 155 tickers as delisted, three of which — AVB, EA and EQR — are
+    current index members with vendor gaps, and it produced labels measuring
+    anywhere from 1 to 2059 sessions while presenting all of them as
+    ``horizon``-session targets. ``specs.md:587``: missing terminal vendor data
+    is not automatically a delisting.
 
-    Only applied to names whose history ends **before** the panel does. A
-    ticker still trading on the last session has a genuinely unknown future,
-    and its tail must stay censored.
+    With *evidence* — a verified corporate action giving a date and a per-share
+    value — the terminal window is labelled properly, and only rows within one
+    ``horizon`` of the event, so the label measures what it claims to.
+
+    *assume_delisted* restores the old heuristic for reproducing older panels.
+    It is unsound and named accordingly.
     """
-    panel_end = long["date"].max()
     out = pd.Series(np.nan, index=long.index, dtype=float)
-    for _, g in long.groupby("ticker", sort=False):
+    evidence = evidence or {}
+    if not evidence and not assume_delisted:
+        return out
+
+    panel_end = long["date"].max()
+    for ticker, g in long.groupby("ticker", sort=False):
         priced = g.dropna(subset=[price_col])
         if priced.empty:
             continue
-        last_date = priced["date"].max()
-        if last_date >= panel_end:
-            continue  # still trading: the future is unknown, not censored
-        last_px = float(priced.loc[priced["date"] == last_date, price_col].iloc[0])
-        # Strictly before the final quote: on the last session itself there is
-        # no holding period left, so a 0% "return" would be an artefact rather
-        # than an observation.
-        window = priced[priced["date"] < last_date]
-        need = window["fwd_ret"].isna() if "fwd_ret" in window.columns else None
-        idx = window.index if need is None else window.index[need.to_numpy()]
-        px = long.loc[idx, price_col].astype(float)
-        out.loc[idx] = last_px / px - 1.0
+
+        known = evidence.get(str(ticker))
+        if known is not None:
+            event_date, proceeds = known
+        elif assume_delisted:
+            last_date = priced["date"].max()
+            if last_date >= panel_end:
+                continue  # still trading: unknown future, not a delisting
+            event_date = last_date
+            proceeds = float(
+                priced.loc[priced["date"] == last_date, price_col].iloc[0]
+            )
+        else:
+            continue
+
+        # Bounded to one horizon before the event. Beyond that a row either has
+        # a genuine horizon-length return already, or its gap is interior and
+        # inventing a multi-year "forward return" for it is worse than leaving
+        # it censored.
+        # The last `horizon` of the ticker's own sessions before the event, so
+        # a filled label measures at most what it claims to. Bounding by
+        # calendar days instead would let a 10-session target carry a
+        # 24-session return.
+        window = priced[priced["date"] < event_date].tail(horizon)
+        if "fwd_ret" in window.columns:
+            window = window[window["fwd_ret"].isna()]
+        if window.empty:
+            continue
+        px = long.loc[window.index, price_col].astype(float)
+        out.loc[window.index] = proceeds / px - 1.0
     return out
 
 
@@ -936,7 +971,8 @@ def build_labeled_panel(
     horizon: int,
     threshold: float,
     *,
-    terminal_fill: bool = True,
+    terminal_fill: bool | str = True,
+    delisting_evidence=None,
     drop_unlabeled: bool = False,
 ) -> pd.DataFrame:
     """Stack wide adj_close into long format, compute forward return & label.
@@ -955,8 +991,19 @@ def build_labeled_panel(
     long["fwd_ret"] = long.groupby("ticker", group_keys=False)["adj_close"].transform(
         lambda s: s.shift(-horizon) / s - 1.0
     )
+    if terminal_fill not in (True, False, "assume_delisted"):
+        raise ValueError(
+            "terminal_fill must be True, False, or 'assume_delisted', got "
+            f"{terminal_fill!r}"
+        )
     if terminal_fill:
-        fill = _terminal_forward_returns(long, horizon)
+        from stock_predictor.delisting import load_proceeds
+
+        fill = _terminal_forward_returns(
+            long, horizon,
+            evidence=load_proceeds(delisting_evidence),
+            assume_delisted=(terminal_fill == "assume_delisted"),
+        )
         long["fwd_ret"] = long["fwd_ret"].fillna(fill)
 
     # Three different questions, previously answered by one dropna:
