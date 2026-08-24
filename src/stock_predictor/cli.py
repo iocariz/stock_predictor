@@ -19,7 +19,6 @@ from stock_predictor.pit import (
     SP500_STINTS_URL,
     current_members,
     load_sp500_stints,
-    tickers_overlapping_window,
 )
 from stock_predictor.training import (
     LABEL_TARGETS,
@@ -42,7 +41,7 @@ from stock_predictor.training import (
 from stock_predictor.universe import (
     DEFAULT_MIN_COVERAGE,
     check_download_coverage,
-    sample_tickers,
+    split_universes,
     universe_hash,
 )
 
@@ -383,9 +382,22 @@ def main() -> None:
 
     print("Loading PIT stints & ticker universe…")
     stints = load_sp500_stints(SP500_STINTS_URL)
-    tickers = tickers_overlapping_window(stints, start, end)
+    # Three universes, three purposes. Sampling the download-window population
+    # let names admitted to the index AFTER training compete for slots with the
+    # historical ones, so future membership decided which past companies the
+    # model saw -- at --sample-n 500, 352 of the historical names differed.
+    split = split_universes(
+        stints, start=start, train_end=train_end, end=end,
+        sample_n=args.sample_n, seed=args.seed,
+    )
+    tickers = split.download
+    sample = split.download
+    fitted_universe = split.fitted
     print(f"  Union tickers overlapping window: {len(tickers)}")
-    sample = sample_tickers(tickers, args.sample_n, seed=args.seed)
+    if split.joined_after_training:
+        print(f"  {len(split.joined_after_training)} ticker(s) joined after "
+              f"{train_end}; downloaded for recent cross-sections and pricing, "
+              "but not part of the fitted universe")
     if len(sample) < len(tickers):
         print(
             f"  Downloading {len(sample)} tickers "
@@ -634,7 +646,7 @@ def main() -> None:
             optuna_best=optuna_best,
             manual_params=manual_params,
             n_trees=n_trees,
-            universe=sample,
+            universe=fitted_universe,
             fitted_through=train["date"].max() if len(train) else None,
             importance=feature_importances(model, feature_cols),
             pr_auc=pr_auc,
