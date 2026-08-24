@@ -93,6 +93,7 @@ def market_exposure(
     benchmark: "pd.Series | np.ndarray",
     *,
     overlap: int = 1,
+    risk_free_rate: float = 0.0,
 ) -> dict[str, float]:
     """Beta and annualised alpha of *portfolio* against *benchmark*.
 
@@ -102,7 +103,8 @@ def market_exposure(
     description hides. Measuring it is the only way to know.
 
     Standard errors are Newey--West, so overlapping holding periods do not
-    inflate significance.
+    inflate significance. Pass *risk_free_rate* to specify CAPM correctly; the
+    default of 0 reproduces a raw-return regression.
     """
     y = np.asarray(getattr(portfolio, "to_numpy", lambda: portfolio)(), dtype=float)
     x = np.asarray(getattr(benchmark, "to_numpy", lambda: benchmark)(), dtype=float)
@@ -112,6 +114,14 @@ def market_exposure(
            "alpha_ann": float("nan"), "alpha_t": float("nan")}
     if n < 3 or not np.isfinite(y).all() or not np.isfinite(x).all():
         return nan
+    # CAPM is specified on *excess* returns: (r_s - r_f) = a + b (r_b - r_f).
+    # Regressing raw on raw leaves the intercept absorbing r_f * (1 - beta) --
+    # on the real panel, +3.19%/yr of alpha that is really just the cash rate
+    # on the un-invested fraction. It vanishes at beta 1, which is why a
+    # long-only book barely showed it.
+    rf_daily = risk_free_rate / 252.0
+    y = y - rf_daily
+    x = x - rf_daily
     design = np.column_stack([np.ones(n), x])
     lags = max(auto_hac_lags(n), max(0, overlap - 1))
     try:

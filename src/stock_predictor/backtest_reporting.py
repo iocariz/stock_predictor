@@ -50,6 +50,7 @@ def relative_metrics(
     bench_nav: pd.Series,
     *,
     overlap_days: int = 1,
+    risk_free_rate: float = 0.0,
 ) -> dict[str, float]:
     """Active-return statistics of a strategy vs a benchmark.
 
@@ -58,6 +59,9 @@ def relative_metrics(
     book, rebalanced daily). Returns annualized active return, tracking
     error, information ratio, CAPM beta/alpha, up/down capture, and the
     overlay equity's total return and max drawdown.
+
+    CAPM is specified on **excess** returns; pass *risk_free_rate* (annual) to
+    net out the cash rate. The default of 0 reproduces a raw-return regression.
 
     ``alpha_t`` is a **Newey–West HAC** t-statistic. A cohort strategy holding
     positions for *overlap_days* sessions produces strongly autocorrelated
@@ -92,8 +96,13 @@ def relative_metrics(
     alpha_t = float("nan")
     alpha_t_iid = float("nan")
     lags = max(_auto_hac_lags(len(rs)), max(int(overlap_days), 1) - 1)
-    y = rs.to_numpy(dtype=float)
-    x = np.column_stack([np.ones(len(rb)), rb.to_numpy(dtype=float)])
+    # CAPM on *excess* returns. Regressing raw on raw leaves the intercept
+    # absorbing r_f * (1 - beta): on the long-short book that was +3.19%/yr of
+    # alpha that is really the cash rate on the un-invested fraction, and it
+    # moved the t-statistic across the conventional bar.
+    rf_daily = float(risk_free_rate or 0.0) / 252.0
+    y = rs.to_numpy(dtype=float) - rf_daily
+    x = np.column_stack([np.ones(len(rb)), rb.to_numpy(dtype=float) - rf_daily])
     if var_b > 0 and len(y) > 2:
         coef, cov = _hac_ols(y, x, lags)
         alpha_daily = float(coef[0])
@@ -143,9 +152,11 @@ def print_relative_report(
     bench_label: str,
     *,
     overlap_days: int = 1,
+    risk_free_rate: float = 0.0,
 ) -> None:
     """Print the active-vs-benchmark section (no-op if series don't overlap)."""
-    rm = relative_metrics(strategy_nav, bench_nav, overlap_days=overlap_days)
+    rm = relative_metrics(strategy_nav, bench_nav, overlap_days=overlap_days,
+                          risk_free_rate=risk_free_rate)
     if not rm:
         return
     print(f"ACTIVE vs {bench_label} (long strategy / short benchmark, daily rebalance)")
@@ -236,7 +247,7 @@ def print_report(result: BacktestResult) -> None:
     if has_bench and len(result.spy_daily_nav) > 1:
         print_relative_report(
             result.daily_nav, result.spy_daily_nav, c.benchmark_ticker or "benchmark",
-            overlap_days=c.holding_days,
+            overlap_days=c.holding_days, risk_free_rate=rf_used,
         )
 
 

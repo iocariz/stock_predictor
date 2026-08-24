@@ -240,6 +240,51 @@ def add_days_since_last_earnings(df: pd.DataFrame, earn_map: dict[str, np.ndarra
     return pd.concat(pieces, ignore_index=True)
 
 
+def per_date_metrics(
+    panel: pd.DataFrame,
+    *,
+    k: int,
+    score_col: str = "prob",
+    target_col: str = "target_5pct",
+    fwd_col: str = "fwd_ret",
+    date_col: str = "date",
+) -> dict[str, float]:
+    """Evaluate the way the strategy decides: one cross-section at a time.
+
+    PR-AUC, ROC-AUC and "weekly precision@k" pooled every ticker-date
+    observation, so a week's top *k* could all come from one session. That is
+    the wrong unit twice over: the book is chosen **per signal date**, and
+    LambdaRank scores are only comparable *within* a group, so pooling ranks
+    numbers that were never on the same scale.
+
+    Dates thinner than *k* are skipped rather than counted as perfect.
+    """
+    work = panel.dropna(subset=[target_col])
+    prec, ics, excess = [], [], []
+    for _, g in work.groupby(date_col, sort=True):
+        if len(g) < k:
+            continue
+        prec.append(precision_at_k(g[target_col], g[score_col].to_numpy(), k=k))
+        # Against the forward *return*, not the binary target: Spearman with
+        # 5 ones and 45 zeros is capped by ties well below 1 even for a
+        # perfect ranking, which measures the label's shape, not the signal.
+        if fwd_col in g.columns and g[score_col].nunique() > 1:
+            paired = g[[score_col, fwd_col]].dropna()
+            if len(paired) > 2 and paired[fwd_col].nunique() > 1:
+                ics.append(
+                    paired[score_col].corr(paired[fwd_col], method="spearman")
+                )
+        if fwd_col in g.columns and g[fwd_col].notna().any():
+            top = g.nlargest(k, score_col)[fwd_col]
+            excess.append(float(top.mean() - g[fwd_col].mean()))
+    return {
+        "precision_at_k": float(np.nanmean(prec)) if prec else float("nan"),
+        "rank_ic": float(np.nanmean(ics)) if ics else float("nan"),
+        "top_k_excess": float(np.nanmean(excess)) if excess else float("nan"),
+        "n_dates": float(len(prec)),
+    }
+
+
 def precision_at_k(y_true: pd.Series, y_scores: np.ndarray, k: int) -> float:
     if len(y_true) < k:
         return float("nan")
@@ -853,29 +898,33 @@ def monthly_walk_forward(
         if len(graded) == 0:
             continue
         y_graded = graded[target_col].astype(float)
+        # Primary: the unit the strategy actually decides in. One cross-section
+        # per signal date, aggregated across dates.
+        per_date = per_date_metrics(
+            graded, k=top_k, score_col="prob", target_col=target_col,
+            fwd_col="fwd_ret", date_col=date_col,
+        )
+        # Secondary, and only ever that: pooled AUCs rank every ticker-date in
+        # the month against every other. A ranker's scores are calibrated
+        # within a group, not across groups, so the pooled number grades a
+        # comparison the model was never asked to make.
         pr = average_precision_score(y_graded, graded["prob"])
         try:
             roc = roc_auc_score(y_graded, graded["prob"])
         except ValueError:
             roc = float("nan")
-        weekly_p = (
-            graded.assign(week=lambda x: x[date_col].dt.to_period("W"))
-            .groupby("week", observed=True)
-            .apply(
-                lambda g: precision_at_k(g[target_col], g["prob"].values, k=top_k),
-                include_groups=False,
-            )
-        )
-        w_mean = float(np.nanmean(weekly_p.values)) if len(weekly_p) else float("nan")
         records.append(
             {
                 "month": str(p),
                 "train_end": train_df[date_col].max().date(),
                 "n_train": len(train_df),
                 "n_test": len(graded),
-                "pr_auc": pr,
-                "roc_auc": roc,
-                "mean_weekly_precision_at_k": w_mean,
+                "precision_at_k": per_date["precision_at_k"],
+                "rank_ic": per_date["rank_ic"],
+                "top_k_excess": per_date["top_k_excess"],
+                "n_signal_dates": per_date["n_dates"],
+                "pr_auc_pooled": pr,
+                "roc_auc_pooled": roc,
                 "pos_rate_test": float(y_graded.mean()),
                 "n_trees": n_trees,
             }
@@ -1561,47 +1610,56 @@ def evaluate_test_set(
     test: pd.DataFrame,
     feature_cols: list[str],
 ) -> tuple[float, float, pd.Series]:
-    """Score the test set and return PR-AUC, ROC-AUC, and weekly precision@10.
+    """Score the test set and return pooled AUCs plus per-date precision@10.
 
     Works with either LGBMClassifier (probabilities) or LGBMRanker (raw
     ranking scores) — both are monotone signals for the same binary target.
+
+    Precision is measured **per signal date**. It used to be measured per
+    *week*, which picked the best ten rows out of five sessions — all ten could
+    come from one day. That is not a book anyone could have held, and it grades
+    scores across dates that a ranker never calibrated against each other.
     """
     y_test = test["target_5pct"]
     y_prob = model_scores(model, test[feature_cols])
     pr_auc = average_precision_score(y_test, y_prob)
     roc_auc = roc_auc_score(y_test, y_prob)
-    print(f"PR-AUC:  {pr_auc:.4f} (baseline {y_test.mean():.4f})")
-    print(f"ROC-AUC: {roc_auc:.4f}")
+    print(f"PR-AUC (pooled):  {pr_auc:.4f} (baseline {y_test.mean():.4f})")
+    print(f"ROC-AUC (pooled): {roc_auc:.4f}")
 
-    weekly_precision = (
-        test.assign(prob=y_prob)
-        .assign(week=lambda df: pd.to_datetime(df["date"]).dt.to_period("W"))
-        .groupby("week", observed=True)
+    scored = test.assign(prob=y_prob, date=pd.to_datetime(test["date"]))
+    daily_precision = (
+        scored.groupby("date", observed=True)
         .apply(
-            lambda g: precision_at_k(g["target_5pct"], g["prob"].values, k=10),
+            lambda g: precision_at_k(g["target_5pct"], g["prob"].values, k=10)
+            if len(g) >= 10 else float("nan"),
             include_groups=False,
         )
+        .dropna()
     )
-    print(f"Mean weekly Precision@10: {weekly_precision.mean():.4f}")
-    return pr_auc, roc_auc, weekly_precision
+    summary = per_date_metrics(scored, k=10)
+    print(f"Mean per-date Precision@10: {summary['precision_at_k']:.4f}")
+    print(f"Mean per-date rank IC:      {summary['rank_ic']:.4f}")
+    print(f"Mean per-date top-10 excess return: {summary['top_k_excess']:.4%}")
+    return pr_auc, roc_auc, daily_precision
 
 
 def save_eval_plots(
     plots_dir: Path,
-    weekly_precision: pd.Series,
+    daily_precision: pd.Series,
     y_test: pd.Series,
     feature_cols: list[str],
     model: lgb.LGBMClassifier,
 ) -> None:
-    """Save weekly precision@10 and feature importance PNGs."""
+    """Save per-date precision@10 and feature importance PNGs."""
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     fig, ax = plt.subplots(figsize=(13, 3))
-    weekly_precision.plot(ax=ax, title="Weekly Precision@10 (test)")
+    daily_precision.plot(ax=ax, title="Per-date Precision@10 (test)")
     ax.axhline(y_test.mean(), color="red", linestyle="--", label="baseline")
     ax.legend()
     plt.tight_layout()
-    fig.savefig(plots_dir / "weekly_precision_at_10.png", dpi=120)
+    fig.savefig(plots_dir / "precision_at_10.png", dpi=120)
     plt.close(fig)
 
     importance = pd.Series(
