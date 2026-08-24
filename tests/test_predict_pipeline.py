@@ -20,7 +20,12 @@ import pandas as pd
 import pytest
 
 from stock_predictor import predict as P
-from stock_predictor.portfolio import init_state, load_state, save_state
+from stock_predictor.portfolio import (
+    Position,
+    init_state,
+    load_state,
+    save_state,
+)
 
 N_TICKERS = 30
 DATES = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=320)
@@ -408,3 +413,104 @@ def test_an_unpriceable_holding_is_deferred_not_sold(rig, capsys) -> None:
     assert after.cash == 0.0, "credited cash for a fill that never happened"
     assert [p.ticker for p in after.positions] == ["NOSUCH"]
     assert "defer" in capsys.readouterr().out.lower()
+
+
+# ---------------------------------------------------------------------------
+# A held name that stops printing must not be sold at its last historical quote
+# ---------------------------------------------------------------------------
+
+
+GAPPED = "T07"
+
+
+class _GappingProvider(_FakeProvider):
+    """Everything prints except one held name, dark for the last 3 sessions.
+
+    This is what a delisting, a halt or a vendor dropout looks like from here.
+    """
+
+    def download_equity_ohlcv(self, tickers, start, end):
+        adj, vol = super().download_equity_ohlcv(tickers, start, end)
+        if GAPPED in adj.columns:
+            adj.loc[adj.index[-3:], GAPPED] = np.nan
+        return adj, vol
+
+
+def _rig_holding_gapped(rig):
+    """Seed an expired position in the name that goes dark."""
+    model_path, state_path = rig
+    state = load_state(state_path)
+    held = Position(
+        ticker=GAPPED, shares=10, entry_price=100.0,
+        entry_date=str(DATES[-40].date()),
+        expiry_date=str(DATES[-5].date()),      # already expired: exit is due
+        cohort_id="seed", last_price=41.0,
+    )
+    save_state(
+        type(state)(cash=state.cash, positions=[held],
+                    **{k: v for k, v in vars(state).items()
+                       if k not in ("cash", "positions")}),
+        state_path,
+    )
+    return model_path, state_path
+
+
+def _run_gapped(rig, *extra: str):
+    model_path, state_path = _rig_holding_gapped(rig)
+    argv = ["predict-sp500", "--model", str(model_path), "--state", str(state_path),
+            "--sample-n", str(N_TICKERS), "--skip-earnings", "--no-macro-merge",
+            "--min-coverage", "0", "--top-n", "5", *extra]
+    with (
+        patch("sys.argv", argv),
+        patch.object(P, "get_provider", return_value=_GappingProvider()),
+        patch.object(P, "load_sp500_stints", return_value=_stints()),
+        patch("stock_predictor.training.download_sector_map", return_value=_sectors()),
+    ):
+        P.main()
+    return state_path
+
+
+def test_no_cash_is_credited_for_an_unfilled_exit(rig) -> None:
+    """The defect, stated in the only unit that matters: ffill made the missing
+    quote executable before valid_quote() could refuse it, so an expired
+    holding "sold" at a price from three sessions ago and credited cash that
+    was never received.
+
+    Asserted on cash rather than on the printed report: the report's wording is
+    cosmetic, the money is not.
+    """
+    model_path, state_path = _rig_holding_gapped(rig)
+    before = load_state(state_path).cash
+
+    argv = ["predict-sp500", "--model", str(model_path), "--state", str(state_path),
+            "--sample-n", str(N_TICKERS), "--skip-earnings", "--no-macro-merge",
+            "--min-coverage", "0", "--top-n", "5", "--confirm",
+            # Gate entries so the only cash movement under test is the exit.
+            # Exits are deliberately never gated by this floor.
+            "--min-cross-section", "9999"]
+    with (
+        patch("sys.argv", argv),
+        patch.object(P, "get_provider", return_value=_GappingProvider()),
+        patch.object(P, "load_sp500_stints", return_value=_stints()),
+        patch("stock_predictor.training.download_sector_map", return_value=_sectors()),
+    ):
+        P.main()
+
+    after = load_state(state_path)
+    assert after.cash == pytest.approx(before), (
+        "an exit with no quote must not move cash"
+    )
+
+
+def test_the_operator_is_told_which_holding_has_no_quote(rig, capsys) -> None:
+    _run_gapped(rig)
+    err = capsys.readouterr().err
+    assert GAPPED in err
+    assert "no quote" in err.lower()
+    assert "stale" in err.lower()
+
+
+def test_the_unquoted_position_is_retained(rig) -> None:
+    state_path = _run_gapped(rig, "--confirm")
+    after = load_state(state_path)
+    assert GAPPED in [p.ticker for p in after.positions], "you still own it"

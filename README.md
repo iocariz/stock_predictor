@@ -1089,6 +1089,35 @@ notebooks/               Exploration + full pipeline
   *sizes*; it would have stayed silent at 500 versus 500, which is why the draw
   itself is now recorded.
 
+- **One price dictionary answered three different questions.** The live path
+  built `latest_prices` from `adj_close.ffill().iloc[-1]` and handed the same
+  dict to the kill switch, the staleness warning, and order generation. Forward
+  fill is *correct* for the first (`specs.md:248` — a holding that stops being
+  quoted must still be markable, or it falls back to its entry price and can
+  never show a loss the kill switch could see) and forbidden for the third
+  (`specs.md:405`).
+
+  So the defect hid inside a line that looked right. A holding last printed at
+  $41 three sessions ago reached order generation as a clean $41:
+
+  ```
+  latest raw quote      : nan
+  quote passed to orders: 41.0
+  valid_quote() sees    : 41.0
+  stale_positions()     : ()        # dict is populated, so nothing to report
+  ```
+
+  `valid_quote()` was added earlier precisely to refuse missing quotes, and it
+  never saw one — the forward fill had already replaced it upstream. The
+  earlier fix hardened the *consumer* and left the *producer* filling. Both
+  halves were needed.
+
+  [`quotes.py`](src/stock_predictor/quotes.py) now separates the roles at the
+  source: `execution_quotes` returns the final session only and omits anything
+  that did not print, `valuation_marks` carries prices forward for NAV and the
+  kill switch, and `quote_ages` / `last_quote_dates` make the gap a number with
+  a date on it rather than something inferred from a dict's shape.
+
 - **Evaluation pooled observations at the wrong unit.** PR-AUC and ROC-AUC
   ranked every ticker-date in a month against every other, and "weekly
   Precision@10" picked ten rows out of a *whole week* — all ten could come from
