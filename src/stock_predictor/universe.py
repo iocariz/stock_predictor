@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -226,3 +227,63 @@ def universe_drift(
         "training_no_longer_current": float(len(train - now)),
         "coverage_of_current": float(len(tradable) / len(now)) if now else 0.0,
     }
+
+
+@dataclass(frozen=True)
+class UniverseSplit:
+    """Three universes, three purposes.
+
+    They were one. The universe was formed over the whole download window and
+    then sampled, so with a capped ``--sample-n`` names admitted to the index
+    *after* the training period competed for slots with the historical ones and
+    future membership decided which past companies the model ever saw. On the
+    real stints at ``--sample-n 500``, **352 of the historical names differ**
+    depending on which population is drawn from.
+    """
+
+    fitted: list[str]
+    """Drawn from the population that existed during training, so the draw
+    depends only on information available then. This is what the model learns
+    and what a live run may trade."""
+    download: list[str]
+    """Everything fetched. Deliberately wider: recent cross-sections and
+    execution prices both need names outside the training window."""
+    joined_after_training: list[str]
+    """In the download and not the fit, reported so the gap is visible."""
+
+    def scoring(self, current: Iterable[str]) -> list[str]:
+        """Fitted names the index still holds — what a live run may trade."""
+        return sorted(set(self.fitted) & {str(c) for c in current})
+
+
+def split_universes(
+    stints: pd.DataFrame,
+    *,
+    start: str,
+    train_end: str,
+    end: str | None,
+    sample_n: int,
+    seed: int,
+) -> UniverseSplit:
+    """Separate the download, fitted and scoring universes.
+
+    The cap applies to the *training-window* population. Later entrants are
+    added to the download afterwards rather than competing for sample slots, so
+    adding a name that joined the index in 2026 cannot change which 2010 company
+    the model trained on.
+    """
+    from stock_predictor.pit import tickers_overlapping_window
+
+    training_pop = tickers_overlapping_window(stints, start, train_end)
+    if not training_pop:
+        raise ValueError(
+            f"no tickers in the training window {start} .. {train_end}"
+        )
+    fitted = sorted(sample_tickers(training_pop, sample_n, seed=seed))
+    everything = tickers_overlapping_window(stints, start, end)
+    later = sorted(set(everything) - set(training_pop))
+    return UniverseSplit(
+        fitted=fitted,
+        download=sorted(set(fitted) | set(later)),
+        joined_after_training=later,
+    )

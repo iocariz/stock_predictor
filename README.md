@@ -762,6 +762,44 @@ notebooks/               Exploration + full pipeline
   names, the panel predates the fix and its most recent quarter is fiction.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
 
+- **Which historical companies train must not depend on who joined later.** The
+  universe was formed over the whole *download* window and then sampled, so with
+  a capped `--sample-n` names admitted to the index **after** the training
+  period competed for slots with the historical ones — future membership decided
+  which past companies the model ever saw. That is transductive leakage.
+
+  ```
+  download-window universe (start -> today)      : 845
+  training-window universe (start -> 2024-12-31) : 813
+  joined only after train_end                    :  32
+
+  sample_n=500   historical names drawn: download-pool 478 | training-pool 500
+                                         differ by 352
+  sample_n=10000 differ by 0
+  ```
+
+  **At `--sample-n 500`, 352 of the historical names differed.** Uncapped it is
+  inert, which is why it went unnoticed — the deployed configuration draws
+  everything.
+
+  Three universes now, three purposes:
+
+  | universe | what it is |
+  |---|---|
+  | **download** | everything fetched — deliberately wider, since recent cross-sections and execution prices both need names outside the training window |
+  | **fitted** | drawn from the population that existed *during* training, so the draw depends only on information available then |
+  | **scoring** | fitted names the index still holds — what a live run may trade |
+
+  The cap applies to the **fitted** draw; later entrants are added to the
+  download afterwards rather than competing for sample slots. Verified on the
+  real stints: the fitted draw is now identical whether or not 19 further months
+  of index membership are visible.
+
+  Model metadata records the **fitted** universe, so a live run cannot trade a
+  name the final model never trained on. A `refit` moves `train_end` forward and
+  brings recent entrants into the fit, which is what the monthly schedule is
+  for.
+
 - **A missing bar is not a delisting, and a 2-session return is not a label.**
   Terminal-label construction treated *any* ticker whose last quote preceded the
   panel end as delisted, and replaced every missing forward return before it
