@@ -762,6 +762,32 @@ notebooks/               Exploration + full pipeline
   names, the panel predates the fix and its most recent quarter is fiction.
 - **Not investment advice.** Past backtests and metrics do not guarantee future results.
 
+- **You cannot rank what you cannot price, or what you did not pass.** Two
+  faults in the live path, both in how the cross-section reached selection.
+
+  `score_universe` dropped a row only when **all** its ticker-level features
+  were NaN. Calendar features such as `days_to_fomc` are date-level constants
+  but are not in `MACRO_FEATURE_COLS`, so they counted as ticker-level and kept
+  an **unpriced row alive**. It was then ranked, entered `latest_prices` as
+  `NaN`, and inflated the cross-section width `min_cross_section` measures. A
+  finite positive price is now required before ranking; zero and negative do not
+  count either.
+
+  Fixed-hold passed only `scored.head(top_n * 2)` to the shared selection —
+  a leftover from before the execution core did the filtering. Every rule that
+  reads beyond the head broke:
+
+  ```
+  top_n=5, rank_offset=10
+    full cross-section      -> T10, T11, T12, T13, T14
+    head(top_n * 2) = 10 rows -> nothing
+  ```
+
+  Ten rows cannot survive an offset of ten, and ten sits below the cross-section
+  floor of `rank_offset + top_n`. A score floor applied to a pre-truncated list
+  is likewise a different basket. Rank-hold already passed the full ranking;
+  fixed-hold now does too.
+
 - **Which historical companies train must not depend on who joined later.** The
   universe was formed over the whole *download* window and then sampled, so with
   a capped `--sample-n` names admitted to the index **after** the training
