@@ -1133,13 +1133,32 @@ def run_rank_hold_backtest(
     )
 
 
-# Re-export reporting functions so `from stock_predictor.backtest import print_report` still works.
-from stock_predictor.backtest_reporting import (  # noqa: E402, F401
-    plot_backtest,
-    plot_strategy_comparison,
-    print_report,
-    print_strategy_comparison,
+# Re-export reporting functions so `from stock_predictor.backtest import
+# print_report` still works.
+#
+# Resolved lazily (PEP 562). backtest_reporting imports *this* module for
+# BacktestResult and daily_risk_free, so importing it eagerly here made the
+# cycle order-dependent: `import stock_predictor.backtest` happened to work,
+# `import stock_predictor.backtest_reporting` raised ImportError in a fresh
+# interpreter. Import order is not meant to be part of the public API.
+_REPORTING_EXPORTS = (
+    "plot_backtest",
+    "plot_strategy_comparison",
+    "print_report",
+    "print_strategy_comparison",
 )
+
+
+def __getattr__(name: str):
+    if name in _REPORTING_EXPORTS:
+        from stock_predictor import backtest_reporting
+
+        return getattr(backtest_reporting, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted([*globals(), *_REPORTING_EXPORTS])
 
 
 def _load_scored(path: Path) -> pd.DataFrame:
@@ -1387,6 +1406,16 @@ def main() -> None:
             kwargs["delisting_proceeds"] = ev
         else:
             print("  (cohort engine has fixed exits; evidence is unused)")
+    # Imported here, not at module scope: backtest_reporting imports this
+    # module, so a top-level import would reinstate the cycle. Module-level
+    # __getattr__ serves external callers but not this module's own globals.
+    from stock_predictor.backtest_reporting import (
+        plot_backtest,
+        plot_strategy_comparison,
+        print_report,
+        print_strategy_comparison,
+    )
+
     result = backtest_fn(scored, config, provider=bt_provider, **kwargs)
     print_report(result)
 

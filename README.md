@@ -1151,7 +1151,10 @@ notebooks/               Exploration + full pipeline
 
   **The alpha survives the correction, but with less room.** t falls from +2.90
   to +2.12 unhedged and +2.05 hedged: still past the conventional bar, no longer
-  comfortably. Single sample, single schedule offset, one asset class.
+  comfortably. Single sample, single schedule offset, one asset class — and
+  selected from a large search, so see
+  [Descriptive, not confirmatory](#descriptive-not-confirmatory). These are not
+  confirmatory p-values.
 
   **Hedging still made this sample worse**: Sharpe 0.97 → 0.73, and max drawdown
   slightly *deeper* at −17.5%. Over 2019–2026 the +0.25 beta was a tailwind, and
@@ -1358,7 +1361,13 @@ notebooks/               Exploration + full pipeline
   Return IC is **+0.0374 (HAC t +1.64)** and the long-short decile spread is
   **+17.5%/yr gross**. On strictly non-overlapping samples — the only honest
   test at this horizon, since consecutive daily observations share 62 of 63
-  days — that is **t = +2.31 across 30 independent periods**.
+  days — that is **t = +2.31 across 30 non-overlapping periods**.
+
+  Those periods are non-overlapping *in time*, which is what makes the standard
+  error honest about autocorrelation. It is not what "independent" usually
+  implies, and an earlier revision used that word. See
+  [Descriptive, not confirmatory](#descriptive-not-confirmatory) below before
+  reading any t-statistic here as evidence.
 
   Traded at 1.0x gross through [`long_short.py`](src/stock_predictor/long_short.py)
   with 5bps slippage, per-name borrow and financing charged, the median across
@@ -1368,6 +1377,37 @@ notebooks/               Exploration + full pipeline
   even at 20%/yr it is +6.0% (Sharpe 0.18) — the earlier "decays to zero by
   ~10%" claim was measured on a different panel and does not hold here. That
   curve is a single schedule, not the offset median, so read it as a shape.
+
+  <a id="descriptive-not-confirmatory"></a>
+  ### Every t-statistic here is descriptive, not confirmatory
+
+  HAC standard errors correct for **autocorrelation**. Nothing in this repo
+  corrects for **multiplicity**, and the search was not small. Counted from the
+  code and this README, all run against substantially the same 2019–2026 panel:
+
+  | searched | how many |
+  |---|---|
+  | `grid_search_sharpe.py` default grid (top-N × holding × rebalance day × score floor × VIX filter) | 12, and all five axes take comma-separated lists |
+  | `backtest_sweep.py` named grids (`default`, `vix`, `hold`) | 8 + 8 + 7 |
+  | rebalance-schedule offsets | 21 |
+  | `hedge_beta` levels | 4 |
+  | depth profile top-N levels | 4 |
+  | borrow assumptions (flat, per-name, 10%, 20%) | 4 |
+  | horizons (10 vs 63 — "the biggest lever found") | 2 |
+  | objectives (`rank`, `binary`) × tuning metrics (NDCG, PR-AUC, top-N excess) | 6 |
+  | Optuna trials per run, over the full hyperparameter space | configurable |
+
+  Reporting the best of a search as though it were a single pre-registered test
+  is how a backtest flatters itself, and the fact that each individual number
+  above was measured honestly does not fix it. A t of +2.31 or +2.12 is roughly
+  what the *maximum* of a few dozen correlated noise draws looks like.
+
+  So: **read every t-statistic in this README as descriptive of this panel, not
+  as evidence the effect will persist.** Nothing here has been through a locked
+  holdout, a nested walk-forward where selection happens inside each fold, or a
+  multiple-testing correction. Until one of those exists, the honest summary is
+  that the sign is stable across many reasonable choices — which is worth
+  something, and is a much weaker claim than significance.
 
   Three things keep this short of a strategy.
 

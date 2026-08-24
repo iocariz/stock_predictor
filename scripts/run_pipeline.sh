@@ -89,7 +89,8 @@ strategy_flags() {
   [[ -n "$MIN_PROB" ]] && f+=(--min-prob "$MIN_PROB")
   [[ -n "$MIN_CROSS_SECTION" ]] && f+=(--min-cross-section "$MIN_CROSS_SECTION")
   [[ "$REBALANCE_DAY" != "any" ]] && f+=(--rebalance-day "$REBALANCE_DAY")
-  printf '%s\n' "${f[@]}"
+  [[ ${#f[@]} -gt 0 ]] && printf '%s\n' "${f[@]}"
+  return 0
 }
 
 train_full() {
@@ -116,7 +117,7 @@ train_full() {
     --wf-scores-path "$WF_SCORES" \
     --execution-prices-path "$EXECUTION_PRICES" \
     --run-backtest \
-    "${opts[@]}" \
+    ${opts[@]+"${opts[@]}"} \
     $EXTRA_TRAIN_ARGS
 }
 
@@ -130,7 +131,11 @@ deploy_model() {
 
 backtest_only() {
   local -a flags
-  mapfile -t flags < <(strategy_flags)
+  # `mapfile` is bash 4+; macOS ships bash 3.2, where it is simply not a
+  # command and `flags` silently stays empty -- the strategy flags would have
+  # vanished rather than errored. read -r in a while loop is portable.
+  flags=()
+  while IFS= read -r _line; do flags+=("$_line"); done < <(strategy_flags)
   local -a mode=()
   [[ "$HOLD_MODE" == "rank" ]] && mode=(--mode rank-hold)
   # Absent used to mean "silently fall back to forward-filled prices", which
@@ -144,9 +149,9 @@ backtest_only() {
   local -a exec_px=(--execution-prices "$EXECUTION_PRICES")
   ${DRY_RUN:+echo} uv run backtest-sp500 "$WF_SCORES" \
     --plots-dir "$PLOTS_DIR" \
-    "${exec_px[@]}" \
-    "${flags[@]}" \
-    "${mode[@]}"
+    ${exec_px[@]+"${exec_px[@]}"} \
+    ${flags[@]+"${flags[@]}"} \
+    ${mode[@]+"${mode[@]}"}
 }
 
 predict_daily() {
@@ -155,7 +160,11 @@ predict_daily() {
     confirm_flag=(--confirm)
   fi
   local -a flags
-  mapfile -t flags < <(strategy_flags)
+  # `mapfile` is bash 4+; macOS ships bash 3.2, where it is simply not a
+  # command and `flags` silently stays empty -- the strategy flags would have
+  # vanished rather than errored. read -r in a while loop is portable.
+  flags=()
+  while IFS= read -r _line; do flags+=("$_line"); done < <(strategy_flags)
   ${DRY_RUN:+echo} uv run predict-sp500 \
     --model "$MODEL" \
     --state "$STATE" \
@@ -163,8 +172,8 @@ predict_daily() {
     --provider "$PREDICT_PROVIDER" \
     --hold-mode "$HOLD_MODE" \
     --max-drawdown "$MAX_DD" \
-    "${flags[@]}" \
-    "${confirm_flag[@]}"
+    ${flags[@]+"${flags[@]}"} \
+    ${confirm_flag[@]+"${confirm_flag[@]}"}
 }
 
 usage() {
