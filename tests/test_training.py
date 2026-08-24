@@ -312,7 +312,7 @@ def test_monthly_walk_forward_rank_objective_runs() -> None:
     per_date_std = scores.groupby("date")["prob"].std()
     assert (per_date_std > 0).any()
     # With a near-perfect feature, ranking beats the base positive rate
-    assert metrics["mean_weekly_precision_at_k"].mean() > df["target_5pct"].mean()
+    assert metrics["precision_at_k"].mean() > df["target_5pct"].mean()
 
 
 def test_monthly_walk_forward_invalid_objective() -> None:

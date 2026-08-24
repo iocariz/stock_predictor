@@ -1,7 +1,7 @@
 """Dollar-neutral is not market-neutral, and the reports should say so.
 
 Equalising notional equalises dollars, not exposure. Measured on the real
-panel, the dollar-neutral book carries **beta +0.292 (t +4.76)** — because this
+panel, the dollar-neutral book carries **beta +0.251 (t +4.10)** — because this
 model ranks volatility positively, so the long leg holds beta-1.27 names and
 the short leg beta-0.66 ones. Roughly a quarter of the "market-neutral" return
 was unhedged market exposure.

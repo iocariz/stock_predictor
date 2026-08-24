@@ -332,7 +332,7 @@ These are **not** recommendations—only sensible axes to explore when you stres
 | `--earnings-workers` | 8 | Parallelism for earnings fetch |
 | `--skip-walk-forward` | off | Skip monthly walk-forward |
 | `--wf-min-train-rows` | 5000 | Minimum training rows per WF month |
-| `--wf-top-k` | 10 | Top-K for weekly precision / WF ranking |
+| `--wf-top-k` | 10 | Top-K for per-date precision / WF ranking |
 | `--wf-scores-path` | none | Write scored WF panel Parquet (for `backtest-sp500`) |
 | `--run-backtest` | off | Run portfolio backtest after WF (needs WF scores) |
 | `--output-model` | none | Save `.pkl` + `.meta.json` (+ `.optuna.json` if tuned) |
@@ -680,7 +680,7 @@ With **`--no-snapshot`**, no Parquet files and no `manifest.json` are written (t
    Filtering before step 1 lets rolling windows span index-membership gaps — a symbol that left and rejoined the index gets a multi-year move reported as its next `ret_1d`. Running step 3 before the filter pollutes ranks and "market" medians with names that were not in the index that day.
 5. **Tuning**: Optuna over purged, date-grouped expanding CV folds — PR-AUC for the classifier, NDCG@15 for the ranker (optional)
 6. **Training**: LightGBM (classifier or lambdarank ranker) with a purged inner validation split for effective tree count
-7. **Evaluation**: PR-AUC, ROC-AUC, weekly Precision@K (same binary target for both objectives, so they compare directly)
+7. **Evaluation**: per-date Precision@K, rank IC and top-K excess return, aggregated across signal dates; pooled PR-AUC / ROC-AUC reported alongside as secondary (same binary target for both objectives, so they compare directly)
 8. **Walk-forward**: Monthly expanding window with a `horizon`-day purge before each test month (optional)
 9. **Backtest**: Cash-ledger simulation vs configurable benchmark — cohort or rank-hold engine, with relative-return framing (IR, beta, alpha + t-stat) and sweep grids
 10. **Inference**: Daily scoring of the live universe (either model family), portfolio state management, fixed-expiry or rank-hold order generation with kill-switch risk control
@@ -1089,6 +1089,32 @@ notebooks/               Exploration + full pipeline
   *sizes*; it would have stayed silent at 500 versus 500, which is why the draw
   itself is now recorded.
 
+- **Evaluation pooled observations at the wrong unit.** PR-AUC and ROC-AUC
+  ranked every ticker-date in a month against every other, and "weekly
+  Precision@10" picked ten rows out of a *whole week* — all ten could come from
+  one session. Neither is a book anyone could have held. The strategy chooses a
+  cross-section **per signal date**, and a LambdaRank score is only calibrated
+  within its group, so pooling grades a comparison the model was never asked to
+  make.
+
+  Primary evaluation is now per signal date, then aggregated: `precision_at_k`,
+  `rank_ic` (Spearman of score against forward return), and `top_k_excess`.
+  Pooled AUCs are still reported, renamed `pr_auc_pooled` / `roc_auc_pooled` so
+  the unit is visible at the call site.
+
+  On the 2019–2026 control panel (1,854 signal dates, base rate 44.07%):
+
+  | k | per-date P@k | weekly-pooled P@k | rank IC | top-k excess |
+  |---|---|---|---|---|
+  | 5 | 0.4717 | 0.4518 | +0.0383 | +2.55% |
+  | 10 | 0.4661 | 0.4718 | +0.0383 | +2.36% |
+  | 20 | 0.4619 | 0.4782 | +0.0383 | +2.14% |
+
+  Note the pooled column is not biased in a fixed direction — it understates at
+  k=5 and overstates at k=10 and k=20. It was not a constant offset that could
+  be reasoned around; it was the wrong measurement. The honest edge over the
+  base rate is 2–3 points, and precision decays with k as a real signal should.
+
 - **Dollar-neutral is not market-neutral.** Equalising notional equalises
   dollars, not exposure. This model ranks volatility *positively*, so the long
   leg holds beta-1.27 names and the short leg beta-0.66 ones, and the book keeps
@@ -1098,21 +1124,37 @@ notebooks/               Exploration + full pipeline
   the rows against each other, not against the 21-offset medians quoted
   elsewhere):
 
-  | config | beta | (t) | alpha/yr | (t) | CAGR | Sharpe | maxDD |
-  |---|---|---|---|---|---|---|---|
-  | unhedged | **+0.292** | +4.74 | +10.95% | +2.70 | +16.6% | 0.91 | −18.9% |
-  | `hedge_beta=0.29` | +0.025 | +0.44 | +11.67% | +2.93 | +12.1% | 0.66 | −20.8% |
-  | `hedge_beta=0.20` | +0.107 | +1.83 | +11.46% | +2.86 | +13.5% | 0.76 | −20.1% |
-  | `hedge_beta=0.40` | −0.075 | −1.37 | +11.90% | +3.02 | +10.3% | 0.52 | −22.0% |
+  | config | beta | (t) | alpha/yr | (t) | *raw-spec* alpha | (t) | CAGR | Sharpe | maxDD |
+  |---|---|---|---|---|---|---|---|---|---|
+  | unhedged | **+0.251** | +4.10 | +8.18% | +2.12 | +11.55% | +2.90 | 16.6% | 0.97 | −16.4% |
+  | `hedge_beta=0.25` | +0.022 | +0.40 | +7.74% | +2.05 | +12.14% | +3.14 | 12.7% | 0.73 | −17.5% |
+  | `hedge_beta=0.20` | +0.068 | +1.19 | +7.84% | +2.07 | +12.03% | +3.09 | 13.5% | 0.79 | −17.3% |
+  | `hedge_beta=0.40` | −0.114 | −2.19 | +7.44% | +2.00 | +12.45% | +3.29 | 10.2% | 0.52 | −18.9% |
 
-  Two things follow, and they point opposite ways.
+  The `alpha/yr` column is CAPM on **excess** returns, `(r_s − r_f) = α + β(r_b
+  − r_f)`. The `raw-spec` column is the same series regressed raw on raw, which
+  is what this table used to report — kept only to show the size of the error.
 
-  **The alpha is real and survives hedging** — +10.95% (t +2.70) unhedged
-  becomes +11.67% (t +2.93) hedged. The edge is selection skill, not disguised
-  market exposure, which is the question the measurement was there to settle.
+  Three things follow, and they do not all point the same way.
 
-  **Hedging still made this sample worse**: Sharpe 0.91 → 0.66, and max drawdown
-  slightly *deeper* at −20.8%. Over 2019–2026 the +0.29 beta was a tailwind, and
+  **About 3.4 points of the old headline were the cash rate, not skill.** A raw
+  regression leaves the intercept absorbing `r_f · (1 − β)`. A dollar-neutral
+  book is mostly cash, so β is near zero and almost the entire risk-free rate
+  landed in "alpha". At `hedge_beta=0.40` the bias is +5.0 points.
+
+  **This inverted the hedging conclusion.** An earlier revision of this section
+  read *"the alpha is real and survives hedging — +10.95% becomes +11.67%"*.
+  That was an artifact: hedging cuts β, which *raises* `r_f · (1 − β)`, which
+  inflates raw alpha. Specified correctly, hedging **lowers** alpha, +8.18% →
+  +7.74%. Every raw-spec row is monotone in the hedge for the same reason, and
+  none of it was selection skill.
+
+  **The alpha survives the correction, but with less room.** t falls from +2.90
+  to +2.12 unhedged and +2.05 hedged: still past the conventional bar, no longer
+  comfortably. Single sample, single schedule offset, one asset class.
+
+  **Hedging still made this sample worse**: Sharpe 0.97 → 0.73, and max drawdown
+  slightly *deeper* at −17.5%. Over 2019–2026 the +0.25 beta was a tailwind, and
   the overlay costs slippage and borrow. Hedging is not a way to improve a
   backtest run over a bull market; it removes a risk you did not choose and are
   not paid for skill on, and the sign of that trade flips in a falling market.

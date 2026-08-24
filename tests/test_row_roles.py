@@ -161,7 +161,7 @@ def test_unlabelled_rows_are_scored_but_not_graded() -> None:
     assert tail["prob"].notna().all(), "every tradable row gets a score"
     assert "has_label" in scores.columns
     # Metrics must be computed only where a label exists.
-    assert metrics["pr_auc"].notna().any()
+    assert metrics["pr_auc_pooled"].notna().any()
     assert (metrics["n_test"] > 0).all()
 
 

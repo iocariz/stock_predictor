@@ -75,7 +75,7 @@ class LongShortConfig:
     """Short this much benchmark exposure per unit of capital, as an overlay.
 
     Dollar-neutral is not market-neutral. On the real panel this book carries
-    **beta +0.292 (t +4.76)**: the model ranks volatility positively, so the
+    **beta +0.251 (t +4.10)**: the model ranks volatility positively, so the
     long leg holds beta-1.27 names and the short leg beta-0.66 ones, and about
     a quarter of the "neutral" return was market exposure.
 
@@ -353,6 +353,7 @@ def run_long_short_backtest(
                 metrics.update(market_exposure(
                     daily_returns.loc[shared], bench_ret.loc[shared],
                     overlap=config.rebalance_every,
+                    risk_free_rate=config.risk_free_rate,
                 ))
 
     return LongShortResult(

@@ -542,12 +542,12 @@ def main() -> None:
             train, feature_cols, manual_params, args.seed, purge_days=horizon,
             metric=tune_metric, eval_k=args.wf_top_k,
         )
-    pr_auc, roc_auc, weekly_precision = evaluate_test_set(model, test, feature_cols)
+    pr_auc, roc_auc, daily_precision = evaluate_test_set(model, test, feature_cols)
 
     if args.plots_dir is not None:
         save_eval_plots(
             args.plots_dir,
-            weekly_precision,
+            daily_precision,
             test["target_5pct"],
             feature_cols,
             model,
@@ -579,21 +579,26 @@ def main() -> None:
             wf_results = wf_out
         print(wf_results.to_string(index=False))
         if len(wf_results):
+            # Per-date first: it is the unit the strategy trades in. The
+            # pooled AUC follows as context, explicitly labelled.
             print(
-                f"Walk-forward: mean PR-AUC {wf_results['pr_auc'].mean():.4f} | "
-                f"mean weekly P@{args.wf_top_k} "
-                f"{wf_results['mean_weekly_precision_at_k'].mean():.4f}"
+                f"Walk-forward: per-date P@{args.wf_top_k} "
+                f"{wf_results['precision_at_k'].mean():.4f} | "
+                f"rank IC {wf_results['rank_ic'].mean():+.4f} | "
+                f"top-{args.wf_top_k} excess "
+                f"{wf_results['top_k_excess'].mean():+.4%} | "
+                f"pooled PR-AUC {wf_results['pr_auc_pooled'].mean():.4f}"
             )
         if args.plots_dir is not None and len(wf_results):
             fig, axes = plt.subplots(2, 1, figsize=(13, 6), sharex=True)
-            wf_results.set_index("month")["pr_auc"].astype(float).plot(
-                ax=axes[0], marker="o", title="Walk-forward PR-AUC",
+            wf_results.set_index("month")["rank_ic"].astype(float).plot(
+                ax=axes[0], marker="o", title="Walk-forward per-date rank IC",
             )
-            wf_results.set_index("month")["mean_weekly_precision_at_k"].astype(float).plot(
+            wf_results.set_index("month")["precision_at_k"].astype(float).plot(
                 ax=axes[1],
                 marker="o",
                 color="darkgreen",
-                title=f"Weekly Precision@{args.wf_top_k}",
+                title=f"Per-date Precision@{args.wf_top_k}",
             )
             plt.tight_layout()
             fig.savefig(args.plots_dir / "walk_forward.png", dpi=120)
