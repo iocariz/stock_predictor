@@ -7,6 +7,11 @@ provider recovers 148 departed members; this decides whether recovering them
 means anything.
 """
 
+# NOTE: these exercise the `assume_delisted` heuristic, which infers a
+# delisting from a missing bar. It is no longer the default -- it labelled
+# AVB, EA and EQR as delisted on the real panel -- but it is kept reachable for
+# reproducing older panels, and these tests pin its behaviour.
+
 from __future__ import annotations
 
 import numpy as np
@@ -31,7 +36,8 @@ def test_delisted_tail_is_kept_and_priced_to_the_last_quote() -> None:
     """The final sessions before a delisting must survive, with the forward
     return measured to the terminal price a holder would actually realize."""
     px = _prices(dies_at=30)
-    panel = build_labeled_panel(px, None, horizon=10, threshold=0.05)
+    panel = build_labeled_panel(px, None, horizon=10, threshold=0.05,
+                                terminal_fill="assume_delisted")
     # The panel now keeps tradable-but-unlabelled rows, so ask for the
     # labelled ones explicitly.
     dy = panel[(panel.ticker == "DYING") & panel.has_label].sort_values("date")
@@ -48,7 +54,8 @@ def test_delisted_tail_is_kept_and_priced_to_the_last_quote() -> None:
 
 def test_the_terminal_loss_is_actually_negative_and_large() -> None:
     """Regression for the bias itself: censoring these rows removed losses."""
-    panel = build_labeled_panel(_prices(dies_at=30), None, horizon=10, threshold=0.05)
+    panel = build_labeled_panel(_prices(dies_at=30), None, horizon=10,
+                                threshold=0.05, terminal_fill="assume_delisted")
     tail = panel[(panel.ticker == "DYING") & panel.has_label
                  & (panel.date >= DATES[20])]
     assert len(tail) == 9, "sessions 20-28; the terminal session carries no return"
@@ -59,7 +66,8 @@ def test_the_terminal_loss_is_actually_negative_and_large() -> None:
 def test_a_still_trading_name_keeps_its_unknown_future_censored() -> None:
     """The panel ending is not a delisting: those rows must still be dropped,
     because the future genuinely is not known yet."""
-    panel = build_labeled_panel(_prices(dies_at=None), None, horizon=10, threshold=0.05)
+    panel = build_labeled_panel(_prices(dies_at=None), None, horizon=10, threshold=0.05,
+                                terminal_fill="assume_delisted")
     alive = panel[(panel.ticker == "ALIVE") & panel.has_label]
     assert alive["date"].max() == DATES[-11], "no forward return, no label"
 
@@ -67,7 +75,8 @@ def test_a_still_trading_name_keeps_its_unknown_future_censored() -> None:
 def test_full_horizon_returns_are_unchanged() -> None:
     """Rows that already had a complete horizon must not move."""
     px = _prices(dies_at=30)
-    panel = build_labeled_panel(px, None, horizon=10, threshold=0.05)
+    panel = build_labeled_panel(px, None, horizon=10, threshold=0.05,
+                                terminal_fill="assume_delisted")
     row = panel[(panel.ticker == "DYING") & (panel.date == DATES[10])].iloc[0]
     assert row["fwd_ret"] == pytest.approx(
         px["DYING"].iloc[20] / px["DYING"].iloc[10] - 1
@@ -85,7 +94,8 @@ def test_terminal_fill_can_be_disabled() -> None:
 def test_labels_follow_the_filled_returns() -> None:
     px = _prices(dies_at=30, crash=False)
     px.loc[DATES[25:30], "DYING"] = 200.0          # bought out at a premium
-    panel = build_labeled_panel(px, None, horizon=10, threshold=0.05)
+    panel = build_labeled_panel(px, None, horizon=10, threshold=0.05,
+                                terminal_fill="assume_delisted")
     row = panel[(panel.ticker == "DYING") & (panel.date == DATES[24])].iloc[0]
     assert row["fwd_ret"] == pytest.approx(1.0)
     assert row["target_5pct"] == 1, "an acquisition premium is a real gain"
