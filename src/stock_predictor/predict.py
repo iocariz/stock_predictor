@@ -35,6 +35,13 @@ from stock_predictor.portfolio import (
     save_state,
     stale_positions,
 )
+from stock_predictor.quotes import (
+    describe_quote_gaps,
+    execution_quotes,
+    last_quote_dates,
+    quote_ages,
+    valuation_marks,
+)
 from stock_predictor.training import (
     MACRO_FEATURE_COLS,
     build_feature_panel,
@@ -711,24 +718,43 @@ def main() -> None:
     # Quotes come from the raw download, not the scored panel. The panel is
     # point-in-time filtered, so a departed holding has no row in it and would
     # read as "no quote" even when it was downloaded successfully.
+    #
+    # Two dictionaries, because there are two questions. `latest_prices`
+    # executes and holds only prices that printed on the session being traded;
+    # `marks` values and may carry a price forward. Building one forward-filled
+    # dict for both is what let a holding sell at a price that did not exist:
+    # valid_quote() never saw the missing quote, because ffill had already
+    # replaced it upstream.
     latest_prices = dict(zip(scored["ticker"], scored["adj_close"]))
+    marks = dict(latest_prices)
+    ages: dict[str, int] = {}
+    quote_dates: dict[str, pd.Timestamp] = {}
     if len(adj_close):
-        last_seen = adj_close.ffill().iloc[-1]
+        session_px = execution_quotes(adj_close)
+        marked_px = valuation_marks(adj_close)
+        ages = quote_ages(adj_close)
+        quote_dates = last_quote_dates(adj_close)
         for t in held:
-            px = last_seen.get(t)
-            if px is not None and pd.notna(px) and float(px) > 0:
-                latest_prices[t] = float(px)
+            if t in session_px:
+                latest_prices[t] = session_px[t]
+            else:
+                # No print this session: it must not be executable. Drop any
+                # value the scored panel may have contributed for this name.
+                latest_prices.pop(t, None)
+            if t in marked_px:
+                marks[t] = marked_px[t]
 
-    # Kill-switch check
-    halted, nav, dd = check_kill_switch(state, latest_prices, args.max_drawdown)
+    # Kill-switch check. Valued on `marks`: an unquoted holding must still be
+    # markable or it falls back to its entry price and can never show a loss.
+    halted, nav, dd = check_kill_switch(state, marks, args.max_drawdown)
+    # Staleness measured on the executable dict, which is the one that can be
+    # empty. Measured on the forward-filled dict this never fired.
     stale = stale_positions(state, latest_prices)
-    if stale:
-        print(
-            f"Warning: {len(stale)} holding(s) have no live quote and are marked "
-            f"from the last observed price: {', '.join(stale[:8])}"
-            + (" …" if len(stale) > 8 else ""),
-            file=sys.stderr,
-        )
+    gaps = describe_quote_gaps(
+        stale, ages, marks, quote_dates, last_session=adj_close.index[-1],
+    ) if len(adj_close) and stale else ""
+    if gaps:
+        print(gaps, file=sys.stderr)
 
     # Generate orders (calendar = session dates in downloaded OHLC index)
     trading_dates = trading_dates_from_index(adj_close.index)
