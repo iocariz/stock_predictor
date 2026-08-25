@@ -41,11 +41,13 @@ def _price_panel(day: pd.DataFrame) -> pd.DataFrame:
 
 
 def _backtest_picks(day: pd.DataFrame, config: BacktestConfig) -> list[str]:
-    cohort = _build_cohort(
+    built = _build_cohort(
         DATES[0], _price_panel(day), day, config,
         np.array(DATES, dtype="datetime64[ns]"), capital=1_000_000.0,
     )
-    return sorted(cohort.tickers) if cohort else []
+    # A leg whose exit defers settles separately and becomes its own cohort,
+    # so the names entered on this signal are the union across them.
+    return sorted({t for c in built for t in c.tickers})
 
 
 def _live_picks(day: pd.DataFrame, config: BacktestConfig) -> list[str]:

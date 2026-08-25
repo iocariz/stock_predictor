@@ -304,6 +304,65 @@ def _fill_metrics(tally: dict[str, int]) -> dict[str, float]:
     }
 
 
+def _resolve_leg_exit(
+    ticker: str,
+    exit_date: pd.Timestamp,
+    *,
+    price_panel: pd.DataFrame,
+    actual: pd.DataFrame | None,
+    trading_dates: np.ndarray,
+    config: BacktestConfig,
+    evidence: dict,
+    last_priced: pd.DataFrame | None,
+) -> tuple[float, pd.Timestamp, str] | None:
+    """What this leg actually sold for, and when.
+
+    Asked *after* the position exists, so nothing here can influence whether it
+    was opened. The nominal exit is only a first attempt:
+
+    * a real quote on the exit session fills there;
+    * no quote defers the sale to the next session that prints one -- you still
+      own it, and the cash is not real until the fill is;
+    * a name that stays unpriceable is disposed of by explicit evidence, or by
+      the configured fallback once the grace period lapses (``specs.md:181``,
+      ``:249``, ``:587``);
+    * ``None`` means it never settled, which the caller shows as capital still
+      tied up rather than quietly returning it.
+    """
+    def _real(when: pd.Timestamp) -> bool:
+        if actual is None:
+            return True
+        return (ticker in actual.columns and when in actual.index
+                and bool(actual.at[when, ticker]))
+
+    def _quote(when: pd.Timestamp) -> float:
+        try:
+            return float(price_panel.at[when, ticker])
+        except KeyError:
+            return float("nan")
+
+    i0 = int(np.searchsorted(trading_dates, np.datetime64(exit_date)))
+    for i in range(i0, len(trading_dates)):
+        when = pd.Timestamp(trading_dates[i])
+        px = _quote(when)
+        if px == px and px > 0 and (not config.reject_stale_fills or _real(when)):
+            return (px, when, "quote" if i == i0 else "deferred")
+        # Not sellable today. A gap is never itself proof of a delisting, so
+        # the policy decides -- and only once the grace period has elapsed.
+        last = float("nan")
+        if last_priced is not None and ticker in last_priced.columns \
+                and when in last_priced.index:
+            last = last_priced.at[when, ticker]
+        gap = i + 1 if last != last else int(i - last)
+        disposal = disposal_value(
+            ticker, when, evidence=evidence, sessions_unpriced=gap,
+            policy=config.delisting_policy,
+        )
+        if disposal is not None:
+            return (disposal[0], when, disposal[1])
+    return None
+
+
 def _build_cohort(
     signal_date: pd.Timestamp,
     price_panel: pd.DataFrame,
@@ -313,89 +372,165 @@ def _build_cohort(
     capital: float,
     actual: pd.DataFrame | None = None,
     tally: dict[str, int] | None = None,
-) -> Cohort | None:
+    evidence: dict | None = None,
+    last_priced: pd.DataFrame | None = None,
+    deferrals: dict[str, int] | None = None,
+) -> list[Cohort]:
+    """Open a cohort using only what is knowable on the entry date.
+
+    This used to price the entry *and* the exit here and drop any name whose
+    exit quote was missing -- a decision on the signal date that depended on a
+    session ``holding_days`` in the future. The names it removed are
+    disproportionately the ones that stopped being quoted, so the survivors
+    were the survivors twice over.
+
+    Entry eligibility now asks one question: is there a real, positive price to
+    buy at today? Exits are resolved separately by :func:`_resolve_leg_exit`.
+
+    Returns a list because a leg whose exit defers settles on a different date
+    from the rest and becomes its own single-ticker cohort, exactly as
+    rank-hold already models a disposal.
+    """
     entry_date = next_trading_day(signal_date, trading_dates)
     if entry_date is None:
-        return None
+        return []
     exit_date = offset_trading_days(entry_date, config.holding_days, trading_dates)
     if exit_date is None:
-        return None
+        return []
 
     # Selection is shared with the live path; only the price lookup below is
     # simulation-specific.
     picks = eligible_candidates(scored_day, config.selection_rules)[: config.top_n]
     if not picks:
-        return None
+        return []
 
+    evidence = evidence or {}
     tickers: list[str] = []
     entry_prices: list[float] = []
-    exit_prices: list[float] = []
+    raw_entries: list[float] = []
     probs: list[float] = []
 
     for cand in picks:
         t = cand.ticker
         if tally is not None:
-            tally["requested"] += 2      # an entry and an exit
+            tally["requested"] += 1        # the entry; the exit is counted later
         try:
             ep = price_panel.at[entry_date, t]
-            xp = price_panel.at[exit_date, t]
         except KeyError:
             if tally is not None:
-                tally["rejected"] += 2
+                tally["rejected"] += 1
             continue
-        if np.isnan(ep) or np.isnan(xp):
+        if np.isnan(ep) or ep <= 0:
             if tally is not None:
-                tally["rejected"] += 2
+                tally["rejected"] += 1
             continue
         # A carried-forward price is a valuation mark, not a fill.
         if config.reject_stale_fills and actual is not None:
-            real = all(
-                t in actual.columns and when in actual.index
-                and bool(actual.at[when, t])
-                for when in (entry_date, exit_date)
-            )
+            real = (t in actual.columns and entry_date in actual.index
+                    and bool(actual.at[entry_date, t]))
             if not real:
                 if tally is not None:
-                    tally["rejected"] += 2
+                    tally["rejected"] += 1
                 continue
         if tally is not None:
-            tally["filled"] += 2
+            tally["filled"] += 1
         tickers.append(t)
+        raw_entries.append(float(ep))
         entry_prices.append(_apply_slippage(ep, config.slippage_bps, +1))
-        exit_prices.append(_apply_slippage(xp, config.slippage_bps, -1))
         probs.append(cand.prob)
 
-    if len(tickers) == 0:
-        return None
+    if not tickers:
+        return []
 
     weights = portfolio_weights(np.array(probs), config.weighting)
-    gross_ret = sum(w * (xp / ep - 1) for w, ep, xp in zip(
-        weights,
-        [price_panel.at[entry_date, t] for t in tickers],
-        [price_panel.at[exit_date, t] for t in tickers],
-    ))
-    net_ret = sum(w * (xp / ep - 1) for w, ep, xp in zip(weights, entry_prices, exit_prices))
-    slip_cost = capital * sum(w * 2 * config.slippage_bps / 10_000 for w in weights)
-    comm = _cohort_commission_dollars(
-        weights, capital, list(entry_prices),
-        config.commission_per_share, config.commission_per_order,
-    )
-    net_ret = net_ret - comm / capital
-    cost = slip_cost + comm
 
-    return Cohort(
-        signal_date=signal_date,
-        entry_date=entry_date,
-        exit_date=exit_date,
-        tickers=tuple(tickers),
-        weights=tuple(weights.tolist()),
-        entry_prices=tuple(entry_prices),
-        exit_prices=tuple(exit_prices),
-        capital=capital,
-        gross_return=gross_ret,
-        cost=cost,
-        net_return=net_ret,
+    # Now, and only now, ask what each leg sold for.
+    on_time: list[int] = []
+    deferred: list[tuple[int, float, pd.Timestamp, str]] = []
+    unsettled: list[int] = []
+    for i, t in enumerate(tickers):
+        if tally is not None:
+            tally["requested"] += 1        # the exit
+        resolved = _resolve_leg_exit(
+            t, exit_date, price_panel=price_panel, actual=actual,
+            trading_dates=trading_dates, config=config, evidence=evidence,
+            last_priced=last_priced,
+        )
+        if resolved is None:
+            if tally is not None:
+                tally["rejected"] += 1
+            unsettled.append(i)
+            continue
+        px, when, source = resolved
+        if source != "quote":
+            if deferrals is not None:
+                deferrals[source] = deferrals.get(source, 0) + 1
+            if tally is not None:
+                tally["rejected"] += 1
+            deferred.append((i, px, when, source))
+        else:
+            if tally is not None:
+                tally["filled"] += 1
+            on_time.append(i)
+
+    out: list[Cohort] = []
+
+    def _leg_cohort(idx: list[int], when: pd.Timestamp,
+                    prices: dict[int, float]) -> Cohort | None:
+        if not idx:
+            return None
+        w = np.array([weights[i] for i in idx], dtype=float)
+        leg_capital = capital * float(w.sum())
+        if leg_capital <= 0:
+            return None
+        w = w / w.sum()
+        eps = [entry_prices[i] for i in idx]
+        raws = [raw_entries[i] for i in idx]
+        xps = [_apply_slippage(prices[i], config.slippage_bps, -1) for i in idx]
+        gross = sum(wi * (prices[i] / raws[j] - 1)
+                    for j, (wi, i) in enumerate(zip(w, idx)))
+        net = sum(wi * (xp / ep - 1) for wi, ep, xp in zip(w, eps, xps))
+        slip_cost = leg_capital * sum(wi * 2 * config.slippage_bps / 10_000 for wi in w)
+        comm = _cohort_commission_dollars(
+            w, leg_capital, list(eps),
+            config.commission_per_share, config.commission_per_order,
+        )
+        return Cohort(
+            signal_date=signal_date,
+            entry_date=entry_date,
+            exit_date=when,
+            tickers=tuple(tickers[i] for i in idx),
+            weights=tuple(w.tolist()),
+            entry_prices=tuple(eps),
+            exit_prices=tuple(xps),
+            capital=leg_capital,
+            gross_return=gross,
+            cost=slip_cost + comm,
+            net_return=net - comm / leg_capital,
+        )
+
+    main = _leg_cohort(
+        on_time, exit_date,
+        {i: float(price_panel.at[exit_date, tickers[i]]) for i in on_time},
     )
+    if main is not None:
+        out.append(main)
+
+    for i, px, when, _source in deferred:
+        leg = _leg_cohort([i], when, {i: px})
+        if leg is not None:
+            out.append(leg)
+
+    # Never settled: hold it past the end of the calendar so the capital shows
+    # as still tied up instead of silently coming back.
+    if unsettled:
+        beyond = pd.Timestamp(trading_dates[-1]) + pd.Timedelta(days=1)
+        for i in unsettled:
+            leg = _leg_cohort([i], beyond, {i: raw_entries[i]})
+            if leg is not None:
+                out.append(leg)
+
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -788,12 +923,19 @@ def run_backtest(
     *,
     provider: object | None = None,
     execution_prices: pd.DataFrame | None = None,
+    delisting_proceeds: pd.DataFrame | None = None,
 ) -> BacktestResult:
     """Run the weekly-rebalance cohort backtest on walk-forward scored data."""
     df, trading_dates, price_panel, actual = _prepare_scored(
         scored_df, execution_prices,
     )
     tally = {"requested": 0, "filled": 0, "rejected": 0}
+    deferrals: dict[str, int] = {}
+    proceeds_evidence = load_proceeds(delisting_proceeds)
+    # Sessions since each ticker last had a real quote, per session -- the
+    # grace period is counted in sessions, not in exit attempts.
+    _pos = np.arange(len(actual), dtype=float)
+    _last_priced = actual.mul(_pos, axis=0).where(actual).cummax()
     _validate_weighting(df, config)
     risk_free = _resolve_risk_free(df, config)
 
@@ -811,14 +953,16 @@ def run_backtest(
     cohorts: list[Cohort] = []
     by_date = df.groupby("date")
     cash = config.initial_capital
-    settled = 0  # cohorts are settled in entry order (fixed holding period)
+    # A deferred leg settles after the cohort it came from, so exits are no
+    # longer in entry order and a single advancing pointer would stall on it.
+    settled: list[bool] = []
 
     for sig_date in rebalance_dates:
         # Credit realized proceeds from cohorts that exited before this signal.
-        while settled < len(cohorts) and cohorts[settled].exit_date < sig_date:
-            c = cohorts[settled]
-            cash += c.capital * (1.0 + c.net_return)
-            settled += 1
+        for i, c in enumerate(cohorts):
+            if not settled[i] and c.exit_date < sig_date:
+                cash += c.capital * (1.0 + c.net_return)
+                settled[i] = True
         # Check overlapping cohort limit
         active = sum(
             1 for c in cohorts if c.entry_date <= sig_date <= c.exit_date
@@ -832,13 +976,15 @@ def run_backtest(
         if capital <= 0:
             continue
         scored_day = by_date.get_group(sig_date)
-        cohort = _build_cohort(
+        built = _build_cohort(
             sig_date, price_panel, scored_day, config, trading_dates, capital,
-            actual=actual, tally=tally,
+            actual=actual, tally=tally, evidence=proceeds_evidence,
+            last_priced=_last_priced, deferrals=deferrals,
         )
-        if cohort is not None:
-            cohorts.append(cohort)
-            cash -= capital
+        for c in built:
+            cohorts.append(c)
+            settled.append(False)
+            cash -= c.capital
 
     # Daily NAV
     daily_nav = _build_daily_nav(cohorts, trading_dates, price_panel, config)
@@ -847,6 +993,12 @@ def run_backtest(
     # Metrics
     metrics = _compute_metrics(daily_nav, cohorts, risk_free_rate=risk_free)
     metrics.update(_fill_metrics(tally))
+    # specs.md:249 -- missing exits must appear in the diagnostics rather than
+    # being resolved silently, whichever way they were resolved.
+    metrics["exits_deferred"] = float(deferrals.get("deferred", 0))
+    for source, n in sorted(deferrals.items()):
+        if source != "deferred":
+            metrics[f"disposals_{source}"] = float(n)
 
     start_date = pd.Timestamp(trading_dates[0])
     end_date = pd.Timestamp(trading_dates[-1])
@@ -1402,10 +1554,9 @@ def main() -> None:
         ev = (pd.read_parquet(path) if str(path).endswith(".parquet")
               else pd.read_csv(path))
         print(f"Delisting evidence from {path} ({len(ev)} rows)")
-        if backtest_fn is run_rank_hold_backtest:
-            kwargs["delisting_proceeds"] = ev
-        else:
-            print("  (cohort engine has fixed exits; evidence is unused)")
+        # Both engines use it now. The cohort engine used to drop any name
+        # whose exit did not print, so evidence had nothing to attach to.
+        kwargs["delisting_proceeds"] = ev
     # Imported here, not at module scope: backtest_reporting imports this
     # module, so a top-level import would reinstate the cycle. Module-level
     # __getattr__ serves external callers but not this module's own globals.

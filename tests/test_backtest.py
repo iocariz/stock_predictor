@@ -152,7 +152,13 @@ def _make_scored_day(tickers: list[str], probs: list[float], date: pd.Timestamp)
 
 
 def test_build_cohort_missing_exit_price() -> None:
-    """Ticker with NaN exit price is excluded; remaining tickers still form a cohort."""
+    """A missing *exit* price must not un-make the entry.
+
+    This test used to assert the opposite -- that a NaN exit price excluded the
+    ticker -- which is the look-ahead itself written down as a requirement. The
+    exit is ten sessions after the decision to buy; it cannot be an input to it.
+    BBB is entered, and its sale is resolved later.
+    """
     dates = pd.bdate_range("2024-01-08", periods=20)
     panel = _make_price_panel(dates, ["AAA", "BBB"])
     # Entry = dates[1], exit = dates[1+10] = dates[11]. Make BBB's exit price NaN.
@@ -160,11 +166,13 @@ def test_build_cohort_missing_exit_price() -> None:
     scored = _make_scored_day(["AAA", "BBB"], [0.9, 0.8], dates[0])
     cfg = BacktestConfig(top_n=2, holding_days=10, benchmark_ticker=None)
     trading = dates.values
-    cohort = _build_cohort(dates[0], panel, scored, cfg, trading, 50_000.0)
-    assert cohort is not None
-    assert "BBB" not in cohort.tickers
-    assert "AAA" in cohort.tickers
-    assert len(cohort.tickers) == 1
+    built = _build_cohort(dates[0], panel, scored, cfg, trading, 50_000.0)
+    assert built, "the entry was valid on its own date"
+    held = {t for c in built for t in c.tickers}
+    assert held == {"AAA", "BBB"}
+    # BBB settles on a later session than AAA, so it is its own cohort.
+    bbb = next(c for c in built if c.tickers == ("BBB",))
+    assert pd.Timestamp(bbb.exit_date) > dates[11]
 
 
 def test_build_cohort_all_prices_missing_returns_none() -> None:
@@ -173,7 +181,7 @@ def test_build_cohort_all_prices_missing_returns_none() -> None:
     scored = _make_scored_day(["AAA"], [0.9], dates[0])
     cfg = BacktestConfig(top_n=1, holding_days=10, benchmark_ticker=None)
     cohort = _build_cohort(dates[0], panel, scored, cfg, dates.values, 50_000.0)
-    assert cohort is None
+    assert cohort == [], "nothing built"
 
 
 def test_build_cohort_exit_beyond_data_returns_none() -> None:
@@ -182,7 +190,7 @@ def test_build_cohort_exit_beyond_data_returns_none() -> None:
     scored = _make_scored_day(["AAA"], [0.9], dates[0])
     cfg = BacktestConfig(top_n=1, holding_days=10, benchmark_ticker=None)
     cohort = _build_cohort(dates[0], panel, scored, cfg, dates.values, 50_000.0)
-    assert cohort is None
+    assert cohort == [], "nothing built"
 
 
 # ---------------------------------------------------------------------------
@@ -328,9 +336,10 @@ def test_build_cohort_commission_reduces_net_return() -> None:
     scored = _make_scored_day(["AAA", "BBB"], [0.5, 0.5], dates[0])
     cfg0 = BacktestConfig(top_n=2, holding_days=10, benchmark_ticker=None, commission_per_share=0.0)
     cfg1 = BacktestConfig(top_n=2, holding_days=10, benchmark_ticker=None, commission_per_share=1.0)
-    c0 = _build_cohort(dates[0], panel, scored, cfg0, dates.values, 50_000.0)
-    c1 = _build_cohort(dates[0], panel, scored, cfg1, dates.values, 50_000.0)
-    assert c0 is not None and c1 is not None
+    built0 = _build_cohort(dates[0], panel, scored, cfg0, dates.values, 50_000.0)
+    built1 = _build_cohort(dates[0], panel, scored, cfg1, dates.values, 50_000.0)
+    assert built0 and built1
+    c0, c1 = built0[0], built1[0]
     assert c1.net_return < c0.net_return
     assert c1.cost > c0.cost
 
