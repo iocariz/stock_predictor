@@ -155,6 +155,7 @@ def test_training_metadata_records_the_drawn_universe() -> None:
         args, feature_cols=["ret_1d"], objective="rank", tune_metric="auto",
         optuna_best={}, manual_params={}, n_trees=1, importance={},
         pr_auc=0.5, roc_auc=0.6, run_id="r1", snapshot_root=None,
+        train_end="2024-12-31", test_start="2025-01-01",
         universe=["BBB", "AAA"],
     )
     assert meta["universe"] == ["AAA", "BBB"], "sorted, so it is comparable"
@@ -175,5 +176,6 @@ def test_a_model_without_a_universe_records_none_not_a_guess() -> None:
         args, feature_cols=[], objective="rank", tune_metric="auto",
         optuna_best={}, manual_params={}, n_trees=1, importance={},
         pr_auc=0.5, roc_auc=0.6, run_id="r1", snapshot_root=None,
+        train_end="2024-12-31", test_start="2025-01-01",
     )
     assert meta["universe"] is None and meta["universe_hash"] is None

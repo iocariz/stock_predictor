@@ -120,6 +120,7 @@ def test_saved_metadata_carries_what_scoring_needs() -> None:
         optuna_best={}, manual_params=DEFAULT_LGBM_PARAMS, n_trees=100,
         importance={"ret_1d": 1.0}, pr_auc=0.5, roc_auc=0.6,
         run_id="r1", snapshot_root=None,
+        train_end="2024-12-31", test_start="2025-01-01",
     )
     assert meta["feature_cols"] == ["ret_1d"]
     assert meta["horizon"] == 63
@@ -131,6 +132,7 @@ def test_saved_metadata_carries_the_seed_and_sample_size() -> None:
         _args(seed=7, sample_n=250), feature_cols=["ret_1d"], objective="rank",
         tune_metric="auto", optuna_best={}, manual_params={}, n_trees=1,
         importance={}, pr_auc=0.5, roc_auc=0.6, run_id="r1", snapshot_root=None,
+        train_end="2024-12-31", test_start="2025-01-01",
     )
     assert meta["seed"] == 7
     assert meta["sample_n"] == 250
@@ -141,6 +143,7 @@ def test_a_run_without_a_snapshot_records_none_not_a_broken_path() -> None:
         _args(), feature_cols=[], objective="rank", tune_metric="auto",
         optuna_best={}, manual_params={}, n_trees=1, importance={},
         pr_auc=0.5, roc_auc=0.6, run_id="r1", snapshot_root=None,
+        train_end="2024-12-31", test_start="2025-01-01",
     )
     assert meta["snapshot_dir"] is None
 
@@ -155,6 +158,7 @@ def test_metadata_round_trips_through_the_live_loader(tmp_path) -> None:
         _args(seed=9), feature_cols=["ret_1d"], objective="rank",
         tune_metric="auto", optuna_best={}, manual_params={}, n_trees=1,
         importance={}, pr_auc=0.5, roc_auc=0.6, run_id="r1", snapshot_root=None,
+        train_end="2024-12-31", test_start="2025-01-01",
     )
     p = tmp_path / "m.pkl"
     with open(p, "wb") as fh:
