@@ -1089,6 +1089,43 @@ notebooks/               Exploration + full pipeline
   *sizes*; it would have stayed silent at 500 versus 500, which is why the draw
   itself is now recorded.
 
+- **Promotion was not atomic, and the comment admitted it.** The deployed
+  model and its metadata are two files. Promotion staged both and issued two
+  consecutive `os.replace` calls — each atomic alone, but a failure on the
+  second left the pair mixed, and the handler cleaned up temporaries without
+  undoing the first:
+
+  ```
+  PromotionError {'model': 'new', 'meta': 'old'}
+  ```
+
+  `specs.md:511` is unambiguous: *"Promotion MUST be atomic. A crash MUST NOT
+  leave the model and metadata from different versions."* The code shipped with
+  a comment calling itself *"as close to atomic as two paths get without a
+  symlinked release dir"* — a known gap written down instead of closed.
+  Narrowing a window is not closing it.
+
+  A release is now an immutable directory holding both files, and the deployed
+  paths resolve through a single pointer:
+
+  ```
+  model.pkl        -> .current_release/model.pkl
+  model.meta.json  -> .current_release/model.meta.json
+  .current_release -> releases/20260825T204001Z-<run_id>/
+  ```
+
+  Promotion renames one symlink, so both paths move together. The regression
+  test injects a failure at *every* filesystem call in turn — six per
+  promotion — and asserts the on-disk pair is internally consistent each time.
+
+  Superseded releases stay on disk, so rollback is a pointer swap:
+  `deploy_model.py --list` and `--rollback-to <release>`, validated the same
+  way a promotion is. **Not `mv`** — a symlink pointing at a directory swallows
+  the replacement *into* the directory instead of replacing the link, leaving
+  the old version live and writing into a release that is meant to be
+  immutable. That trap has its own test, because the obvious shell one-liner
+  hits it silently.
+
 - **The scheduled refit would have failed on its first firing.**
   `--train-through-latest` exists so the monthly cron stops refitting a
   hard-coded window. It set `train_end` to the newest labelable session — then
