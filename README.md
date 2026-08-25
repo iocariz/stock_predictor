@@ -1089,6 +1089,37 @@ notebooks/               Exploration + full pipeline
   *sizes*; it would have stayed silent at 500 versus 500, which is why the draw
   itself is now recorded.
 
+- **The scheduled refit would have failed on its first firing.**
+  `--train-through-latest` exists so the monthly cron stops refitting a
+  hard-coded window. It set `train_end` to the newest labelable session — then
+  carried on doing everything an *evaluation* run does, including purging a
+  full horizon away from a test period that by construction held nothing:
+
+  ```
+  panel end:             2025-11-28
+  newest labelable:      2025-09-02
+  actual fitted through: 2025-06-05   <- 63 sessions discarded
+  test rows:             0
+  ```
+
+  The empty frame then reached `evaluate_test_set`, which cannot score zero
+  rows. `train-sp500.yml` sets `REFIT=1` on schedule, so every monthly run
+  would fail *after* paying for the fit. It had never fired — the cron was
+  added on 2026-08-21 and the first run was due 2026-09-01 — so this was caught
+  one week before it would have run.
+
+  Purging protects a test period from training rows that saw its prices. With
+  no test period there is nothing to protect, and the discarded horizon is the
+  *most recent* data the model has, which is the entire point of refitting.
+  `split_train_test` now branches: evaluation holds out and purges, a refit
+  trains on every labelable row and returns `None` for the test set rather than
+  an empty frame, so a caller that forgets to branch fails loudly. Evaluation
+  and walk-forward are skipped in refit mode, and a refit's metadata records
+  the window it actually used — it was reading `args.train_end`, so a refit
+  would have reported the default months after it stopped using it.
+
+  Use `evaluate` (`REFIT=0`) to measure and `refit` (`REFIT=1`) to build.
+
 - **One price dictionary answered three different questions.** The live path
   built `latest_prices` from `adj_close.ffill().iloc[-1]` and handed the same
   dict to the kill switch, the staleness warning, and order generation. Forward

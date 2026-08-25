@@ -45,6 +45,7 @@ def test_metadata_records_what_the_model_actually_learned_through() -> None:
         _args(), feature_cols=["ret_1d"], objective="rank", tune_metric="auto",
         optuna_best={}, manual_params={}, n_trees=1, importance={},
         pr_auc=0.5, roc_auc=0.6, run_id="r1", snapshot_root=None,
+        train_end="2024-12-31", test_start="2025-01-01",
         fitted_through=pd.Timestamp("2024-10-01"),
     )
     assert meta["train_end"] == "2024-12-31"
@@ -56,6 +57,7 @@ def test_fitted_through_is_none_when_unknown_rather_than_guessed() -> None:
         _args(), feature_cols=[], objective="rank", tune_metric="auto",
         optuna_best={}, manual_params={}, n_trees=1, importance={},
         pr_auc=0.5, roc_auc=0.6, run_id="r1", snapshot_root=None,
+        train_end="2024-12-31", test_start="2025-01-01",
     )
     assert meta["fitted_through"] is None
 

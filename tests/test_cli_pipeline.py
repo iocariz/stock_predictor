@@ -235,3 +235,49 @@ def test_plots_are_written_when_asked_for(tmp_path) -> None:
 def test_a_backtest_without_scores_says_so_rather_than_crashing(tmp_path, capsys) -> None:
     _run(tmp_path, "--run-backtest", "--skip-walk-forward")
     assert "No walk-forward scores" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Production refit (REFIT=1 / --train-through-latest)
+# ---------------------------------------------------------------------------
+
+
+def test_a_scheduled_refit_completes(tmp_path, capsys) -> None:
+    """The whole defect, end to end.
+
+    Refit set test_start to the day after the newest labelable session, purged
+    another full horizon off the training set, and handed the resulting empty
+    test frame to evaluation, which cannot score zero rows. The scheduled
+    workflow sets REFIT=1, so every monthly run failed after paying for the fit.
+    """
+    model = tmp_path / "model_candidate.pkl"
+    _run(tmp_path, "--train-through-latest", "--output-model", str(model))
+    out = capsys.readouterr().out
+    assert "Refit mode" in out
+    assert model.exists()
+
+
+def test_a_refit_trains_past_the_evaluation_train_end(tmp_path) -> None:
+    """It has to actually learn something newer, which was the point of the flag."""
+    refit_model = tmp_path / "refit.pkl"
+    _run(tmp_path, "--train-through-latest", "--output-model", str(refit_model))
+    with open(refit_model, "rb") as fh:
+        refit_meta = pickle.load(fh)["meta"]
+
+    plain_model = tmp_path / "plain.pkl"
+    _run(tmp_path, "--output-model", str(plain_model))
+    with open(plain_model, "rb") as fh:
+        plain_meta = pickle.load(fh)["meta"]
+
+    assert refit_meta["fitted_through"] > plain_meta["fitted_through"]
+    # And it records the window it used, not the --train-end flag it ignored.
+    assert refit_meta["train_end"] != "2017-12-31"
+    assert refit_meta["test_start"] is None
+
+
+def test_a_refit_does_not_claim_metrics_it_never_measured(tmp_path) -> None:
+    refit_model = tmp_path / "refit.pkl"
+    _run(tmp_path, "--train-through-latest", "--output-model", str(refit_model))
+    with open(refit_model, "rb") as fh:
+        meta = pickle.load(fh)["meta"]
+    assert np.isnan(meta["metrics"]["pr_auc"]), "no test set means no PR-AUC"

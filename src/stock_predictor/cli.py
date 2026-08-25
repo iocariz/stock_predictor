@@ -277,6 +277,53 @@ def build_run_extra(
     }
 
 
+def split_train_test(
+    features_clean: pd.DataFrame,
+    *,
+    train_end: str,
+    test_start: str | None,
+    horizon: int,
+    refit: bool,
+    date_col: str = "date",
+) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+    """Split labelled rows for evaluation, or hand all of them to a refit.
+
+    Two modes, because they are two different jobs:
+
+    **Evaluation** holds out everything from *test_start* and purges the
+    horizon before it out of the training set. Labels look ``horizon`` sessions
+    ahead, so a training row inside that window saw test-period prices.
+
+    **Refit** is a production build. ``train_end`` is already the newest
+    session with a complete forward window, so there is no held-out period --
+    and purging against a test set that does not exist deleted the horizon of
+    rows nearest the present, the most relevant data the model has. With 500
+    sessions at horizon 63 that silently cost 63 sessions and left zero test
+    rows for evaluation to choke on.
+
+    Returns ``(train, None)`` for a refit: ``None`` rather than an empty frame,
+    so a caller that forgets to branch fails loudly instead of passing a
+    zero-row frame into something that cannot score it.
+    """
+    labelled = features_clean[features_clean[date_col] <= pd.Timestamp(train_end)]
+
+    if refit:
+        return labelled, None
+
+    if test_start is None:
+        raise ValueError("evaluation mode needs a test_start")
+    train = purge_train_dates(labelled, test_start, horizon)
+    test = features_clean[features_clean[date_col] >= pd.Timestamp(test_start)]
+    if not len(test):
+        raise ValueError(
+            f"evaluation split produced no test rows at or after {test_start} "
+            f"(panel ends {features_clean[date_col].max().date() if len(features_clean) else 'n/a'}). "
+            "For a production build pass --train-through-latest, which trains "
+            "on every labelable row and skips evaluation."
+        )
+    return train, test
+
+
 def latest_trainable_end(sessions, horizon: int):
     """Newest session that can still carry a label.
 
@@ -304,6 +351,8 @@ def build_model_meta(
     n_trees: int,
     universe: list[str] | None = None,
     fitted_through=None,
+    train_end: str,
+    test_start: str | None,
     importance: dict,
     pr_auc: float,
     roc_auc: float,
@@ -333,8 +382,12 @@ def build_model_meta(
         "threshold": args.threshold,
         "start": args.start,
         "end": args.end,
-        "train_end": args.train_end,
-        "test_start": args.test_start,
+        # The *effective* window, not the flags. A refit overrides train_end
+        # to the newest labelable session and has no test period; reading args
+        # here recorded the hard-coded defaults instead, so a refit's metadata
+        # claimed a train_end months before the one it actually used.
+        "train_end": train_end,
+        "test_start": test_start,
         "sample_n": args.sample_n,
         "seed": args.seed,
         # The tickers actually drawn, not the recipe for drawing them. Training
@@ -458,14 +511,17 @@ def main() -> None:
             repro.register_snapshot(manifest, "execution_prices", meta)
             repro.write_manifest(snapshot_root / "manifest.json", manifest)
 
-    if args.train_through_latest:
+    refit = bool(args.train_through_latest)
+    if refit:
         # A scheduled refit that hard-codes train_end learns nothing new.
+        # There is no held-out period here: train_end is already the newest
+        # session with a complete forward window. test_start stays None so
+        # nothing downstream invents one.
         train_end = str(latest_trainable_end(adj_close.index, horizon).date())
-        test_start = str(
-            pd.Timestamp(train_end) + pd.Timedelta(days=1)
-        )[:10]
+        test_start = None
         print(f"  Refit mode: training through {train_end} "
-              f"(newest labellable session)")
+              f"(newest labellable session); evaluation and walk-forward "
+              f"are skipped -- there is nothing held out to measure on.")
 
     labeled = build_labeled_panel(adj_close, None, horizon, threshold)
     print(f"  Positive rate: {labeled['target_5pct'].mean():.4%}")
@@ -500,13 +556,15 @@ def main() -> None:
     features_scorable = select_scoring_rows(
         features, feature_cols, "target_5pct", strict=args.strict_dropna,
     )
-    train = features_clean[features_clean["date"] <= train_end]
-    # Purge: labels look `horizon` trading days ahead, so training rows within
-    # `horizon` days of test_start would leak test-period prices.
-    train = purge_train_dates(train, test_start, horizon)
-    test = features_clean[features_clean["date"] >= test_start]
+    train, test = split_train_test(
+        features_clean, train_end=train_end, test_start=test_start,
+        horizon=horizon, refit=refit,
+    )
     print(f"Train {train[feature_cols].shape} | pos {train['target_5pct'].mean():.4%}")
-    print(f"Test  {test[feature_cols].shape} | pos {test['target_5pct'].mean():.4%}")
+    if test is None:
+        print("Test  (none - production refit)")
+    else:
+        print(f"Test  {test[feature_cols].shape} | pos {test['target_5pct'].mean():.4%}")
 
     if manifest is not None and snapshot_root is not None:
         # Feature panel can be large; snapshot cleaned training+test panel only
@@ -542,19 +600,31 @@ def main() -> None:
             train, feature_cols, manual_params, args.seed, purge_days=horizon,
             metric=tune_metric, eval_k=args.wf_top_k,
         )
-    pr_auc, roc_auc, daily_precision = evaluate_test_set(model, test, feature_cols)
+    # A refit has no held-out period, so there is nothing to evaluate on. The
+    # empty frame used to be passed in regardless, and evaluation cannot score
+    # zero rows -- which is how every scheduled run would have failed after
+    # paying for the fit.
+    pr_auc = roc_auc = float("nan")
+    if test is not None:
+        pr_auc, roc_auc, daily_precision = evaluate_test_set(model, test, feature_cols)
 
-    if args.plots_dir is not None:
-        save_eval_plots(
-            args.plots_dir,
-            daily_precision,
-            test["target_5pct"],
-            feature_cols,
-            model,
-        )
+        if args.plots_dir is not None:
+            save_eval_plots(
+                args.plots_dir,
+                daily_precision,
+                test["target_5pct"],
+                feature_cols,
+                model,
+            )
 
     wf_scores: pd.DataFrame | None = None
-    if not args.skip_walk_forward:
+    # Walk-forward measures out-of-sample months after test_start. In refit
+    # mode there are none, and it would silently return an empty frame -- the
+    # quieter half of the same defect.
+    if refit and not args.skip_walk_forward:
+        print("  Refit mode: skipping walk-forward (no out-of-sample period). "
+              "Use `evaluate` for measurement and `refit` for the artifact.")
+    if not args.skip_walk_forward and not refit:
         need_scores = args.run_backtest or args.wf_scores_path is not None
         wf_out = monthly_walk_forward(
             features_scorable,
@@ -611,7 +681,11 @@ def main() -> None:
     if args.run_backtest:
         if wf_scores is None or len(wf_scores) == 0:
             print(
-                "No walk-forward scores available for backtest. Run without --skip-walk-forward."
+                "No walk-forward scores available for backtest. "
+                + ("A refit has no out-of-sample period to score; use "
+                   "`evaluate` (REFIT=0) to measure."
+                   if refit else
+                   "Run without --skip-walk-forward.")
             )
         else:
             from stock_predictor.backtest import (
@@ -653,6 +727,8 @@ def main() -> None:
             n_trees=n_trees,
             universe=fitted_universe,
             fitted_through=train["date"].max() if len(train) else None,
+            train_end=train_end,
+            test_start=test_start,
             importance=feature_importances(model, feature_cols),
             pr_auc=pr_auc,
             roc_auc=roc_auc,
