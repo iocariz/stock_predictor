@@ -7,6 +7,17 @@ promotion is reversible, and a refused promotion changes nothing.
 
     uv run python scripts/deploy_model.py \\
         artifacts/model_candidate.pkl artifacts/model.pkl --expected-horizon 63
+
+Each promotion writes an immutable release directory and swaps one symlink, so
+the model and its metadata always move together. Superseded releases stay on
+disk:
+
+    uv run python scripts/deploy_model.py --list artifacts/model.pkl
+    uv run python scripts/deploy_model.py --rollback-to <release> artifacts/model.pkl
+
+Roll back with ``--rollback-to``, never with ``mv``: a symlink pointing at a
+directory swallows the replacement into the directory instead of replacing the
+link, which silently leaves the old version live.
 """
 
 from __future__ import annotations
@@ -17,14 +28,24 @@ from pathlib import Path
 
 import pandas as pd
 
-from stock_predictor.deploy import PromotionError, promote_model
+from stock_predictor.deploy import (
+    PromotionError,
+    current_release,
+    list_releases,
+    promote_model,
+    rollback_release,
+)
 from stock_predictor.freshness import describe
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("candidate", type=Path)
+    p.add_argument("candidate", type=Path, nargs="?", default=None)
     p.add_argument("deployed", type=Path)
+    p.add_argument("--list", action="store_true", dest="list_releases",
+                   help="Show releases on disk, newest first, and the live one")
+    p.add_argument("--rollback-to", type=Path, default=None, dest="rollback_to",
+                   help="Point the deployed paths at an earlier release")
     p.add_argument("--archive-dir", type=Path, default=Path("artifacts/archive"),
                    dest="archive_dir")
     p.add_argument("--expected-horizon", type=int, default=None,
@@ -39,6 +60,30 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+
+    if args.list_releases:
+        live = current_release(args.deployed)
+        releases = list_releases(args.deployed)
+        if not releases:
+            print("No releases on disk.")
+            return
+        for r in releases:
+            marker = " <- live" if live and r.resolve() == live else ""
+            print(f"{r}{marker}")
+        return
+
+    if args.rollback_to is not None:
+        try:
+            res = rollback_release(args.deployed, args.rollback_to,
+                                   expected_horizon=args.expected_horizon)
+        except PromotionError as exc:
+            sys.exit(f"Refusing to roll back: {exc}")
+        print(f"Rolled back {res.deployed} -> {res.release}")
+        return
+
+    if args.candidate is None:
+        sys.exit("A candidate path is required unless --list or --rollback-to.")
+
     sessions = None
     if args.panel is not None and args.panel.exists():
         df = pd.read_parquet(args.panel)
