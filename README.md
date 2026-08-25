@@ -1089,6 +1089,45 @@ notebooks/               Exploration + full pipeline
   *sizes*; it would have stayed silent at 500 versus 500, which is why the draw
   itself is now recorded.
 
+- **The cohort engine decided entries using the exit quote.** `_build_cohort`
+  priced the entry *and* the exit at construction time — on the signal date —
+  and dropped any name whose exit price was missing or stale. The exit is
+  `holding_days` sessions in the future, so a position that was perfectly
+  enterable vanished because of something that had not happened yet:
+
+  ```
+  complete data: cohort entered A on 2024-01-03
+  missing exit:  the entire cohort disappeared
+  ```
+
+  Look-ahead and survivorship in one line, and it flatters twice over: the
+  names it removed are disproportionately the ones that stopped being quoted,
+  which is to say the failures. The reject-stale-fills work made it stricter,
+  and therefore more biased, by also requiring the exit quote to be *real*.
+
+  Entry now asks one question — is there a real, positive price to buy at
+  today? Exits are resolved afterwards through the same machinery rank-hold
+  already used: fill if there is a quote, otherwise defer to the next session
+  that prints one, and dispose by explicit evidence or the configured fallback
+  once the grace period lapses. A leg that settles late becomes its own cohort,
+  so the capital stays tied up for as long as it really was.
+
+  Measured on the control panel at top-15 / horizon 63:
+
+  | config | CAGR before | CAGR after | Sharpe | max DD | cohorts |
+  |---|---|---|---|---|---|
+  | with execution panel | 13.68% | **13.15%** | 0.49 → 0.47 | −38.2% | 56 → 57 |
+  | no execution panel | 11.00% | **4.44%** | 0.42 → 0.25 | −37.1% → **−55.2%** | 54 → **72** |
+
+  With a full execution panel the bias is half a point, because the panel
+  prices nearly everything. Without one — which is how this repo measured
+  itself for most of its history, and what `backtest-sp500` still does if you
+  omit `--execution-prices` — **6.6 points of CAGR were look-ahead**, along
+  with 18 percentage points of drawdown. The 18 extra cohorts are exactly the
+  ones that had been quietly deleted, and they lose money. Treat any
+  cohort-engine number in this README's history that predates the execution
+  panel as inflated.
+
 - **Promotion was not atomic, and the comment admitted it.** The deployed
   model and its metadata are two files. Promotion staged both and issued two
   consecutive `os.replace` calls — each atomic alone, but a failure on the
