@@ -1089,6 +1089,39 @@ notebooks/               Exploration + full pipeline
   *sizes*; it would have stayed silent at 500 versus 500, which is why the draw
   itself is now recorded.
 
+- **The execution panel was a gap-filler, not the authority.** When both
+  sources had a price, `_prepare_scored` kept the *scored* panel's and used the
+  execution panel only to patch holes:
+
+  ```
+  scored price:             100
+  execution price:          200
+  fill price actually used: 100
+  ```
+
+  `specs.md:233` is explicit that a scored panel's `adj_close` "MAY be included
+  for diagnostics, but it is not authoritative execution data" — so the
+  authoritative source was reduced to filling gaps in the non-authoritative
+  one, which is the wrong way round twice.
+
+  An execution panel now *replaces* the price matrix instead of patching it.
+  Read strictly: a scored ticker with no execution row has no price, so its
+  fills are rejected rather than invented from the signal table.
+  `validate_execution_panel` already reports that coverage gap.
+
+  **On the current bundle this changes nothing** — 1 of 909,171 scored prices
+  differs from the execution panel, and coverage is complete, so CAGR stays
+  13.15%. The bug was real and latent: it only bites when the two sources are
+  adjusted differently, which is exactly the case nobody notices. That
+  disagreement is now measured and printed, which is the one job the scored
+  panel's `adj_close` is still allowed to do.
+
+  Separately, `backtest_sweep.py`, `grid_search_sharpe.py` and
+  `signal_depth.py` never passed execution prices at all, so every number they
+  produced came from the point-in-time panel — the configuration measured just
+  above at **4.44% CAGR against 13.15%**. All three now take
+  `--execution-prices` and warn loudly when it is absent.
+
 - **The cohort engine decided entries using the exit quote.** `_build_cohort`
   priced the entry *and* the exit at construction time — on the signal date —
   and dropped any name whose exit price was missing or stale. The exit is

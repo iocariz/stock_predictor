@@ -124,12 +124,20 @@ def test_a_complete_execution_panel_removes_the_staleness() -> None:
     assert res.metrics["fills_rejected"] == 0
 
 
-def test_execution_prices_may_cover_only_some_names() -> None:
-    """A partial panel must fill what it can rather than being rejected."""
+def test_a_partial_execution_panel_prices_only_what_it_covers() -> None:
+    """This used to assert that a partial panel "fills what it can" -- meaning
+    names it did not cover fell back to the scored panel's price. Under
+    ``specs.md:233`` that is precisely what must not happen: the scored panel
+    is a decision signal, not a price source, so a name the execution panel
+    does not carry has no fill price and is rejected."""
     scored = _scored()
     partial = _truth(scored)[[LEAVER]]
     res = run_backtest(scored, BacktestConfig(**CFG), execution_prices=partial)
-    assert res.metrics["fills_rejected"] == 0
+    assert res.metrics["fills_rejected"] > 0, "uncovered names cannot be filled"
+
+    full = run_backtest(scored, BacktestConfig(**CFG),
+                        execution_prices=_truth(scored))
+    assert full.metrics["fills_rejected"] == 0, "a complete panel prices everything"
 
 
 def test_rank_hold_accepts_execution_prices_too() -> None:

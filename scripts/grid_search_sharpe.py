@@ -48,6 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Grid-search backtest configs; rank by Sharpe, report alpha t-stat.",
     )
     p.add_argument(
+        "--execution-prices", type=Path, default=None, dest="execution_prices",
+        help="Unfiltered price panel that prices the fills. Without it, fills "
+             "come from the point-in-time scored panel, which on the control "
+             "panel overstates CAGR by ~6.6pp",
+    )
+    p.add_argument(
         "scored_path", type=Path,
         help="Scored panel parquet/csv with date,ticker,adj_close,prob",
     )
@@ -114,6 +120,18 @@ def _slice_panel(scored: pd.DataFrame, from_date, until_date) -> pd.DataFrame:
 def main() -> None:
     args = build_parser().parse_args()
     scored = _slice_panel(_load_scored(args.scored_path), args.from_date, args.until_date)
+    # An absent execution panel is not a smaller measurement, it is a
+    # different one: fills then come from the point-in-time scored panel,
+    # which on the control panel overstates CAGR by ~6.6pp and understates
+    # drawdown by ~18pp. Say so rather than producing a quiet wrong number.
+    exec_px = None
+    if args.execution_prices is not None:
+        exec_px = pd.read_parquet(args.execution_prices)
+        print(f"Execution prices: {args.execution_prices} "
+              f"({exec_px.shape[0]} dates x {exec_px.shape[1]} tickers)")
+    else:
+        print("WARNING: no --execution-prices; fills come from the "
+              "point-in-time scored panel and results are optimistic.")
     print(
         f"Loaded {len(scored)} rows, {scored['ticker'].nunique()} tickers, "
         f"{scored['date'].min().date()} → {scored['date'].max().date()}"
@@ -165,7 +183,7 @@ def main() -> None:
                 commission_per_share=args.commission_per_share,
                 commission_per_order=args.commission_per_order,
             )
-            result = run_backtest(scored, cfg)
+            result = run_backtest(scored, cfg, execution_prices=exec_px)
         except Exception as exc:  # noqa: BLE001 - one bad cell must not kill the grid
             # Printed, never swallowed: a skipped cell is absent from the
             # ranked CSV, so a silently-dropped combo cannot look like a

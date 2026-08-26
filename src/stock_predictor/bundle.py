@@ -117,3 +117,54 @@ def describe_bundle(findings: list[Finding]) -> str:
         ["Execution price panel does not match the scored panel:"]
         + [f"  {f.kind}: {f.detail}" for f in findings]
     )
+
+
+def price_divergence(
+    scored: pd.DataFrame,
+    execution: pd.DataFrame | None,
+    *,
+    date_col: str = "date",
+    ticker_col: str = "ticker",
+    price_col: str = "adj_close",
+    tolerance: float = 1e-6,
+) -> dict[str, float]:
+    """How far the scored panel's prices sit from the ones that price fills.
+
+    ``specs.md:233`` allows a scored panel to carry ``adj_close`` "for
+    diagnostics", and since it no longer prices anything, this is the
+    diagnostic. Two sources that disagree materially mean one of them is
+    adjusted differently -- a split or dividend applied on one side only --
+    which is worth knowing before reading any result built on either.
+
+    Only cells present on *both* sides are compared; a ticker the execution
+    panel does not carry is a coverage question, reported separately by
+    :func:`validate_execution_panel`.
+    """
+    empty = {"compared": 0.0, "disagreeing": 0.0, "max_abs_pct": 0.0,
+             "median_abs_pct": 0.0}
+    if execution is None or not len(execution) or price_col not in scored.columns:
+        return empty
+
+    ex = execution.copy()
+    ex.index = pd.DatetimeIndex(ex.index).normalize()
+    work = scored[[date_col, ticker_col, price_col]].copy()
+    work[date_col] = pd.to_datetime(work[date_col]).dt.normalize()
+    work[ticker_col] = work[ticker_col].astype(str)
+
+    stacked = ex.stack(future_stack=True).rename("exec_px")
+    stacked.index = stacked.index.set_names([date_col, ticker_col])
+    merged = work.merge(
+        stacked.reset_index(), on=[date_col, ticker_col], how="inner",
+    )
+    both = merged.dropna(subset=[price_col, "exec_px"])
+    both = both[both["exec_px"] > 0]
+    if not len(both):
+        return empty
+
+    rel = ((both[price_col] - both["exec_px"]).abs() / both["exec_px"])
+    return {
+        "compared": float(len(both)),
+        "disagreeing": float((rel > tolerance).sum()),
+        "max_abs_pct": float(rel.max()),
+        "median_abs_pct": float(rel.median()),
+    }

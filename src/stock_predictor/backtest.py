@@ -21,6 +21,7 @@ import pandas as pd
 
 from stock_predictor.bundle import (
     describe_bundle,
+    price_divergence,
     validate_execution_panel,
 )
 from stock_predictor.delisting import (
@@ -783,19 +784,24 @@ def _prepare_scored(
     # index simply stops having rows. Forward-filling then carries its last
     # in-index price forward indefinitely and fills execute against it. The PIT
     # filter decides what may be *selected*; it does not decide what a holding
-    # is *worth*. An unfiltered execution panel, when supplied, prices the fills.
+    # is *worth*.
+    #
+    # So when an execution panel is supplied it *replaces* the price matrix
+    # rather than patching it. specs.md:233 is explicit that a scored panel's
+    # adj_close "is not authoritative execution data" -- it is a decision
+    # signal that happens to carry a price for inspection. Merging the other
+    # way round, keeping the scored price wherever it existed and consulting
+    # the execution panel only for holes, made the authoritative source a
+    # gap-filler for the non-authoritative one.
+    #
+    # A scored ticker with no execution row therefore has no price and its
+    # fills are rejected. That is the point: validate_execution_panel reports
+    # the coverage gap, and inventing a fill from the signal table is what this
+    # is meant to stop.
     if execution_prices is not None and len(execution_prices):
         ex = execution_prices.copy()
         ex.index = pd.DatetimeIndex(ex.index).normalize()
-        ex = ex.reindex(raw.index)
-        # One pass: assigning column by column across a wide panel fragments
-        # the frame and is quadratic in the number of tickers.
-        shared = raw.columns.intersection(ex.columns)
-        extra = ex.columns.difference(raw.columns)
-        if len(shared):
-            raw[shared] = raw[shared].where(raw[shared].notna(), ex[shared])
-        if len(extra):
-            raw = pd.concat([raw, ex[extra]], axis=1)
+        raw = ex.reindex(raw.index)
 
     # Which prices are real, so a fill against a carried-forward one is counted
     # rather than passing silently.
@@ -1548,6 +1554,21 @@ def main() -> None:
                 "pass --allow-price-mismatch to proceed."
             )
         print("  --allow-price-mismatch: proceeding anyway.")
+
+    # The scored panel's adj_close no longer prices anything (specs.md:233),
+    # so this is what it is still good for: two sources that disagree
+    # materially mean one is adjusted differently -- a split or dividend
+    # applied on one side only -- which is worth knowing before reading a
+    # result built on either.
+    div = price_divergence(scored, exec_px)
+    if div["disagreeing"]:
+        print(
+            f"Note: {int(div['disagreeing'])} of {int(div['compared'])} "
+            f"scored prices differ from the execution panel "
+            f"(median {div['median_abs_pct']:.2%}, max {div['max_abs_pct']:.2%}). "
+            "Fills use the execution panel; large gaps suggest the two were "
+            "adjusted differently."
+        )
     kwargs = {"execution_prices": exec_px}
     if args.delisting_proceeds is not None:
         path = args.delisting_proceeds
