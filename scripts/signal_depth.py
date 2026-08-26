@@ -52,6 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Selection-depth and rank-IC diagnostics for a scored panel.",
     )
     p.add_argument("scored_path", type=Path, help="Scored parquet/CSV with date,ticker,prob,fwd_ret")
+    p.add_argument("--execution-prices", type=Path, default=None,
+                   dest="execution_prices",
+                   help="Unfiltered price panel that prices the fills. Without "
+                        "it, fills come from the point-in-time scored panel, "
+                        "which on the control panel overstates CAGR by ~6.6pp")
     p.add_argument(
         "--buckets",
         default=",".join(str(b) for b in DEFAULT_BUCKETS),
@@ -91,7 +96,8 @@ def _slice(panel: pd.DataFrame, from_date, until_date) -> pd.DataFrame:
     return out
 
 
-def _alpha_ladder(panel: pd.DataFrame, ladder: list[int], ticker: str, rf: float) -> None:
+def _alpha_ladder(panel: pd.DataFrame, ladder: list[int], ticker: str, rf: float,
+                  exec_px: pd.DataFrame | None = None) -> None:
     raw, _ = _download_benchmark(panel["date"].min(), panel["date"].max(), ticker, 100_000.0)
     if raw.empty:
         print(f"  Benchmark {ticker} unavailable; skipping the alpha ladder.")
@@ -105,7 +111,7 @@ def _alpha_ladder(panel: pd.DataFrame, ladder: list[int], ticker: str, rf: float
             benchmark_ticker=None, top_n=n, risk_free_rate=rf,
             exit_rank=max(40, n),
         )
-        result = run_backtest(panel, cfg)
+        result = run_backtest(panel, cfg, execution_prices=exec_px)
         bench = _align_benchmark_to_nav(raw, result.daily_nav.index, cfg.initial_capital)
         rel = relative_metrics(bench_nav=bench, strategy_nav=result.daily_nav,
                                overlap_days=cfg.holding_days)
@@ -128,6 +134,18 @@ def _alpha_ladder(panel: pd.DataFrame, ladder: list[int], ticker: str, rf: float
 def main() -> None:
     args = build_parser().parse_args()
     panel = _slice(_load_scored(args.scored_path), args.from_date, args.until_date)
+    # An absent execution panel is not a smaller measurement, it is a
+    # different one: fills then come from the point-in-time scored panel,
+    # which on the control panel overstates CAGR by ~6.6pp and understates
+    # drawdown by ~18pp. Say so rather than producing a quiet wrong number.
+    exec_px = None
+    if args.execution_prices is not None:
+        exec_px = pd.read_parquet(args.execution_prices)
+        print(f"Execution prices: {args.execution_prices} "
+              f"({exec_px.shape[0]} dates x {exec_px.shape[1]} tickers)")
+    else:
+        print("WARNING: no --execution-prices; fills come from the "
+              "point-in-time scored panel and results are optimistic.")
     if "fwd_ret" not in panel.columns:
         raise SystemExit(
             "Panel has no 'fwd_ret' column — re-export it with --wf-scores-path "
@@ -170,7 +188,7 @@ def main() -> None:
         rf_label = "panel/default" if args.rf_rate is None else f"{args.rf_rate:.1%}"
         print(f"CAPM ALPHA BY CONCENTRATION (vs {args.benchmark_ticker}, rf={rf_label})")
         print("=" * 62)
-        _alpha_ladder(panel, ladder, args.benchmark_ticker, args.rf_rate)
+        _alpha_ladder(panel, ladder, args.benchmark_ticker, args.rf_rate, exec_px)
 
     if args.output_csv is not None:
         args.output_csv.parent.mkdir(parents=True, exist_ok=True)

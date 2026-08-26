@@ -95,6 +95,11 @@ def _row(label: str, m: dict[str, float]) -> dict[str, object]:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Backtest a grid of config variants.")
     ap.add_argument("scored_path", type=Path)
+    ap.add_argument("--execution-prices", type=Path, default=None,
+                    dest="execution_prices",
+                    help="Unfiltered price panel that prices the fills. Without "
+                         "it, fills come from the point-in-time scored panel, "
+                         "which on the control panel overstates CAGR by ~6.6pp")
     ap.add_argument("--benchmark-ticker", default="SPY")
     ap.add_argument("--capital", type=float, default=100_000.0)
     ap.add_argument("--from-date", default=None, dest="from_date",
@@ -107,6 +112,18 @@ def main() -> None:
     configs = GRIDS[args.grid]
 
     scored = _load_scored(args.scored_path)
+    # An absent execution panel is not a smaller measurement, it is a
+    # different one: fills then come from the point-in-time scored panel,
+    # which on the control panel overstates CAGR by ~6.6pp and understates
+    # drawdown by ~18pp. Say so rather than producing a quiet wrong number.
+    exec_px = None
+    if args.execution_prices is not None:
+        exec_px = pd.read_parquet(args.execution_prices)
+        print(f"Execution prices: {args.execution_prices} "
+              f"({exec_px.shape[0]} dates x {exec_px.shape[1]} tickers)")
+    else:
+        print("WARNING: no --execution-prices; fills come from the "
+              "point-in-time scored panel and results are optimistic.")
     print(f"Loaded {len(scored)} scored rows from {args.scored_path}")
     if args.from_date or args.until_date:
         d = pd.to_datetime(scored["date"])
@@ -126,7 +143,7 @@ def main() -> None:
         cfg = BacktestConfig(
             benchmark_ticker=None, initial_capital=args.capital, **ov,
         )
-        res = engine(scored, cfg)
+        res = engine(scored, cfg, execution_prices=exec_px)
         rows.append(_row(label, res.metrics))
         navs.append((label, res.daily_nav))
         print(f"  ran: {label} ({res.metrics.get('n_cohorts', 0):.0f} closed trades/cohorts)")
