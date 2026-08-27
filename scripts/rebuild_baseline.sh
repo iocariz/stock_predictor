@@ -31,8 +31,15 @@ cd "$ROOT"
 # --- not a rerun of this one, which is why they are recorded to disk.      ---
 : "${TRAIN_PROVIDER:=hybrid}"     # recovers delisted names; survivorship matters here
 : "${TRAIN_START:=2010-01-01}"
-: "${TRAIN_END:=2024-12-31}"
-: "${TEST_START:=2025-01-01}"
+# The out-of-sample window is 2019 onward, not the pipeline's 2025 default.
+# A baseline has to be long enough to say anything: at horizon 63 the 2025
+# default leaves 413 sessions and twelve cohort trades, over a single bull
+# run. That measures the period, not the strategy. 2019 spans COVID, the 2022
+# drawdown and the recovery, and is the window every previously published
+# figure was measured on, which matters because those figures cannot be
+# retired until something comparable replaces them.
+: "${TRAIN_END:=2018-12-31}"
+: "${TEST_START:=2019-01-01}"
 : "${SAMPLE_N:=10000}"            # no cap: the whole point-in-time universe
 : "${HORIZON:=63}"
 : "${TOP_N:=15}"
