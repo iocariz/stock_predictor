@@ -13,8 +13,11 @@ these four gates, each of which is a hard failure:
 1. **Accounting reconciles exactly.** The NAV the engine reports must equal a
    NAV reconstructed independently from the cohort ledger. A mismatch means
    money appeared or vanished somewhere between the trades and the curve.
-2. **No stale fills.** Every fill priced against a real quote on the session it
-   claims to trade. One carried-forward price is one trade that did not happen.
+2. **No stale fills, and no unaccounted refusals.** Every fill priced against a
+   real quote on the session it claims to trade. Refusing to fill a delisted
+   name is correct and expected -- demanding zero refusals would only be
+   satisfiable by a survivorship-biased panel -- but every refusal must end in
+   a stated disposal or an open deferral, never in capital quietly vanishing.
 3. **Point-in-time integrity.** No scored row outside index membership on its
    own date, no label whose forward window runs past the data, and complete
    execution coverage for everything scored.
@@ -154,25 +157,39 @@ def gate_accounting(result, config: BacktestConfig, label: str) -> Gate:
 
 
 def gate_fills(result, label: str) -> Gate:
-    g = Gate(f"no stale or rejected fills ({label})")
+    g = Gate(f"fills are real and every refusal is accounted for ({label})")
     m = result.metrics
     requested = int(m.get("fills_requested", 0))
     rejected = int(m.get("fills_rejected", 0))
     stale = int(m.get("stale_fills", 0))
     deferred = int(m.get("exits_deferred", 0))
+    disposals = int(sum(v for k, v in m.items() if k.startswith("disposals_")))
     g.note(f"requested {requested}, rejected {rejected}, stale {stale}, "
-           f"deferred {deferred}")
+           f"deferred {deferred}, disposed {disposals}")
     if requested == 0:
         g.fail("no fills were even attempted")
+
+    # A *stale* fill is a trade that did not happen: a carried-forward price
+    # standing in for a quote. Zero, always.
     if stale:
         g.fail(f"{stale} fill(s) priced from a carried-forward quote")
-    if rejected:
-        # Not automatically fatal -- a rejected fill is the engine refusing to
-        # invent a price, which is correct behaviour -- but it means the
-        # execution panel does not cover everything the strategy wanted.
-        g.fail(f"{rejected} fill(s) had no real quote ({m.get('fill_reject_rate', 0):.2%})")
+
+    # A *rejected* fill is the opposite -- the engine refusing to invent a
+    # price for a name that stopped trading. Demanding zero of those would
+    # only be satisfiable by a panel with no delistings in it, which is the
+    # survivorship bias this whole exercise exists to remove. On the 2019-2026
+    # panel the rejections are names like MRO, DFS, JNPR and HES: real
+    # acquisitions, correctly refused and then disposed of by policy.
+    #
+    # What must hold is that every rejection was *accounted for* -- disposed
+    # by evidence or by the stated fallback, or still deferred and reported --
+    # rather than silently dropped.
+    unaccounted = rejected - disposals - deferred
+    if unaccounted > 0:
+        g.fail(f"{unaccounted} rejected fill(s) neither disposed nor deferred; "
+               "capital vanished without a stated policy")
     for k, v in sorted(m.items()):
-        if k.startswith("disposals_"):
+        if k.startswith("disposals_") and v:
             g.note(f"{k}: {int(v)}")
     return g
 
