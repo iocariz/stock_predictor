@@ -20,7 +20,12 @@ import pytest
 
 from stock_predictor.deploy import PromotionError, promote_model
 
-SESSIONS = pd.bdate_range(end="2026-08-21", periods=300)
+# Relative to today, not a hardcoded date. These fixtures pin a session index
+# and let promote_model compare it against the wall clock, so a literal end
+# date made the freshness gate trip on its own the moment the calendar moved
+# past it -- the suite passed for a few days and then failed for a reason
+# having nothing to do with the code. A test that expires is not a test.
+SESSIONS = pd.bdate_range(end=pd.Timestamp.today().normalize(), periods=300)
 
 
 class _Scorer:
@@ -35,7 +40,13 @@ class _Scorer:
         return [0.0] * len(X)
 
 
-def _write(path: Path, *, horizon: int = 63, train_end: str = "2024-12-31",
+RECENT_TRAIN_END = str((pd.Timestamp.today().normalize()
+                        - pd.Timedelta(days=200)).date())
+"""Comfortably inside the 2-year model-age limit, wherever 'today' happens to
+be. A literal date silently drifts toward the limit and eventually crosses it."""
+
+
+def _write(path: Path, *, horizon: int = 63, train_end: str = RECENT_TRAIN_END,
            features=("ret_1d",)) -> Path:
     meta = {"feature_cols": list(features), "horizon": horizon,
             "train_end": train_end, "objective": "rank"}

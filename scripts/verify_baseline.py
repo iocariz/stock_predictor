@@ -18,9 +18,11 @@ these four gates, each of which is a hard failure:
    name is correct and expected -- demanding zero refusals would only be
    satisfiable by a survivorship-biased panel -- but every refusal must end in
    a stated disposal or an open deferral, never in capital quietly vanishing.
-3. **Point-in-time integrity.** No scored row outside index membership on its
-   own date, no label whose forward window runs past the data, and complete
-   execution coverage for everything scored.
+3. **Point-in-time integrity, and no survivorship.** No scored row outside index
+   membership on its own date, no label whose forward window runs past the
+   data, complete execution coverage for everything scored, and every company
+   that left the index during the window present *with prices* -- counted by
+   rows, not by column, because an empty column passes a presence check.
 4. **Deterministic rerun.** The same inputs produce byte-identical outputs.
    Anything else means an unrecorded input.
 
@@ -259,6 +261,75 @@ def gate_pit(scored: pd.DataFrame, execution: pd.DataFrame, horizon: int) -> Gat
 
 
 # ---------------------------------------------------------------------------
+# 3b. Survivorship
+# ---------------------------------------------------------------------------
+
+
+MIN_DEPARTED_COVERAGE = 0.99
+"""Names that left the index during the window must be present *with prices*.
+They are the whole reason the hybrid provider exists."""
+
+MIN_ROWS_TO_COUNT = 20
+"""A column with a handful of prints is not a recovered ticker."""
+
+
+def gate_survivorship(execution: pd.DataFrame, scored: pd.DataFrame) -> Gate:
+    """Are the companies that left the index actually in the panel?
+
+    Checking that the *column* exists is not enough, and that mistake has
+    already been made once here: a rate-limited rebuild produced an execution
+    panel with all 358 departed names present as columns and 24 of them
+    entirely empty. Column presence passed; the panel was survivorship-biased
+    anyway, and the scored panel silently lost those names.
+
+    So this counts prices, not columns.
+    """
+    g = Gate("survivorship: departed names are present with data")
+    try:
+        stints = load_sp500_stints()
+    except Exception as exc:  # noqa: BLE001
+        g.fail(f"could not load membership stints: {exc}")
+        return g
+
+    st = stints.copy()
+    st["ticker"] = st["ticker"].astype(str)
+    st["end_date"] = pd.to_datetime(st["end_date"])
+    lo, hi = execution.index.min(), execution.index.max()
+    departed = st[(st["end_date"].notna())
+                  & (st["end_date"] >= lo) & (st["end_date"] <= hi)]
+    names = sorted(set(departed["ticker"]))
+    if not names:
+        g.fail("no departed names found in the window; check the stint data")
+        return g
+
+    priced, empty = [], []
+    for t in names:
+        if t not in execution.columns:
+            empty.append(t)
+            continue
+        col = execution[t]
+        if int(((col.notna()) & (col > 0)).sum()) >= MIN_ROWS_TO_COUNT:
+            priced.append(t)
+        else:
+            empty.append(t)
+
+    coverage = len(priced) / len(names)
+    g.note(f"{len(names)} names left the index in-window; "
+           f"{len(priced)} carry prices ({coverage:.1%})")
+    if empty:
+        g.note(f"without data: {empty[:14]}" + (" …" if len(empty) > 14 else ""))
+    if coverage < MIN_DEPARTED_COVERAGE:
+        g.fail(f"only {coverage:.1%} of departed names carry prices; the panel "
+               "is survivorship-biased and every return from it is flattered")
+
+    scored_departed = sorted(set(scored["ticker"].astype(str)) & set(names))
+    g.note(f"{len(scored_departed)} departed names reach the scored panel")
+    if priced and not scored_departed:
+        g.fail("no departed name is scored; selection cannot see them at all")
+    return g
+
+
+# ---------------------------------------------------------------------------
 # 4. Determinism
 # ---------------------------------------------------------------------------
 
@@ -321,7 +392,10 @@ def main() -> None:
                   slippage_bps=args.slippage_bps, benchmark_ticker=None,
                   rebalance_day=args.rebalance_day, reject_stale_fills=True)
 
-    gates: list[Gate] = [gate_pit(scored, execution, args.horizon)]
+    gates: list[Gate] = [
+        gate_pit(scored, execution, args.horizon),
+        gate_survivorship(execution, scored),
+    ]
 
     for label, engine, extra in (
         ("cohort", run_backtest, {}),
