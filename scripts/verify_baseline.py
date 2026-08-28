@@ -271,21 +271,45 @@ MIN_ROWS_TO_COUNT = 20
 
 
 def _vendor_absent(cache_dir: Path) -> set[str]:
-    """Tickers the vendor was asked for and genuinely does not serve.
+    """Tickers the vendor was asked for and cannot usefully serve.
 
-    Read from the cache manifest rather than guessed. This is what makes the
-    gate's bar the *measured* ceiling instead of a number chosen to pass: a
-    name missing because nobody fetched it fails, a name missing because it
-    does not exist upstream is tolerated and listed by name.
+    Read from the cache rather than guessed. This is what makes the gate's bar
+    the *measured* ceiling instead of a number chosen to pass: a name missing
+    because nobody fetched it fails, a name missing because it does not exist
+    upstream is tolerated and listed.
+
+    "Cannot serve" includes a stub. Tiingo returns 1-12 rows for BK, CDAY,
+    CSRA, DF, PEAK and WRK -- mostly renames and mergers -- and returns the
+    same on a refetch. A manifest entry alone would call those recovered,
+    because the frame was not literally empty; counting the rows is what
+    distinguishes "the vendor has nothing" from "we ran out of quota", and
+    only the second is fixable.
     """
-    path = Path(cache_dir) / "_manifest.json"
+    cache_dir = Path(cache_dir)
+    path = cache_dir / "_manifest.json"
     if not path.exists():
         return set()
     try:
         man = json.loads(path.read_text())
     except (json.JSONDecodeError, OSError):
         return set()
-    return {t for t, e in man.items() if isinstance(e, dict) and e.get("empty")}
+
+    absent: set[str] = set()
+    for t, e in man.items():
+        if not isinstance(e, dict):
+            continue
+        if e.get("empty"):
+            absent.add(t)
+            continue
+        cached = cache_dir / f"{t}.parquet"
+        if not cached.exists():
+            continue
+        try:
+            if len(pd.read_parquet(cached)) < MIN_ROWS_TO_COUNT:
+                absent.add(t)          # fetched; a stub is all there is
+        except Exception:  # noqa: BLE001 - unreadable means refetch, not tolerate
+            continue
+    return absent
 
 
 def gate_survivorship(execution: pd.DataFrame, scored: pd.DataFrame,
