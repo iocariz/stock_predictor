@@ -26,6 +26,19 @@ DEFAULT_STINTS_CACHE = (
 STINTS_CACHE_MAX_AGE_DAYS = 7
 
 
+def _finalize_stints(df: pd.DataFrame, apply_renames: bool) -> pd.DataFrame:
+    """Resolve renamed symbols, unless explicitly disabled.
+
+    Applied at every return path rather than at the call sites, because a
+    loader with three exits is a loader where one of them forgets.
+    """
+    if not apply_renames:
+        return df
+    from stock_predictor.renames import canonicalize_stints
+
+    return canonicalize_stints(df)
+
+
 def _read_stints_csv(raw: str) -> pd.DataFrame:
     df = pd.read_csv(io.StringIO(raw))
     df["ticker"] = df["ticker"].astype(str).str.replace(".", "-", regex=False)
@@ -43,6 +56,7 @@ def load_sp500_stints(
     max_age_days: float = STINTS_CACHE_MAX_AGE_DAYS,
     retries: int = 3,
     backoff_s: float = 2.0,
+    apply_renames: bool = True,
 ) -> pd.DataFrame:
     """Load membership stints: ticker, start_date, end_date (NaT = still in index per source).
 
@@ -54,6 +68,13 @@ def load_sp500_stints(
     A fresh cache is used directly. Otherwise the fetch is retried with
     backoff, and if it still fails a **stale** cache is preferred over
     failing — a slightly old membership table beats no run at all.
+
+    Tickers are resolved through :mod:`stock_predictor.renames` unless
+    *apply_renames* is off. The source names companies by the symbol they used
+    at the time, while prices are served under the symbol they use now, so
+    Anthem's 2002-2022 membership pointed at ``ANTM`` — a symbol nothing
+    prices — and dropped out of every panel. Resolving to ``ELV`` reattaches it
+    and rejoins the two halves of what was always one continuous membership.
     """
     cache = Path(cache_path) if cache_path is not None else DEFAULT_STINTS_CACHE
     fresh = (
@@ -61,7 +82,8 @@ def load_sp500_stints(
         and (time.time() - cache.stat().st_mtime) < max_age_days * 86400
     )
     if fresh:
-        return _read_stints_csv(cache.read_text(encoding="utf-8"))
+        return _finalize_stints(
+            _read_stints_csv(cache.read_text(encoding="utf-8")), apply_renames)
 
     raw = None
     for attempt in range(retries):
@@ -79,7 +101,8 @@ def load_sp500_stints(
                 age_d = (time.time() - cache.stat().st_mtime) / 86400
                 print(f"  PIT stints fetch failed ({exc}); using cached copy "
                       f"{age_d:.1f} days old")
-                return _read_stints_csv(cache.read_text(encoding="utf-8"))
+                return _finalize_stints(
+                    _read_stints_csv(cache.read_text(encoding="utf-8")), apply_renames)
             else:
                 raise
 
@@ -88,7 +111,7 @@ def load_sp500_stints(
         cache.write_text(raw, encoding="utf-8")
     except OSError as exc:  # a read-only checkout must not fail the run
         print(f"  Could not cache PIT stints ({exc})")
-    return _read_stints_csv(raw)
+    return _finalize_stints(_read_stints_csv(raw), apply_renames)
 
 
 def tickers_overlapping_window(
