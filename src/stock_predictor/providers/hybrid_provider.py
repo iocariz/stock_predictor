@@ -46,6 +46,19 @@ that answers "does this file cover the new request?". The data's own range
 cannot: a ticker that IPO'd in 2015 legitimately has no 2010 rows, and
 comparing against requested dates alone would refetch it forever."""
 
+DEFAULT_END_TOLERANCE_DAYS = 7
+"""How far behind the requested end a cached file may sit and still be used.
+
+Requests default to "today", so comparing the end date exactly expired every
+cached ticker at midnight. Against a rate-limited vendor that is silent data
+loss, not a slow cache: a rebuild on 2026-08-27 invalidated files recorded as
+ending 2026-08-26, hit Tiingo's daily limit, and produced a panel missing 24
+delisted names -- the acquisitions that make the panel survivorship-free.
+
+The start date stays strict, because missing history is missing data. The end
+gets slack, because the vendor cannot serve sessions that have not happened and
+a few days of tail does not change a training panel."""
+
 DEFAULT_EMPTY_TTL_DAYS = 7
 """How long a known miss is trusted. Caching misses stops a rate-limited run
 from re-asking for names Tiingo does not have; caching them forever turns one
@@ -80,6 +93,7 @@ class HybridProvider:
         self._yf = yf_provider or YFinanceProvider(batch_size=batch_size)
         self._session = None
         self.empty_ttl_days = DEFAULT_EMPTY_TTL_DAYS
+        self.end_tolerance_days = DEFAULT_END_TOLERANCE_DAYS
 
     # -- Tiingo ------------------------------------------------------------
 
@@ -169,10 +183,15 @@ class HybridProvider:
                     return False
                 age = datetime.now(timezone.utc) - fetched.to_pydatetime()
                 return age < timedelta(days=self.empty_ttl_days)
-            return (
-                str(entry.get("start", "9999")) <= str(start)
-                and str(entry.get("end", "0000")) >= str(end)
-            )
+            if str(entry.get("start", "9999")) > str(start):
+                return False       # missing history is missing data
+            cached_end = pd.to_datetime(entry.get("end"), errors="coerce")
+            wanted_end = pd.to_datetime(end, errors="coerce")
+            if pd.isna(cached_end) or pd.isna(wanted_end):
+                return False
+            if cached_end >= wanted_end:
+                return True
+            return (wanted_end - cached_end).days <= self.end_tolerance_days
         # Legacy file written before the manifest existed. Its own dates are a
         # conservative lower bound on what was requested, so a sub-range of the
         # data it holds is still safe to serve.

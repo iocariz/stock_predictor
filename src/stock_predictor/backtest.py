@@ -1270,6 +1270,24 @@ def run_rank_hold_backtest(
     metrics["disposals_written_off"] = float(disposals.get("write_off", 0))
     metrics["disposal_proceeds"] = float(proceeds_cash)
     metrics["n_open_positions"] = float(len(open_pos))
+    # A NAV nobody can reconcile is a NAV nobody can check. Positions still
+    # open at the end never appear in `closed`, so the cohort ledger alone
+    # cannot explain the final value; these two make the identity closeable:
+    #
+    #     final NAV = initial capital + closed P&L + (open value - open basis)
+    #
+    # scripts/verify_baseline.py asserts exactly that.
+    _final = pd.Timestamp(trading_dates[-1])
+    open_value = 0.0
+    open_basis = 0.0
+    for t, pos in open_pos.items():
+        px = float(price_panel.at[_final, t]) if t in price_panel.columns else float("nan")
+        if px != px or px <= 0:
+            px = float(pos["raw_entry"])
+        open_value += pos["shares"] * px
+        open_basis += pos["basis"]
+    metrics["open_position_value"] = open_value
+    metrics["open_position_basis"] = open_basis
 
     start_date = pd.Timestamp(trading_dates[0])
     end_date = pd.Timestamp(trading_dates[-1])

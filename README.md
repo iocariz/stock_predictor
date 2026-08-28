@@ -2,6 +2,28 @@
 
 LightGBM model that ranks S&P 500 stocks by expected 10-day performance. Two training objectives are supported: a **binary classifier** (probability of gaining ≥ 5% over the next 10 sessions) and a **lambdarank ranker** (`--rank-objective`) trained on per-date forward-return quintile grades — a cross-sectional target that is market-neutral by construction. Built for educational research into quantitative equity screening—not production trading.
 
+> ## ⚠️ Performance figures in this file are obsolete
+>
+> A clean, verified rebuild on 2026-08-28 supersedes every performance number
+> below. See **[BASELINE.md](BASELINE.md)** for what replaces them and what
+> verified it. Two findings change how the rest of this document should be read:
+>
+> - **No significant alpha.** Against SPY on excess returns, the long-only book
+>   shows alpha of **+1.00%/yr (HAC t = +0.20)** for the cohort engine and
+>   **+4.86% (t = +0.62)** for rank-hold, on betas of **+1.14** and **+1.39**.
+>   It beats the index on raw return by carrying leveraged market exposure, not
+>   by selection skill.
+> - **The headline number is not stable.** Four rebuilds from one commit, one
+>   pinned data window and one seed produced cohort CAGRs of 13.85%, 16.58%,
+>   18.21% and 22.40% — **17.76% ± 3.58%**. SPY returned 17.60% over the same
+>   window. Vendor float noise flips LightGBM splits, and a different fifteen
+>   names get held. Every figure quoted below to two decimals implies a
+>   precision that does not exist, and most historical comparisons between
+>   configurations are smaller than this noise floor.
+>
+> The findings *about defects* below remain accurate and are worth reading; the
+> performance figures attached to them are not.
+
 The evaluation pipeline is deliberately conservative: purged walk-forward splits (no forward-return label ever straddles a train/test boundary), cash-ledger backtest NAV (realized P&L, slippage, and commissions all compound through cash), benchmark comparison with CAPM alpha/beta, information ratio, and alpha t-statistics, and sweep tooling for out-of-sample sub-window checks.
 
 ## Setup
