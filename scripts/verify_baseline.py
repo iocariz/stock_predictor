@@ -23,8 +23,11 @@ these four gates, each of which is a hard failure:
    data, complete execution coverage for everything scored, and every company
    that left the index during the window present *with prices* -- counted by
    rows, not by column, because an empty column passes a presence check.
-4. **Deterministic rerun.** The same inputs produce byte-identical outputs.
-   Anything else means an unrecorded input.
+4. **Deterministic backtest.** The same scored panel produces byte-identical
+   NAV. Note the scope: this does not make the *pipeline* reproducible. Two
+   rebuilds from one commit and one pinned window differ by several points of
+   CAGR, because vendor float noise flips tree splits. See
+   :func:`gate_determinism`.
 
 Usage:
 
@@ -403,8 +406,25 @@ def _hash_series(s: pd.Series) -> str:
 
 
 def gate_determinism(scored, execution, config, engine, label: str) -> Gate:
-    """Same inputs, same outputs. Twice, in one process, then compared by hash."""
-    g = Gate(f"deterministic rerun ({label})")
+    """Same scored panel, same NAV. Twice, in one process, compared by hash.
+
+    Scope, stated because the name overstates it: this covers the *backtest*
+    given a fixed scored panel. It does not cover the pipeline that produced
+    that panel, and the pipeline is **not** reproducible across runs.
+
+    Two rebuilds from the same commit, the same pinned data window and the
+    same seed produced execution panels that agree to 2e-6 relative -- float
+    noise in the vendor's adjustment arithmetic, not revised data -- and
+    cohort CAGRs of 18.21% and 22.40%. LightGBM splits flip on near-ties, the
+    ranking changes, and a different fifteen names get held. Both runs passed
+    every gate here.
+
+    So a number from this pipeline carries run-to-run uncertainty of several
+    points of CAGR, and quoting one to two decimals implies a precision that
+    does not exist. Bit-level reproducibility would need replay from the
+    hashed snapshot instead of a fresh download.
+    """
+    g = Gate(f"deterministic backtest, fixed scores ({label})")
     a = engine(scored, config, execution_prices=execution)
     b = engine(scored, config, execution_prices=execution)
     ha, hb = _hash_series(a.daily_nav), _hash_series(b.daily_nav)
