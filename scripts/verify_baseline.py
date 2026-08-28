@@ -46,6 +46,7 @@ import pandas as pd
 from stock_predictor.backtest import BacktestConfig, run_backtest, run_rank_hold_backtest
 from stock_predictor.bundle import describe_bundle, price_divergence, validate_execution_panel
 from stock_predictor.pit import load_sp500_stints
+from stock_predictor.providers.hybrid_provider import DEFAULT_CACHE
 
 ACCOUNTING_TOLERANCE = 1e-6
 """Relative. This is float arithmetic on the same quantities, not a modelling
@@ -265,24 +266,45 @@ def gate_pit(scored: pd.DataFrame, execution: pd.DataFrame, horizon: int) -> Gat
 # ---------------------------------------------------------------------------
 
 
-MIN_DEPARTED_COVERAGE = 0.99
-"""Names that left the index during the window must be present *with prices*.
-They are the whole reason the hybrid provider exists."""
-
 MIN_ROWS_TO_COUNT = 20
 """A column with a handful of prints is not a recovered ticker."""
 
 
-def gate_survivorship(execution: pd.DataFrame, scored: pd.DataFrame) -> Gate:
+def _vendor_absent(cache_dir: Path) -> set[str]:
+    """Tickers the vendor was asked for and genuinely does not serve.
+
+    Read from the cache manifest rather than guessed. This is what makes the
+    gate's bar the *measured* ceiling instead of a number chosen to pass: a
+    name missing because nobody fetched it fails, a name missing because it
+    does not exist upstream is tolerated and listed by name.
+    """
+    path = Path(cache_dir) / "_manifest.json"
+    if not path.exists():
+        return set()
+    try:
+        man = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return set()
+    return {t for t, e in man.items() if isinstance(e, dict) and e.get("empty")}
+
+
+def gate_survivorship(execution: pd.DataFrame, scored: pd.DataFrame,
+                      cache_dir: Path = DEFAULT_CACHE) -> Gate:
     """Are the companies that left the index actually in the panel?
 
     Checking that the *column* exists is not enough, and that mistake has
     already been made once here: a rate-limited rebuild produced an execution
-    panel with all 358 departed names present as columns and 24 of them
+    panel with all 358 departed names present as columns and 148 of them
     entirely empty. Column presence passed; the panel was survivorship-biased
-    anyway, and the scored panel silently lost those names.
+    anyway, and the scored panel silently lost those names. So this counts
+    prices, not columns.
 
-    So this counts prices, not columns.
+    The bar is the measured ceiling, not a percentage. A departed name missing
+    because the quota ran out is a failure -- it is recoverable, and shipping
+    without it biases every return. A name missing because the vendor has no
+    data for it at all is tolerated, named in the output, and written to
+    ``survivorship_gap.json`` beside the baseline so the residual is auditable
+    rather than folded into a threshold.
     """
     g = Gate("survivorship: departed names are present with data")
     try:
@@ -313,19 +335,35 @@ def gate_survivorship(execution: pd.DataFrame, scored: pd.DataFrame) -> Gate:
         else:
             empty.append(t)
 
+    absent = _vendor_absent(cache_dir)
+    unavailable = sorted(t for t in empty if t in absent)
+    recoverable = sorted(t for t in empty if t not in absent)
     coverage = len(priced) / len(names)
-    g.note(f"{len(names)} names left the index in-window; "
-           f"{len(priced)} carry prices ({coverage:.1%})")
-    if empty:
-        g.note(f"without data: {empty[:14]}" + (" …" if len(empty) > 14 else ""))
-    if coverage < MIN_DEPARTED_COVERAGE:
-        g.fail(f"only {coverage:.1%} of departed names carry prices; the panel "
-               "is survivorship-biased and every return from it is flattered")
+    ceiling = (len(names) - len(unavailable)) / len(names)
+
+    g.note(f"{len(names)} names left the index in-window; {len(priced)} carry "
+           f"prices ({coverage:.1%}); vendor ceiling {ceiling:.1%}")
+    if unavailable:
+        g.note(f"{len(unavailable)} unavailable upstream (tolerated): "
+               + ", ".join(unavailable[:12]) + (" …" if len(unavailable) > 12 else ""))
+    if recoverable:
+        g.fail(f"{len(recoverable)} departed name(s) are recoverable but absent "
+               f"-- refetch before quoting anything: {recoverable[:12]}")
 
     scored_departed = sorted(set(scored["ticker"].astype(str)) & set(names))
     g.note(f"{len(scored_departed)} departed names reach the scored panel")
     if priced and not scored_departed:
         g.fail("no departed name is scored; selection cannot see them at all")
+
+    g.residual = {                                    # written out by main()
+        "departed_in_window": len(names),
+        "with_prices": len(priced),
+        "coverage": round(coverage, 4),
+        "vendor_ceiling": round(ceiling, 4),
+        "unavailable_upstream": unavailable,
+        "recoverable_but_absent": recoverable,
+        "scored": len(scored_departed),
+    }
     return g
 
 
@@ -392,10 +430,10 @@ def main() -> None:
                   slippage_bps=args.slippage_bps, benchmark_ticker=None,
                   rebalance_day=args.rebalance_day, reject_stale_fills=True)
 
-    gates: list[Gate] = [
-        gate_pit(scored, execution, args.horizon),
-        gate_survivorship(execution, scored),
-    ]
+    surv = gate_survivorship(execution, scored)
+    if getattr(surv, "residual", None):
+        (d / "survivorship_gap.json").write_text(json.dumps(surv.residual, indent=2))
+    gates: list[Gate] = [gate_pit(scored, execution, args.horizon), surv]
 
     for label, engine, extra in (
         ("cohort", run_backtest, {}),

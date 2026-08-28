@@ -47,6 +47,11 @@ cd "$ROOT"
 : "${USE_OPTUNA:=0}"              # tuning never moved the traded end; see README
 : "${SKIP_EARNINGS:=1}"
 : "${SEED:=42}"
+# Pin the data end date. Left unset, the download runs to "today", so the same
+# config produces a different panel tomorrow -- which is how two runs of this
+# script an hour apart differed. Recorded below, so a rerun reproduces the
+# window rather than re-deciding it.
+: "${DATA_END:=$(date -u +%Y-%m-%d)}"
 
 MODEL="$BASELINE_DIR/model.pkl"
 WF_SCORES="$BASELINE_DIR/wf_scored.parquet"
@@ -66,6 +71,7 @@ cat > "$CONFIG" <<JSON
   "created_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "provider": "$TRAIN_PROVIDER",
   "start": "$TRAIN_START",
+  "data_end": "$DATA_END",
   "train_end": "$TRAIN_END",
   "test_start": "$TEST_START",
   "sample_n": $SAMPLE_N,
@@ -88,6 +94,7 @@ echo "Training -> $LOG (this takes a while; the download dominates)"
 uv run train-sp500 \
   --provider "$TRAIN_PROVIDER" \
   --start "$TRAIN_START" \
+  --end "$DATA_END" \
   --train-end "$TRAIN_END" \
   --test-start "$TEST_START" \
   --sample-n "$SAMPLE_N" \
