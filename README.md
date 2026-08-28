@@ -8,14 +8,14 @@ LightGBM model that ranks S&P 500 stocks by expected 10-day performance. Two tra
 > below. See **[BASELINE.md](BASELINE.md)** for what replaces them and what
 > verified it. Two findings change how the rest of this document should be read:
 >
-> - **No significant alpha.** Against SPY on excess returns, the long-only book
->   shows alpha of **+1.00%/yr (HAC t = +0.20)** for the cohort engine and
->   **+4.86% (t = +0.62)** for rank-hold, on betas of **+1.14** and **+1.39**.
->   It beats the index on raw return by carrying leveraged market exposure, not
->   by selection skill.
+> - **No alpha, and the traded engine's is negative.** Against SPY on excess
+>   returns, the cohort engine — the one the live path simulates — shows
+>   **−2.47%/yr (HAC t = −0.51)** on beta **+1.245**: less than the index, on
+>   more risk than the index. Rank-hold shows **+6.80% (t = +0.84)** on beta
+>   **+1.431**. Whatever either beats on raw return, it beats by leverage.
 > - **The headline number is not stable.** Four rebuilds from one commit, one
->   pinned data window and one seed produced cohort CAGRs of 13.85%, 16.58%,
->   18.21% and 22.40% — **17.76% ± 3.58%**. SPY returned 17.60% over the same
+>   pinned data window and one seed produced cohort CAGRs of 13.05%, 13.66%,
+>   16.29% and 18.11% — **15.28% ± 2.36%**. SPY returned 17.60% over the same
 >   window. Vendor float noise flips LightGBM splits, and a different fifteen
 >   names get held. Every figure quoted below to two decimals implies a
 >   precision that does not exist, and most historical comparisons between

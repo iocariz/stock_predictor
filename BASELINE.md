@@ -17,8 +17,8 @@ headline return is **not stable enough to quote to two decimals**.
 
 | | |
 |---|---|
-| commit | `df296a6ebc68` (clean tree) |
-| run id | `20260828T053022Z_94f664aa` |
+| commit | `ece4ffee58b8` (clean tree) |
+| run id | `20260828T100832Z_7f7e4ca3` |
 | built by | `./scripts/rebuild_baseline.sh` |
 | verified by | `uv run python scripts/verify_baseline.py artifacts/baseline` |
 
@@ -38,14 +38,14 @@ Input snapshot hashes (`artifacts/baseline/snapshot/manifest.json`):
 
 | snapshot | sha256 (16) | rows |
 |---|---|---|
-| `equity_prices_long` | `0b39d7e0016999b4` | 3,538,860 |
-| `execution_prices` | `0b39d7e0016999b4` | 3,538,860 |
-| `features_clean` | `191ccd6fd96f2345` | 1,906,663 |
-| `labeled` | `0e6334b2101dd6f4` | 2,774,557 |
-| `stints` | `2f2953aa2fa5207d` | 1,259 |
+| `equity_prices_long` | `1213ee0c85165e90` | 3,492,792 |
+| `execution_prices` | `1213ee0c85165e90` | 3,492,792 |
+| `features_clean` | `de889dcefe732ab1` | 1,939,552 |
+| `labeled` | `547cdea3ec4cdf80` | 2,790,875 |
+| `stints` | `e79279b39a66c96d` | 1,247 |
 
-Scored panel: 940,720 rows, 1,924 sessions, 640 tickers.
-Execution panel: 4,188 sessions × 845 tickers.
+Scored panel: 952,329 rows, 1,924 sessions, 643 tickers.
+Execution panel: 4,188 sessions × 834 tickers.
 
 ---
 
@@ -56,26 +56,42 @@ All eight gates pass. Each is a hard failure, not a warning.
 | gate | result |
 |---|---|
 | point-in-time integrity | 0 of 940,720 scored rows outside index membership; labels stop exactly at the last labelable session; execution covers every scored row; scored and execution prices agree on 940,720/940,720 cells |
-| survivorship | 313 of 358 departed names carry prices — **at the measured vendor ceiling**, see below |
+| survivorship | 317 of 347 departed names carry prices (**91.3%**) — at the measured vendor ceiling, see below |
 | accounting (cohort) | NAV reconciles with the trade ledger to `0.00e+00` |
 | accounting (rank-hold) | reconciles to `1.14e-16`, with 15 open positions and +45,910.79 unrealized |
 | fills (both engines) | zero stale fills; every refusal disposed under a stated policy |
 | deterministic backtest (both) | identical NAV hashes on repeat |
 
-### What the survivorship gate tolerates
+### Ticker renames
 
-45 of the 358 companies that left the index during the window carry no usable
-history, listed by name in `artifacts/baseline/survivorship_gap.json`. Tiingo
-returns 0–12 rows for each and returns the same on a refetch, so the gate's bar
-is the **measured ceiling (87.4%)**, not a threshold chosen to pass. A name
-missing because a quota ran out still fails.
+A renamed company looked exactly like a delisted one. Stints name companies by
+the symbol they used at the time; prices are served under the symbol they use
+now. So Anthem's 2002–2022 membership pointed at `ANTM`, which nothing prices,
+and the company was absent from the cross-section for the twenty years it was
+actually a member.
 
-**At least 12 of those 45 are not data gaps at all but ticker renames** — ABC→COR,
-ANTM→ELV, CBS→PARA, CDAY→DAY, COG→CTRA, PEAK→DOC, PKI→RVTY, RE→EG, WLTW→WTW,
-CTL→LUMN, TMK→GL, BLL→BALL — whose successors are already in the panel with full
-history. Mapping them would raise the ceiling to roughly 90% at no cost. Four
-more (BK, MMC, ATGE, IGT) are *currently listed* companies with 0–5 rows, which
-is a download fault rather than a vendor gap. Neither is fixed here.
+Fifteen such renames are now resolved (`src/stock_predictor/renames.py`), and
+the two halves of each membership rejoined into one stint. Survivorship
+coverage went **87.4% → 91.3%**, and the scored panel gained 11,609 rows.
+
+Every entry is validated against prices before it is trusted, because the
+plausible ones are not all real. **CBS→PARA, RX→IQV, ESV→VAL and MDP→IAC were
+rejected** — a merger, a re-IPO, a post-bankruptcy relisting and a break-up —
+each scoring *zero* coverage across the predecessor's stint. Trusting the
+plausible list would have attached Paramount's returns to CBS's membership.
+
+### What the survivorship gate still tolerates
+
+30 of the 347 companies that left the index carry no usable history, listed in
+`artifacts/baseline/survivorship_gap.json`. Both vendors return 0–12 rows for
+each and return the same on a refetch, so the bar is the **measured ceiling**,
+not a threshold chosen to pass; a name missing because a quota ran out still
+fails.
+
+Four of the 30 — **BK, MMC, ATGE, IGT** — are *currently listed* index members
+that neither yfinance nor Tiingo will serve. MMC and BK are large and liquid,
+so this is a vendor-side gap rather than anything this code does, but it means
+two current members are absent from every panel here.
 
 ---
 
@@ -86,21 +102,28 @@ commit and the same pinned window.
 
 | engine | CAGR | Sharpe | max drawdown |
 |---|---|---|---|
-| cohort (top-15, 63d) | **17.76% ± 3.58%** | 0.61 ± 0.10 | −37.8% ± 2.9% |
-| rank-hold (exit rank 40) | **22.48% ± 2.07%** | 0.66 ± 0.05 | −55.0% ± 1.5% |
+| cohort (top-15, 63d) | **15.28% ± 2.36%** | 0.53 ± 0.06 | −43.7% ± 0.6% |
+| rank-hold (exit rank 40) | **26.41% ± 1.46%** | 0.73 ± 0.03 | −49.8% ± 3.6% |
 | SPY, same window | 17.60% | — | — |
 
-Against SPY, with CAPM on excess returns and Newey–West standard errors:
+Against SPY, with CAPM on excess returns and Newey–West standard errors, mean
+of the same four runs:
 
 | engine | beta | alpha/yr | HAC t | information ratio |
 |---|---|---|---|---|
-| cohort | **+1.138** | +1.00% | **+0.20** | 0.15 |
-| rank-hold | **+1.392** | +4.86% | **+0.62** | 0.38 |
+| cohort | **+1.245** | **−2.47% ± 2.07%** | **−0.51** | +0.04 |
+| rank-hold | **+1.431** | +6.80% ± 1.22% | **+0.84** | +0.46 |
 
-**Neither alpha is distinguishable from zero.** The book beats the index on raw
-return because it carries beta 1.14–1.39 — it is leveraged market exposure, not
-selection skill. A cohort CAGR of 17.76% against SPY's 17.60%, with a 3.58%
-run-to-run standard deviation, is not evidence of an edge.
+**Neither engine shows evidence of skill, and the cohort engine — the one the
+live path simulates — has *negative* alpha.** It returns 15.28% against SPY's
+17.60% while carrying beta 1.25: less than the index, on more risk than the
+index. Rank-hold's alpha is positive but its t never exceeds 1.03 across the
+four runs.
+
+Whatever both engines beat on raw return, they beat by leverage. Correcting the
+panel for renames moved cohort alpha from +1.00% to −2.47% and rank-hold from
++4.86% to +6.80%; only the second exceeds the run-to-run spread, and with four
+runs per group that is suggestive rather than established.
 
 Signal quality, walk-forward, per signal date: precision@15 ≈ 0.47, rank IC
 ≈ +0.05, top-15 excess ≈ +3.1% per 63-session horizon. The ranking carries some
@@ -113,7 +136,7 @@ information; it does not survive the cost of trading it.
 The four runs above used **one commit, one pinned data window, one seed**. Their
 execution panels agree to `2e-6` relative — float noise in the vendor's
 adjustment arithmetic, not revised data, with identical coverage. They produced
-cohort CAGRs of 13.85%, 16.58%, 18.21% and 22.40%.
+cohort CAGRs of 13.05%, 13.66%, 16.29% and 18.11%.
 
 LightGBM splits flip on near-ties, the ranking changes, and a different fifteen
 names get held. **All four passed every gate.**
@@ -121,7 +144,7 @@ names get held. **All four passed every gate.**
 Three consequences, and they are not small:
 
 1. **Two-decimal precision is fiction.** Any figure from this pipeline carries
-   roughly ±3.6 points of CAGR at one sigma. Every number this project has ever
+   roughly ±2.4 points of CAGR at one sigma. Every number this project has ever
    quoted implied a precision that does not exist.
 2. **Most historical comparisons were noise.** Configuration A beating
    configuration B by two or three points of CAGR says nothing. The search
