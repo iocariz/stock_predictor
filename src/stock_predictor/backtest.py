@@ -776,6 +776,25 @@ def _prepare_scored(
     if len(trading_dates) < 2:
         raise ValueError("Need at least two distinct dates in scored_df")
 
+    # specs.md:240 -- a ticker scored twice on one date is invalid input, and
+    # failing here beats discovering it as a doubled position later. The pivot
+    # below would hide it too: aggfunc="first" silently keeps one row.
+    dup = df.duplicated(subset=["date", "ticker"], keep=False)
+    if bool(dup.any()):
+        offenders = (
+            df.loc[dup, ["date", "ticker"]]
+            .drop_duplicates()
+            .sort_values(["date", "ticker"])
+        )
+        sample = ", ".join(
+            f"{r.ticker}@{pd.Timestamp(r.date).date()}"
+            for r in offenders.head(6).itertuples()
+        )
+        raise ValueError(
+            f"scored_df has {len(offenders)} duplicate (date, ticker) pair(s): "
+            f"{sample}" + (" …" if len(offenders) > 6 else "")
+        )
+
     raw = df.pivot_table(
         index="date", columns="ticker", values="adj_close", aggfunc="first",
     ).sort_index()
