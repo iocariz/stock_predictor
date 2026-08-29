@@ -49,6 +49,7 @@ import pandas as pd
 from stock_predictor.backtest import BacktestConfig, run_backtest, run_rank_hold_backtest
 from stock_predictor.bundle import describe_bundle, price_divergence, validate_execution_panel
 from stock_predictor.providers.hybrid_provider import DEFAULT_CACHE
+from stock_predictor.renames import rename_coverage
 
 ACCOUNTING_TOLERANCE = 1e-6
 """Relative. This is float arithmetic on the same quantities, not a modelling
@@ -494,6 +495,71 @@ def gate_survivorship(execution: pd.DataFrame, scored: pd.DataFrame,
 
 
 # ---------------------------------------------------------------------------
+# 3c. Renames
+# ---------------------------------------------------------------------------
+
+
+MIN_RENAME_COVERAGE = 0.99
+"""A rename carries the company's history forward. Anything less is a different
+corporate event."""
+
+
+def gate_renames(stints: pd.DataFrame, execution: pd.DataFrame) -> Gate:
+    """Prove the rename map on *this* baseline's data, not on fixtures.
+
+    The map was applied unconditionally at load time while its validation
+    function ran only in synthetic tests -- a claim, not a gate. Every entry is
+    now checked against the panel that was actually built.
+
+    This needs the predecessor symbols, which canonicalisation replaces. They
+    survive in the ``alias`` column; a baseline built before that column
+    existed cannot prove its own mapping and is failed rather than passed on
+    the assumption that it was fine.
+
+    What this can establish, precisely: the successor prices the predecessor's
+    membership (necessary), and the two never trade concurrently after the
+    effective date (a real falsifier). What it cannot: that they are the same
+    issuer. That needs a permanent identifier this project does not carry, and
+    each entry's recorded note remains the actual warrant.
+    """
+    g = Gate("ticker renames are supported by the baseline's own prices")
+    if "alias" not in stints.columns:
+        g.fail("snapshot stints carry no alias column, so the renames applied "
+               "to this baseline cannot be checked from it -- rebuild")
+        return g
+
+    rows = []
+    for r in stints.itertuples():
+        for a in (str(r.alias).split("|") if r.alias else []):
+            rows.append({"ticker": a, "start_date": r.start_date,
+                         "end_date": r.end_date})
+    if not rows:
+        g.note("no renames applied to this baseline")
+        return g
+
+    cov = rename_coverage(pd.DataFrame(rows), execution)
+    if not cov:
+        g.fail("aliases are recorded but none could be evaluated")
+        return g
+
+    weak, concurrent = [], []
+    for old_sym, v in sorted(cov.items()):
+        if v["coverage"] < MIN_RENAME_COVERAGE:
+            weak.append(f"{old_sym}->{v['successor']} {v['coverage']:.0%}")
+        if v["concurrent_sessions"]:
+            concurrent.append(
+                f"{old_sym}/{v['successor']} {v['concurrent_sessions']} sessions")
+    g.note(f"{len(cov)} rename(s) applied and checked against this panel")
+    if weak:
+        g.fail("successor does not price the predecessor's membership: "
+               + ", ".join(weak))
+    if concurrent:
+        g.fail("both symbols traded after the effective date, so they are not "
+               "one issuer: " + ", ".join(concurrent))
+    return g
+
+
+# ---------------------------------------------------------------------------
 # 4. Determinism
 # ---------------------------------------------------------------------------
 
@@ -601,6 +667,7 @@ def main() -> None:
     gates: list[Gate] = [
         integrity,
         gate_pit(scored, execution, args.horizon, stints),
+        gate_renames(stints, execution),
         surv,
     ]
 

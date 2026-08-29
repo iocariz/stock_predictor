@@ -26,6 +26,8 @@ import pandas as pd
 import pytest
 
 from stock_predictor.renames import (
+    EFFECTIVE,
+    RENAMES,
     TICKER_RENAMES,
     canonical,
     canonicalize_stints,
@@ -154,3 +156,70 @@ def test_a_missing_successor_is_reported_not_crashed() -> None:
     cov = rename_coverage(stints, _prices({"AAPL": ("2010-01-01", "2026-08-28")}))
     assert cov["ANTM"]["successor"] == "ELV"
     assert cov["ANTM"]["coverage"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# The alias is recorded, not applied invisibly (specs.md:157)
+# ---------------------------------------------------------------------------
+
+
+def test_the_original_symbol_survives_canonicalisation() -> None:
+    """Rewriting the ticker and dropping the original is the invisible
+    application the spec forbids: downstream sees ELV with no trace it came
+    from ANTM, so the substitution cannot be audited from its own output."""
+    out = canonicalize_stints(_stints([("ANTM", "2002-07-25", "2022-06-28")]))
+    assert out.iloc[0]["alias"] == "ANTM"
+
+
+def test_an_untouched_ticker_records_no_alias() -> None:
+    out = canonicalize_stints(_stints([("AAPL", "2010-01-01", None)]))
+    assert out.iloc[0]["alias"] == ""
+
+
+def test_a_merged_membership_keeps_every_symbol_it_traded_under() -> None:
+    out = canonicalize_stints(_stints([
+        ("ANTM", "2002-07-25", "2022-06-28"),
+        ("ELV", "2022-06-28", None),
+    ]))
+    assert len(out) == 1
+    assert out.iloc[0]["alias"] == "ANTM"
+
+
+# ---------------------------------------------------------------------------
+# Effective dates, and the one falsifier prices can supply
+# ---------------------------------------------------------------------------
+
+
+def test_every_rename_carries_an_effective_date_and_a_note() -> None:
+    for r in RENAMES:
+        assert pd.notna(pd.Timestamp(r.effective)), r.old
+        assert r.note.strip(), r.old
+
+
+def test_effective_dates_are_exposed_for_every_entry() -> None:
+    assert set(EFFECTIVE) == set(TICKER_RENAMES)
+
+
+def test_concurrent_trading_falsifies_a_rename() -> None:
+    """One issuer cannot trade under two symbols at once. This is the only
+    real falsifier available from prices, and coverage alone cannot supply it:
+    a successor with long history satisfies coverage regardless."""
+    stints = _stints([("ANTM", "2012-01-01", "2022-06-28")])
+    prices = _prices({"ELV": ("2010-01-01", "2026-08-28"),
+                      "ANTM": ("2010-01-01", "2026-08-28")})
+    cov = rename_coverage(stints, prices)
+    assert cov["ANTM"]["coverage"] == pytest.approx(1.0), "coverage is fooled"
+    assert cov["ANTM"]["concurrent_sessions"] > 0, "concurrency is not"
+
+
+def test_a_clean_rename_shows_no_concurrency() -> None:
+    stints = _stints([("ANTM", "2012-01-01", "2022-06-28")])
+    prices = _prices({"ELV": ("2010-01-01", "2026-08-28"),
+                      "ANTM": ("2010-01-01", "2022-06-28")})
+    assert rename_coverage(stints, prices)["ANTM"]["concurrent_sessions"] == 0
+
+
+def test_coverage_reports_the_effective_date() -> None:
+    cov = rename_coverage(_stints([("ANTM", "2012-01-01", "2022-06-28")]),
+                          _prices({"ELV": ("2010-01-01", "2026-08-28")}))
+    assert cov["ANTM"]["effective"] == "2022-06-28"
