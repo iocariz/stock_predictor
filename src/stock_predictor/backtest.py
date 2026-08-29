@@ -964,14 +964,25 @@ def run_backtest(
     settled: list[bool] = []
 
     for sig_date in rebalance_dates:
-        # Credit realized proceeds from cohorts that exited before this signal.
+        # Credit realized proceeds from cohorts that have exited by this
+        # signal, *including* one exiting on it. The sale happens at that
+        # session's close and the replacement is bought on the session after,
+        # so the cash is a day old by the time it is needed -- which is also
+        # what _build_daily_nav assumes (it credits on exit_date and marks
+        # only through the day before) and what the live path does
+        # (find_expiring_positions treats expiry_date <= as_of as expired).
+        # Requiring a strict inequality here withheld the money and held the
+        # slot: on the 2019-2026 baseline, 13 of 57 cohorts.
         for i, c in enumerate(cohorts):
-            if not settled[i] and c.exit_date < sig_date:
+            if not settled[i] and c.exit_date <= sig_date:
                 cash += c.capital * (1.0 + c.net_return)
                 settled[i] = True
-        # Check overlapping cohort limit
+        # Check overlapping cohort limit. A cohort is a position from its
+        # entry until the session it sells on, exclusive -- matching
+        # active_cohort_ids, which counts a position only while
+        # expiry_date > as_of.
         active = sum(
-            1 for c in cohorts if c.entry_date <= sig_date <= c.exit_date
+            1 for c in cohorts if c.entry_date <= sig_date < c.exit_date
         )
         free_slots = config.max_overlapping_cohorts - active
         if free_slots <= 0:

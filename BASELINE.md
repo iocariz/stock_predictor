@@ -102,7 +102,7 @@ commit and the same pinned window.
 
 | engine | CAGR | Sharpe | max drawdown |
 |---|---|---|---|
-| cohort (top-15, 63d) | **15.28% ± 2.36%** | 0.53 ± 0.06 | −43.7% ± 0.6% |
+| cohort (top-15, 63d) | **20.24% ± 2.45%** | 0.67 ± 0.07 | −45.2% ± 2.6% |
 | rank-hold (exit rank 40) | **26.41% ± 1.46%** | 0.73 ± 0.03 | −49.8% ± 3.6% |
 | SPY, same window | 17.60% | — | — |
 
@@ -111,19 +111,21 @@ of the same four runs:
 
 | engine | beta | alpha/yr | HAC t | information ratio |
 |---|---|---|---|---|
-| cohort | **+1.245** | **−2.47% ± 2.07%** | **−0.51** | +0.04 |
+| cohort | **+1.190** | +2.36% ± 2.13% | **+0.37** | +0.24 |
 | rank-hold | **+1.431** | +6.80% ± 1.22% | **+0.84** | +0.46 |
 
-**Neither engine shows evidence of skill, and the cohort engine — the one the
-live path simulates — has *negative* alpha.** It returns 15.28% against SPY's
-17.60% while carrying beta 1.25: less than the index, on more risk than the
-index. Rank-hold's alpha is positive but its t never exceeds 1.03 across the
-four runs.
+**Neither engine shows evidence of skill.** Cohort alpha is +2.36% at t = +0.37,
+ranging from −0.05 to +0.77 across the four runs; rank-hold is +6.80% at
+t = +0.84 and never exceeds t = 1.03. Both carry beta well above 1 (1.19 and
+1.43), so most of what they beat the index by is leverage, not selection.
 
-Whatever both engines beat on raw return, they beat by leverage. Correcting the
-panel for renames moved cohort alpha from +1.00% to −2.47% and rank-hold from
-+4.86% to +6.80%; only the second exceeds the run-to-run spread, and with four
-runs per group that is suggestive rather than established.
+Two corrections landed on these figures and are recorded because the direction
+matters. Resolving ticker renames moved cohort alpha from +1.00% to −2.47%.
+Fixing the cohort expiry boundary — a cohort selling on a signal session was
+counted as still holding its slot, and its cash withheld from that session's
+entry, on 13 of 57 cohorts — moved it back to +2.36% and CAGR from 15.28% to
+20.24%. The sign of the cohort engine's alpha was an artifact of an off-by-one
+in both directions; its *insignificance* was not.
 
 Signal quality, walk-forward, per signal date: precision@15 ≈ 0.47, rank IC
 ≈ +0.05, top-15 excess ≈ +3.1% per 63-session horizon. The ranking carries some
@@ -136,7 +138,7 @@ information; it does not survive the cost of trading it.
 The four runs above used **one commit, one pinned data window, one seed**. Their
 execution panels agree to `2e-6` relative — float noise in the vendor's
 adjustment arithmetic, not revised data, with identical coverage. They produced
-cohort CAGRs of 13.05%, 13.66%, 16.29% and 18.11%.
+cohort CAGRs spanning 17.20% to 23.12%.
 
 LightGBM splits flip on near-ties, the ranking changes, and a different fifteen
 names get held. **All four passed every gate.**
@@ -144,7 +146,7 @@ names get held. **All four passed every gate.**
 Three consequences, and they are not small:
 
 1. **Two-decimal precision is fiction.** Any figure from this pipeline carries
-   roughly ±2.4 points of CAGR at one sigma. Every number this project has ever
+   roughly ±2.5 points of CAGR at one sigma. Every number this project has ever
    quoted implied a precision that does not exist.
 2. **Most historical comparisons were noise.** Configuration A beating
    configuration B by two or three points of CAGR says nothing. The search
