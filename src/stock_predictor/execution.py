@@ -181,7 +181,24 @@ def eligible_candidates(
     score floor deliberately shrinking the basket is intended, whereas a date
     with nothing to rank is not. The rank offset is applied *after* the score
     floor, so the traded band does not shift as the threshold moves.
+
+    A repeated ticker is refused rather than ranked (``specs.md:240``). Taking
+    rows instead of names turned one duplicated row into two holdings of the
+    same company at half weight each -- the per-name risk the top-N exists to
+    spread, silently concentrated, and described in every diagnostic as two
+    positions. Duplicates also propped up the cross-section floor, so five
+    copies of one name passed a floor of five. Picking one of the rows would
+    only be guessing which the model meant.
     """
+    if len(scored_day):
+        names = scored_day[ticker_col].astype(str)
+        dupes = sorted(set(names[names.duplicated()]))
+        if dupes:
+            raise ValueError(
+                f"duplicate ticker score(s) on one signal date: "
+                f"{', '.join(dupes[:8])}"
+                + (f" (+{len(dupes) - 8} more)" if len(dupes) > 8 else "")
+            )
     if len(scored_day) < rules.effective_min_cross_section:
         return []
 

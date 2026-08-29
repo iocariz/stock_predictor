@@ -251,6 +251,18 @@ def gate_pit(scored: pd.DataFrame, execution: pd.DataFrame, horizon: int) -> Gat
                        f"{pd.Timestamp(last_labelable).date()} has a full "
                        f"{horizon}-session forward window")
 
+    # specs.md:240. The panel is clean today; asserting it keeps it that way
+    # through a future merge that fans out or a hand-built input. A duplicated
+    # row becomes two holdings of one company at half weight each, and every
+    # count downstream reports it as two positions.
+    dup = scored.duplicated(subset=[ "date", "ticker"], keep=False)
+    n_dup = int(dup.sum())
+    g.note(f"{len(scored):,} rows, "
+           f"{len(scored[['date', 'ticker']].drop_duplicates()):,} unique (date, ticker)")
+    if n_dup:
+        g.fail(f"{n_dup} duplicate (date, ticker) row(s); one ticker scored "
+               "twice on a date becomes two holdings of the same company")
+
     findings = validate_execution_panel(scored, execution)
     if findings:
         g.fail(describe_bundle(findings).replace("\n", "\n        "))
