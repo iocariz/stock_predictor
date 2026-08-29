@@ -51,12 +51,17 @@ Execution panel: 4,188 sessions × 834 tickers.
 
 ## Verification
 
-All eight gates pass. Each is a hard failure, not a warning.
+All nine gates pass. Each is a hard failure, not a warning. Verification is
+**read-only and self-contained**: it reads membership from
+`snapshot/stints.parquet` and the vendor-absent set from `vendor_absent.json`
+recorded at build time, never from live state, and writes nothing into the
+baseline. Pass `--report` to emit the survivorship residual elsewhere.
 
 | gate | result |
 |---|---|
+| snapshot integrity | all five artifacts recomputed and matching their recorded sha256 |
 | point-in-time integrity | 0 of 940,720 scored rows outside index membership; labels stop exactly at the last labelable session; execution covers every scored row; scored and execution prices agree on 940,720/940,720 cells |
-| survivorship | 317 of 347 departed names carry prices (**91.3%**) — at the measured vendor ceiling, see below |
+| survivorship | 317 of 347 departed names carry prices (**91.4%**, the measured vendor ceiling); departed names are scored on **95.9%** of the sessions they were members (118,725/123,859 name-sessions) |
 | accounting (cohort) | NAV reconciles with the trade ledger to `0.00e+00` |
 | accounting (rank-hold) | reconciles to `1.14e-16`, with 15 open positions and +45,910.79 unrealized |
 | fills (both engines) | zero stale fills; every refusal disposed under a stated policy |
@@ -179,6 +184,15 @@ has no baseline, and its previously quoted figures remain unreproduced.
 ./scripts/rebuild_baseline.sh                                   # ~30 min, warm cache
 uv run python scripts/verify_baseline.py artifacts/baseline
 ```
+
+Verification does not modify the baseline, and its verdict is a property of the
+recorded artifacts rather than of the machine it runs on. A baseline built
+before `vendor_absent.json` existed falls back to the live cache and says so.
+
+**Known gap surfaced by the per-session coverage check:** 12 priced departed
+names — APC, FB, HCP, INFO, LB, NFX, SBNY, SCG among them — reach the scored
+panel on *none* of their member sessions. Several look like further renames
+(FB→META, HCP→PEAK, LB→BBWI) that the rename map does not yet cover.
 
 If the survivorship gate reports recoverable names, fill them first — Tiingo's
 free tier allows ~50–76 new tickers per window, so this resumes:

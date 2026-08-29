@@ -105,6 +105,37 @@ uv run train-sp500 \
   --snapshot-dir "$BASELINE_DIR/snapshot" \
   ${opts[@]+"${opts[@]}"} 2>&1 | tee "$LOG"
 
+# Record which tickers the vendor genuinely cannot serve, at build time. The
+# survivorship gate's bar depends on this set; reading it from the live cache
+# at verification time made the verdict on fixed artifacts depend on what had
+# happened to the cache since.
+uv run python - "$BASELINE_DIR" <<'PYEOF'
+import json, sys
+from pathlib import Path
+import pandas as pd
+from stock_predictor.providers.hybrid_provider import DEFAULT_CACHE
+
+out = Path(sys.argv[1]) / "vendor_absent.json"
+man_path = DEFAULT_CACHE / "_manifest.json"
+absent = []
+if man_path.exists():
+    man = json.loads(man_path.read_text())
+    for t, e in man.items():
+        if not isinstance(e, dict):
+            continue
+        if e.get("empty"):
+            absent.append(t); continue
+        f = DEFAULT_CACHE / f"{t}.parquet"
+        if f.exists():
+            try:
+                if len(pd.read_parquet(f)) < 20:
+                    absent.append(t)
+            except Exception:
+                pass
+out.write_text(json.dumps(sorted(absent), indent=2))
+print(f"Recorded {len(absent)} vendor-absent tickers -> {out}")
+PYEOF
+
 echo
 echo "Baseline artifacts in $BASELINE_DIR:"
 ls -la "$BASELINE_DIR"
