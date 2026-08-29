@@ -48,12 +48,66 @@ import pandas as pd
 
 from stock_predictor.backtest import BacktestConfig, run_backtest, run_rank_hold_backtest
 from stock_predictor.bundle import describe_bundle, price_divergence, validate_execution_panel
-from stock_predictor.pit import load_sp500_stints
 from stock_predictor.providers.hybrid_provider import DEFAULT_CACHE
 
 ACCOUNTING_TOLERANCE = 1e-6
 """Relative. This is float arithmetic on the same quantities, not a modelling
 approximation, so anything above this is a real discrepancy."""
+
+
+def load_snapshot_stints(baseline_dir: Path) -> pd.DataFrame:
+    """Index membership **as recorded with this baseline**.
+
+    Not the live table. The verdict on a fixed set of artifacts must not move
+    because membership changed, or because the rename map changed -- resolving
+    ticker renames alone rewrote 12 stints, which would have silently
+    re-scored every baseline built before it.
+    """
+    path = Path(baseline_dir) / "snapshot" / "stints.parquet"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"no snapshot stints at {path}; this baseline cannot be verified "
+            "reproducibly. Rebuild it with scripts/rebuild_baseline.sh."
+        )
+    return pd.read_parquet(path)
+
+
+def verify_snapshot_hashes(baseline_dir: Path) -> "Gate":
+    """Recompute every snapshot's sha256 and compare it to the manifest.
+
+    The manifest recorded hashes and nothing ever checked them, so a corrupted
+    or swapped artifact verified clean. A list of hashes nobody recomputes is
+    a list of hashes.
+    """
+    g = Gate("snapshot artifacts match their recorded hashes")
+    manifest = Path(baseline_dir) / "snapshot" / "manifest.json"
+    if not manifest.exists():
+        g.fail(f"no manifest at {manifest}; integrity cannot be established")
+        return g
+    try:
+        man = json.loads(manifest.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        g.fail(f"manifest is unreadable: {exc}")
+        return g
+
+    snaps = man.get("snapshots", {})
+    if not snaps:
+        g.fail("manifest records no snapshots")
+        return g
+
+    for name, meta in sorted(snaps.items()):
+        recorded = str(meta.get("sha256", ""))
+        path = Path(baseline_dir) / "snapshot" / f"{name}.parquet"
+        if not path.exists():
+            g.fail(f"{name}: recorded in the manifest but missing from disk")
+            continue
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != recorded:
+            g.fail(f"{name}: sha256 {actual[:16]} does not match the recorded "
+                   f"{recorded[:16]}")
+        else:
+            g.note(f"{name:22s} {actual[:16]}  {meta.get('rows', '?')} rows")
+    return g
 
 
 class Gate:
@@ -205,14 +259,9 @@ def gate_fills(result, label: str) -> Gate:
 # ---------------------------------------------------------------------------
 
 
-def gate_pit(scored: pd.DataFrame, execution: pd.DataFrame, horizon: int) -> Gate:
+def gate_pit(scored: pd.DataFrame, execution: pd.DataFrame, horizon: int,
+             stints: pd.DataFrame) -> Gate:
     g = Gate("point-in-time integrity")
-
-    try:
-        stints = load_sp500_stints()
-    except Exception as exc:  # noqa: BLE001 - a check that cannot run is a failure
-        g.fail(f"could not load membership stints: {exc}")
-        return g
 
     work = scored[["date", "ticker"]].copy()
     work["date"] = pd.to_datetime(work["date"])
@@ -281,6 +330,12 @@ def gate_pit(scored: pd.DataFrame, execution: pd.DataFrame, horizon: int) -> Gat
 # ---------------------------------------------------------------------------
 
 
+MIN_SCORED_COVERAGE = 0.95
+"""Priced departed names must actually be scorable while they were members.
+
+The old check asked only whether *some* departed name reached the scored panel,
+which a badly truncated panel also satisfies."""
+
 MIN_ROWS_TO_COUNT = 20
 """A column with a handful of prints is not a recovered ticker."""
 
@@ -328,7 +383,8 @@ def _vendor_absent(cache_dir: Path) -> set[str]:
 
 
 def gate_survivorship(execution: pd.DataFrame, scored: pd.DataFrame,
-                      cache_dir: Path = DEFAULT_CACHE) -> Gate:
+                      stints: pd.DataFrame, absent: set[str],
+                      absent_source: str) -> Gate:
     """Are the companies that left the index actually in the panel?
 
     Checking that the *column* exists is not enough, and that mistake has
@@ -346,12 +402,7 @@ def gate_survivorship(execution: pd.DataFrame, scored: pd.DataFrame,
     rather than folded into a threshold.
     """
     g = Gate("survivorship: departed names are present with data")
-    try:
-        stints = load_sp500_stints()
-    except Exception as exc:  # noqa: BLE001
-        g.fail(f"could not load membership stints: {exc}")
-        return g
-
+    g.note(f"vendor-absent set from {absent_source}")
     st = stints.copy()
     st["ticker"] = st["ticker"].astype(str)
     st["end_date"] = pd.to_datetime(st["end_date"])
@@ -374,7 +425,6 @@ def gate_survivorship(execution: pd.DataFrame, scored: pd.DataFrame,
         else:
             empty.append(t)
 
-    absent = _vendor_absent(cache_dir)
     unavailable = sorted(t for t in empty if t in absent)
     recoverable = sorted(t for t in empty if t not in absent)
     coverage = len(priced) / len(names)
@@ -389,10 +439,46 @@ def gate_survivorship(execution: pd.DataFrame, scored: pd.DataFrame,
         g.fail(f"{len(recoverable)} departed name(s) are recoverable but absent "
                f"-- refetch before quoting anything: {recoverable[:12]}")
 
-    scored_departed = sorted(set(scored["ticker"].astype(str)) & set(names))
-    g.note(f"{len(scored_departed)} departed names reach the scored panel")
-    if priced and not scored_departed:
-        g.fail("no departed name is scored; selection cannot see them at all")
+    # Per name and date, not "at least one". The old check passed as long as a
+    # single departed name reached the scored panel, which a badly truncated
+    # panel would also satisfy. What matters is whether each priced departed
+    # name is actually *scorable* on the sessions it was a member.
+    scored_dates = pd.DatetimeIndex(sorted(pd.to_datetime(scored["date"]).unique()))
+    by_ticker = scored.assign(date=pd.to_datetime(scored["date"])).groupby(
+        scored["ticker"].astype(str)
+    )["date"].apply(lambda x: set(x))
+    lo, hi = scored_dates.min(), scored_dates.max()
+
+    eligible = missing_rows = 0
+    thin: list[tuple[str, float]] = []
+    for t in priced:
+        rows = st[st[ "ticker"] == t]
+        want: set = set()
+        for r in rows.itertuples():
+            s0 = max(pd.Timestamp(r.start_date), lo)
+            e0 = min(pd.Timestamp(r.end_date), hi)
+            if pd.isna(s0) or pd.isna(e0) or s0 > e0:
+                continue
+            want |= set(scored_dates[(scored_dates >= s0) & (scored_dates <= e0)])
+        if not want:
+            continue
+        have = by_ticker.get(t, set()) & want
+        eligible += len(want)
+        missing_rows += len(want) - len(have)
+        ratio = len(have) / len(want)
+        if ratio < 0.5:
+            thin.append((t, ratio))
+
+    covered = 1.0 - (missing_rows / eligible) if eligible else 1.0
+    g.note(f"departed names scored on {covered:.1%} of the sessions they were "
+           f"members ({eligible - missing_rows:,}/{eligible:,} name-sessions)")
+    if thin:
+        worst = ", ".join(f"{t} {r:.0%}" for t, r in sorted(thin, key=lambda x: x[1])[:8])
+        g.note(f"{len(thin)} priced departed name(s) scored on under half their "
+               f"member sessions: {worst}")
+    if covered < MIN_SCORED_COVERAGE:
+        g.fail(f"priced departed names reach the scored panel on only "
+               f"{covered:.1%} of their member sessions")
 
     g.residual = {                                    # written out by main()
         "departed_in_window": len(names),
@@ -401,7 +487,8 @@ def gate_survivorship(execution: pd.DataFrame, scored: pd.DataFrame,
         "vendor_ceiling": round(ceiling, 4),
         "unavailable_upstream": unavailable,
         "recoverable_but_absent": recoverable,
-        "scored": len(scored_departed),
+        "scored_session_coverage": round(covered, 4),
+        "eligible_name_sessions": eligible,
     }
     return g
 
@@ -462,6 +549,10 @@ def main() -> None:
     ap.add_argument("--slippage-bps", type=float, default=5.0)
     ap.add_argument("--rebalance-day", default="Friday")
     ap.add_argument("--exit-rank", type=int, default=40)
+    ap.add_argument("--report", type=Path, default=None,
+                    help="Write the survivorship residual here. Verification "
+                         "never writes into the baseline directory: reading an "
+                         "artifact must not modify it.")
     args = ap.parse_args()
 
     d = args.baseline_dir
@@ -486,10 +577,32 @@ def main() -> None:
                   slippage_bps=args.slippage_bps, benchmark_ticker=None,
                   rebalance_day=args.rebalance_day, reject_stale_fills=True)
 
-    surv = gate_survivorship(execution, scored)
-    if getattr(surv, "residual", None):
-        (d / "survivorship_gap.json").write_text(json.dumps(surv.residual, indent=2))
-    gates: list[Gate] = [gate_pit(scored, execution, args.horizon), surv]
+    integrity = verify_snapshot_hashes(d)
+    stints = load_snapshot_stints(d)
+
+    # The vendor-absent set decides the survivorship bar, so where it comes
+    # from decides whether the verdict is reproducible. Prefer the copy
+    # recorded with the baseline; fall back to the live cache only with a note
+    # saying the result is no longer a property of these artifacts alone.
+    recorded = d / "vendor_absent.json"
+    if recorded.exists():
+        absent = set(json.loads(recorded.read_text()))
+        absent_source = "vendor_absent.json recorded with the baseline"
+    else:
+        absent = _vendor_absent(DEFAULT_CACHE)
+        absent_source = (f"the LIVE cache at {DEFAULT_CACHE} — not reproducible; "
+                         "rebuild to record it with the baseline")
+
+    surv = gate_survivorship(execution, scored, stints, absent, absent_source)
+    if args.report is not None:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(json.dumps(getattr(surv, "residual", {}), indent=2))
+        print(f"Survivorship residual -> {args.report}")
+    gates: list[Gate] = [
+        integrity,
+        gate_pit(scored, execution, args.horizon, stints),
+        surv,
+    ]
 
     for label, engine, extra in (
         ("cohort", run_backtest, {}),
@@ -525,9 +638,7 @@ def main() -> None:
         print(f"Baseline run {man.get('run_id', '?')} "
               f"commit {man.get('git_commit', '?')[:12]}"
               + ("  (DIRTY TREE)" if man.get("git_dirty") else ""))
-        for name, meta in sorted(man.get("snapshots", {}).items()):
-            print(f"  {name:22s} {meta.get('sha256', '?')[:16]}  "
-                  f"{meta.get('rows', '?')} rows")
+
     if cfg_path.exists():
         cfg = json.loads(cfg_path.read_text())
         if cfg.get("git_dirty"):
