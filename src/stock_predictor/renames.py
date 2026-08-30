@@ -27,25 +27,50 @@ honest.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pandas as pd
 
-TICKER_RENAMES: dict[str, str] = {
-    # old      new       company / when
-    "ABC":     "COR",   # AmerisourceBergen -> Cencora, 2023-08
-    "ADS":     "BFH",   # Alliance Data -> Bread Financial, 2022-03
-    "ANTM":    "ELV",   # Anthem -> Elevance Health, 2022-06
-    "BLL":     "BALL",  # Ball Corp, symbol change 2024
-    "CDAY":    "DAY",   # Ceridian -> Dayforce, 2024-02
-    "COG":     "CTRA",  # Cabot Oil & Gas -> Coterra Energy, 2021-10
-    "CTL":     "LUMN",  # CenturyLink -> Lumen Technologies, 2020-09
-    "FBHS":    "FBIN",  # Fortune Brands Home -> Fortune Brands Innovations, 2022-12
-    "GPS":     "GAP",   # Gap Inc, symbol change 2024
-    "HFC":     "DINO",  # HollyFrontier -> HF Sinclair, 2022-03
-    "PEAK":    "DOC",   # Healthpeak Properties, symbol change 2024
-    "PKI":     "RVTY",  # PerkinElmer -> Revvity, 2023-05
-    "RE":      "EG",    # Everest Re -> Everest Group, 2023-07
-    "TMK":     "GL",    # Torchmark -> Globe Life, 2019-08
-    "WLTW":    "WTW",   # Willis Towers Watson, symbol change 2022-01
+
+@dataclass(frozen=True)
+class Rename:
+    """One symbol change, with the date it took effect and what happened.
+
+    A bare ``old -> new`` pair records none of the things that make a rename
+    checkable. The effective date lets the two symbols be tested for
+    *concurrent trading*, which is the only falsification available from
+    prices alone, and it gives a human enough to look the event up.
+    """
+
+    old: str
+    new: str
+    effective: str
+    note: str
+
+
+RENAMES: tuple[Rename, ...] = (
+    Rename("ABC",  "COR",  "2023-08-30", "AmerisourceBergen renamed Cencora"),
+    Rename("ADS",  "BFH",  "2022-03-23", "Alliance Data renamed Bread Financial"),
+    Rename("ANTM", "ELV",  "2022-06-28", "Anthem renamed Elevance Health"),
+    Rename("BLL",  "BALL", "2024-01-02", "Ball Corp symbol change"),
+    Rename("CDAY", "DAY",  "2024-02-01", "Ceridian renamed Dayforce"),
+    Rename("COG",  "CTRA", "2021-10-04", "Cabot Oil & Gas renamed Coterra Energy"),
+    Rename("CTL",  "LUMN", "2020-09-18", "CenturyLink renamed Lumen Technologies"),
+    Rename("FBHS", "FBIN", "2022-12-19", "Fortune Brands Home renamed Innovations"),
+    Rename("GPS",  "GAP",  "2024-01-02", "Gap Inc symbol change"),
+    Rename("HFC",  "DINO", "2022-03-14", "HollyFrontier renamed HF Sinclair"),
+    Rename("PEAK", "DOC",  "2024-03-04", "Healthpeak Properties symbol change"),
+    Rename("PKI",  "RVTY", "2023-05-16", "PerkinElmer renamed Revvity"),
+    Rename("RE",   "EG",   "2023-07-10", "Everest Re renamed Everest Group"),
+    Rename("TMK",  "GL",   "2019-08-08", "Torchmark renamed Globe Life"),
+    Rename("WLTW", "WTW",  "2022-01-10", "Willis Towers Watson symbol change"),
+)
+
+TICKER_RENAMES: dict[str, str] = {r.old: r.new for r in RENAMES}
+"""Lookup view of :data:`RENAMES`."""
+
+EFFECTIVE: dict[str, pd.Timestamp] = {
+    r.old: pd.Timestamp(r.effective) for r in RENAMES
 }
 """Old symbol -> the symbol the same company trades under now.
 
@@ -106,7 +131,14 @@ def canonicalize_stints(
         return stints.copy() if stints is not None else stints
 
     work = stints.copy()
-    work[ticker_col] = [canonical(t, mapping) for t in work[ticker_col].astype(str)]
+    original = work[ticker_col].astype(str)
+    work[ticker_col] = [canonical(t, mapping) for t in original]
+    # specs.md:157 -- "Symbol mappings and corporate-action aliases MUST be
+    # recorded, not applied invisibly." Rewriting the ticker and dropping the
+    # original did exactly the thing that forbids: downstream saw ELV with no
+    # trace that the row came from ANTM, so the substitution could not be
+    # audited from the data it produced.
+    work["alias"] = [o if o != c else "" for o, c in zip(original, work[ticker_col])]
     work[start_col] = pd.to_datetime(work[start_col])
     work[end_col] = pd.to_datetime(work[end_col])
 
@@ -126,6 +158,10 @@ def canonicalize_stints(
                     not pd.isna(current[end_col]) and row[end_col] > current[end_col]
                 ):
                     current[end_col] = row[end_col]
+                # Keep every symbol the merged membership traded under.
+                merged_alias = {a for a in (current.get("alias", ""),
+                                            row.get("alias", "")) if a}
+                current["alias"] = "|".join(sorted(merged_alias))
             else:
                 out.append(current)
                 current = dict(row)
@@ -145,12 +181,27 @@ def rename_coverage(
     start_col: str = "start_date",
     end_col: str = "end_date",
 ) -> dict[str, dict]:
-    """For each rename, how much of the old stint the successor actually prices.
+    """Evidence for each rename, from prices alone.
 
-    This is what separates a rename from a merger. A real rename carries the
-    company's whole history forward under the new symbol and scores 1.0; a
-    merger or a re-listing scores near zero, because the surviving entity's
-    series begins when it began.
+    Two things are measured, and it is worth being exact about what each can
+    and cannot establish.
+
+    ``coverage`` is how much of the predecessor's membership the successor
+    prices. A real rename carries the company's history forward under the new
+    symbol and scores 1.0; a merger or a re-listing scores near zero because
+    the surviving entity's series begins when it began. This is *necessary*.
+
+    ``concurrent`` is the number of sessions after the effective date on which
+    **both** symbols have prices. One issuer cannot trade under two symbols at
+    once, so any concurrency falsifies the claim outright. This is the only
+    real falsifier available here.
+
+    Neither is *sufficient*. Two unrelated companies can have overlapping price
+    histories and never trade concurrently — a successor that simply has long
+    history will satisfy both tests. Prices cannot establish issuer identity;
+    that needs a permanent identifier (CUSIP/CIK/FIGI) this project does not
+    carry. Each entry's ``note`` records the corporate event so a human can
+    check it against a source, and that remains the actual warrant.
     """
     mapping = TICKER_RENAMES if mapping is None else mapping
     if stints is None or not len(stints) or prices is None or not len(prices):
@@ -175,10 +226,25 @@ def rename_coverage(
         if new in prices.columns and len(window):
             col = prices[new].reindex(window)
             have = int(((col.notna()) & (col > 0)).sum())
+        # Concurrency: after the symbol changed, only one of the two can
+        # trade. Both printing prices on the same session means they are not
+        # the same issuer, whatever the coverage says.
+        concurrent = 0
+        eff = EFFECTIVE.get(old)
+        if eff is not None and old in prices.columns and new in prices.columns:
+            after = idx[idx > eff]
+            if len(after):
+                a = prices[old].reindex(after)
+                b = prices[new].reindex(after)
+                both = ((a.notna()) & (a > 0) & (b.notna()) & (b > 0))
+                concurrent = int(both.sum())
+
         out[old] = {
             "successor": new,
+            "effective": str(eff.date()) if eff is not None else None,
             "sessions_wanted": int(len(window)),
             "sessions_priced": have,
             "coverage": (have / len(window)) if len(window) else 0.0,
+            "concurrent_sessions": concurrent,
         }
     return out
