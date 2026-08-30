@@ -17,8 +17,8 @@ headline return is **not stable enough to quote to two decimals**.
 
 | | |
 |---|---|
-| commit | `ece4ffee58b8` (clean tree) |
-| run id | `20260828T100832Z_7f7e4ca3` |
+| commit | `10b3142cfc4d` (clean tree) |
+| run id | `20260829T171657Z_359295b2` |
 | built by | `./scripts/rebuild_baseline.sh` |
 | verified by | `uv run python scripts/verify_baseline.py artifacts/baseline` |
 
@@ -38,11 +38,11 @@ Input snapshot hashes (`artifacts/baseline/snapshot/manifest.json`):
 
 | snapshot | sha256 (16) | rows |
 |---|---|---|
-| `equity_prices_long` | `1213ee0c85165e90` | 3,492,792 |
-| `execution_prices` | `1213ee0c85165e90` | 3,492,792 |
-| `features_clean` | `de889dcefe732ab1` | 1,939,552 |
-| `labeled` | `547cdea3ec4cdf80` | 2,790,875 |
-| `stints` | `e79279b39a66c96d` | 1,247 |
+| `equity_prices_long` | `6a88d6a5ec659a3c` | 3,492,792 |
+| `execution_prices` | `6a88d6a5ec659a3c` | 3,492,792 |
+| `features_clean` | `1b1a01d5e42b1fb7` | 1,939,552 |
+| `labeled` | `f5403eddb8bad3dc` | 2,790,875 |
+| `stints` | `27dbf956b96a35ae` | 1,247 |
 
 Scored panel: 952,329 rows, 1,924 sessions, 643 tickers.
 Execution panel: 4,188 sessions × 834 tickers.
@@ -51,7 +51,7 @@ Execution panel: 4,188 sessions × 834 tickers.
 
 ## Verification
 
-All nine gates pass. Each is a hard failure, not a warning. Verification is
+All ten gates pass. Each is a hard failure, not a warning. Verification is
 **read-only and self-contained**: it reads membership from
 `snapshot/stints.parquet` and the vendor-absent set from `vendor_absent.json`
 recorded at build time, never from live state, and writes nothing into the
@@ -60,6 +60,7 @@ baseline. Pass `--report` to emit the survivorship residual elsewhere.
 | gate | result |
 |---|---|
 | snapshot integrity | all five artifacts recomputed and matching their recorded sha256 |
+| ticker renames | all 15 checked against this panel's own prices: each successor carries the predecessor's membership, and none trade concurrently after the effective date |
 | point-in-time integrity | 0 of 940,720 scored rows outside index membership; labels stop exactly at the last labelable session; execution covers every scored row; scored and execution prices agree on 940,720/940,720 cells |
 | survivorship | 317 of 347 departed names carry prices (**91.4%**, the measured vendor ceiling); departed names are scored on **95.9%** of the sessions they were members (118,725/123,859 name-sessions) |
 | accounting (cohort) | NAV reconciles with the trade ledger to `0.00e+00` |
@@ -77,7 +78,19 @@ actually a member.
 
 Fifteen such renames are now resolved (`src/stock_predictor/renames.py`), and
 the two halves of each membership rejoined into one stint. Survivorship
-coverage went **87.4% → 91.3%**, and the scored panel gained 11,609 rows.
+coverage went **87.4% → 91.3%**, and the scored panel gained 11,609 rows. The
+predecessor symbol is recorded in an `alias` column rather than discarded
+(`specs.md:157`), which is also what lets the map be checked from the baseline
+afterwards.
+
+**What the validation does and does not establish.** Coverage shows the
+successor prices the predecessor's membership: necessary, not sufficient — a
+successor that simply has long history satisfies it whatever its identity.
+Each entry carries an effective date, which supplies the one real falsifier
+available from prices: after the symbol changed only one of the two can trade,
+so any session where both print refutes the claim. Neither test establishes
+*issuer identity*. That needs a permanent identifier (CUSIP/CIK/FIGI) this
+project does not carry, and each entry's recorded note remains the warrant.
 
 Every entry is validated against prices before it is trusted, because the
 plausible ones are not all real. **CBS→PARA, RX→IQV, ESV→VAL and MDP→IAC were
@@ -105,11 +118,18 @@ two current members are absent from every panel here.
 Out-of-sample 2019-01-02 → 2026-08-28, four independent rebuilds from the same
 commit and the same pinned window.
 
-| engine | CAGR | Sharpe | max drawdown |
-|---|---|---|---|
-| cohort (top-15, 63d) | **20.24% ± 2.45%** | 0.67 ± 0.07 | −45.2% ± 2.6% |
-| rank-hold (exit rank 40) | **26.41% ± 1.46%** | 0.73 ± 0.03 | −49.8% ± 3.6% |
-| SPY, same window | 17.60% | — | — |
+| engine | CAGR (n=4) | this artifact | Sharpe | max drawdown |
+|---|---|---|---|---|
+| cohort (top-15, 63d) | **20.24% ± 2.45%** | 15.43% | 0.67 ± 0.07 | −45.2% ± 2.6% |
+| rank-hold (exit rank 40) | **26.41% ± 1.46%** | 21.11% | 0.73 ± 0.03 | −49.8% ± 3.6% |
+| SPY, same window | 17.60% | 17.60% | — | — |
+
+The `n=4` column is the spread measured across four rebuilds; `this artifact`
+is the single run recorded above. **Both fall below the four-run band** —
+rank-hold by more than three of its standard deviations. Four runs is too few
+to have pinned the spread, and the honest reading is that it is wider than
+±1.5 points, not that this run is anomalous. Treat the range, not either
+column, as the estimate.
 
 Against SPY, with CAPM on excess returns and Newey–West standard errors, mean
 of the same four runs:
