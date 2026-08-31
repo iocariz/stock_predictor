@@ -18,6 +18,7 @@ from stock_predictor.data_provider import get_provider
 from stock_predictor.pit import (
     SP500_STINTS_URL,
     current_members,
+    drop_recycled_prices,
     load_sp500_stints,
 )
 from stock_predictor.training import (
@@ -498,6 +499,21 @@ def main() -> None:
 
     adj_close, volume = provider.download_equity_ohlcv(sample, start, end)
     print(f"  adj_close shape: {adj_close.shape}")
+
+    # A ticker is not a company. Once a member is acquired or renamed its
+    # symbol is retired and the exchange may reassign it, so the panel picks
+    # up a different issuer's prices under a departed member's name -- Qwest's
+    # Q priced from 2025, Anadarko's APC from 2026. 54 of 347 departed names
+    # were like this. The PIT filter keeps them out of the scored panel, but
+    # they stay in the execution panel where a deferred exit walking forward
+    # for the next real quote can reach them.
+    adj_close, volume, recycled = drop_recycled_prices(
+        adj_close, stints, volume=volume,
+    )
+    if recycled:
+        print(f"  Dropped reused-symbol price blocks for {len(recycled)} "
+              f"departed ticker(s): {', '.join(recycled[:8])}"
+              + (" …" if len(recycled) > 8 else ""))
     coverage = check_download_coverage(
         sample, adj_close,
         min_coverage=args.min_coverage,
