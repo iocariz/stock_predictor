@@ -17,8 +17,8 @@ headline return is **not stable enough to quote to two decimals**.
 
 | | |
 |---|---|
-| commit | `10b3142cfc4d` (clean tree) |
-| run id | `20260829T171657Z_359295b2` |
+| commit | `4a9e226c4008` (clean tree) |
+| run id | `20260830T204011Z_f814aa3d` |
 | built by | `./scripts/rebuild_baseline.sh` |
 | verified by | `uv run python scripts/verify_baseline.py artifacts/baseline` |
 
@@ -38,10 +38,12 @@ Input snapshot hashes (`artifacts/baseline/snapshot/manifest.json`):
 
 | snapshot | sha256 (16) | rows |
 |---|---|---|
-| `equity_prices_long` | `6a88d6a5ec659a3c` | 3,492,792 |
-| `execution_prices` | `6a88d6a5ec659a3c` | 3,492,792 |
-| `features_clean` | `1b1a01d5e42b1fb7` | 1,939,552 |
-| `labeled` | `f5403eddb8bad3dc` | 2,790,875 |
+| `equity_prices_long` | `fc1f0abcdcdbb765` | 3,492,792 |
+| `execution_prices` | `fc1f0abcdcdbb765` | 3,492,792 |
+| `features_clean` | `2c6f6c6bbe4b41b3` | 1,939,552 |
+| `labeled` | `398d274e3197ee86` | 2,790,875 |
+| `macro` | `3592ae0a96d169d0` | 4,227 |
+| `sector_map` | `408da130fa1f0985` | 503 |
 | `stints` | `27dbf956b96a35ae` | 1,247 |
 
 Scored panel: 952,329 rows, 1,924 sessions, 643 tickers.
@@ -158,7 +160,37 @@ information; it does not survive the cost of trading it.
 
 ---
 
-## The reproducibility limit
+## Reproducibility — solved
+
+`train-sp500 --replay-snapshot artifacts/baseline` verifies the recorded hashes
+and then rebuilds from them: prices, macro, membership and the sector map all
+come from the snapshot. Feature engineering, labelling, training and the
+walk-forward re-run as normal, so this replaces the *inputs*, not the pipeline
+— a code change still shows, the data no longer moves underneath it.
+
+Two of the five external inputs were not being recorded at all. The sector map
+and the macro series were fetched mid-build, so a run could not be reproduced
+from what it saved even in principle. Both are captured now.
+
+Measured on this baseline: two independent replays produced **byte-identical**
+`wf_scored.parquet` and `execution_prices.parquet`, and both reproduce the
+original run's backtest to four decimals.
+
+| | cohort CAGR | max DD | rank-hold CAGR | max DD |
+|---|---|---|---|---|
+| original run | 18.5206% | −44.6400% | 22.2642% | −57.9037% |
+| replay A | 18.5206% | −44.6400% | 22.2642% | −57.9037% |
+| replay B | 18.5206% | −44.6400% | 22.2642% | −57.9037% |
+
+Replay reproduces the *run*, not merely itself. A comparison between two
+measurements from one snapshot is now a comparison of the change, not of two
+draws — which is what makes any of the numbers below worth arguing about.
+
+**Fresh rebuilds still differ**, and that is a separate thing: re-downloading
+draws new vendor float noise and lands somewhere in the spread below. Use
+replay to compare code changes; use fresh rebuilds only to refresh the data.
+
+## The historical spread (fresh rebuilds)
 
 The four runs above used **one commit, one pinned data window, one seed**. Their
 execution panels agree to `2e-6` relative — float noise in the vendor's
@@ -177,9 +209,9 @@ Three consequences, and they are not small:
    configuration B by two or three points of CAGR says nothing. The search
    described under *"multiplicity"* in the README compared options whose true
    differences sit well below this floor.
-3. **Bit-reproducibility needs snapshot replay.** The snapshots are hashed and
-   written; the pipeline cannot yet consume one as input. Until it can, "rerun
-   the baseline" means "draw again from the same distribution", not "reproduce".
+3. **Bit-reproducibility is available.** `--replay-snapshot` reproduces a run
+   exactly from its recorded inputs; see *Reproducibility — solved* above. The
+   spread here applies to *fresh* rebuilds, which draw new vendor noise.
 
 ---
 
@@ -201,7 +233,18 @@ has no baseline, and its previously quoted figures remain unreproduced.
 ## Reproducing this
 
 ```bash
-./scripts/rebuild_baseline.sh                                   # ~30 min, warm cache
+# Reproduce this exact baseline from its snapshot (no network):
+uv run train-sp500 --replay-snapshot artifacts/baseline \
+  --provider hybrid --start 2010-01-01 --end 2026-08-28 \
+  --train-end 2018-12-31 --test-start 2019-01-01 --sample-n 10000 \
+  --horizon 63 --wf-top-k 15 --seed 42 --no-optuna --skip-earnings \
+  --output-model artifacts/replay/model.pkl \
+  --wf-scores-path artifacts/replay/wf_scored.parquet \
+  --execution-prices-path artifacts/replay/execution_prices.parquet \
+  --snapshot-dir artifacts/replay/snapshot
+
+# Or build a new one from fresh data (~30 min, warm cache):
+./scripts/rebuild_baseline.sh
 uv run python scripts/verify_baseline.py artifacts/baseline
 ```
 

@@ -13,7 +13,11 @@ LightGBM model that ranks S&P 500 stocks by expected 10-day performance. Two tra
 >   beta **+1.190**; rank-hold shows **+6.80% (t = +0.84)** on beta **+1.431**.
 >   Neither is distinguishable from zero, and both carry well over one unit of
 >   market risk, so most of what they beat the index by is leverage.
-> - **The headline number is not stable.** Four rebuilds from one commit, one
+> - **A run can now be reproduced exactly.** `train-sp500 --replay-snapshot`
+>   rebuilds from a run's verified snapshot; two replays produce byte-identical
+>   panels and reproduce the original backtest to four decimals. Use it to
+>   compare code changes. *Fresh* rebuilds still draw new vendor noise:
+> - **The headline number is not stable across fresh rebuilds.** Four rebuilds from one commit, one
 >   pinned data window and one seed produced cohort CAGRs spanning 17.20% to
 >   23.12% — **20.24% ± 2.45%**. SPY returned 17.60% over the same window. Vendor float noise flips LightGBM splits, and a different fifteen
 >   names get held. Every figure quoted below to two decimals implies a
