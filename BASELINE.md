@@ -17,8 +17,8 @@ headline return is **not stable enough to quote to two decimals**.
 
 | | |
 |---|---|
-| commit | `4a9e226c4008` (clean tree) |
-| run id | `20260830T204011Z_f814aa3d` |
+| commit | `05442e0057c4` (clean tree) |
+| run id | `20260831T085207Z_8e4abc34` |
 | built by | `./scripts/rebuild_baseline.sh` |
 | verified by | `uv run python scripts/verify_baseline.py artifacts/baseline` |
 
@@ -38,10 +38,10 @@ Input snapshot hashes (`artifacts/baseline/snapshot/manifest.json`):
 
 | snapshot | sha256 (16) | rows |
 |---|---|---|
-| `equity_prices_long` | `fc1f0abcdcdbb765` | 3,492,792 |
-| `execution_prices` | `fc1f0abcdcdbb765` | 3,492,792 |
-| `features_clean` | `2c6f6c6bbe4b41b3` | 1,939,552 |
-| `labeled` | `398d274e3197ee86` | 2,790,875 |
+| `equity_prices_long` | `063e8e757758d42a` | 3,492,792 |
+| `execution_prices` | `063e8e757758d42a` | 3,492,792 |
+| `features_clean` | `b612b49decab5d23` | 1,939,552 |
+| `labeled` | `ce423802b677d449` | 2,753,719 |
 | `macro` | `3592ae0a96d169d0` | 4,227 |
 | `sector_map` | `408da130fa1f0985` | 503 |
 | `stints` | `27dbf956b96a35ae` | 1,247 |
@@ -64,7 +64,7 @@ baseline. Pass `--report` to emit the survivorship residual elsewhere.
 | snapshot integrity | all five artifacts recomputed and matching their recorded sha256 |
 | ticker renames | all 15 checked against this panel's own prices: each successor carries the predecessor's membership, and none trade concurrently after the effective date |
 | point-in-time integrity | 0 of 940,720 scored rows outside index membership; labels stop exactly at the last labelable session; execution covers every scored row; scored and execution prices agree on 940,720/940,720 cells |
-| survivorship | 317 of 347 departed names carry prices (**91.4%**, the measured vendor ceiling); departed names are scored on **95.9%** of the sessions they were members (118,725/123,859 name-sessions) |
+| survivorship | 268 of 347 departed names carry prices **during their membership** (**77.2%**, the measured ceiling); departed names are scored on **99.9%** of the sessions they were members (118,721/118,896) |
 | accounting (cohort) | NAV reconciles with the trade ledger to `0.00e+00` |
 | accounting (rank-hold) | reconciles to `1.14e-16`, with 15 open positions and +45,910.79 unrealized |
 | fills (both engines) | zero stale fills; every refusal disposed under a stated policy |
@@ -99,6 +99,38 @@ plausible ones are not all real. **CBS→PARA, RX→IQV, ESV→VAL and MDP→IAC
 rejected** — a merger, a re-IPO, a post-bankruptcy relisting and a break-up —
 each scoring *zero* coverage across the predecessor's stint. Trusting the
 plausible list would have attached Paramount's returns to CBS's membership.
+
+### Reused ticker symbols
+
+A ticker is not a company. When one is acquired or renamed its symbol is
+retired and the exchange may reassign it, so the panel picks up a *different
+issuer's* prices under a departed member's name:
+
+| ticker | company, when it left | prices in the raw panel |
+|---|---|---|
+| APC | Anadarko, acquired 2019-08 | from 2026-02-12 |
+| FB | Facebook, renamed META 2022-06 | from 2025-06-26 |
+| Q | Qwest, left the index 2011-04 | from 2025-10-27 (14.6 years later) |
+| SNDK | SanDisk, acquired 2016 | from 2025-02-13 (a re-IPO, new entity) |
+
+**48 of 347 departed names are like this** — priced only outside the window
+they were ever members. They were being counted as survivorship recoveries,
+which is why coverage was reported as 91.4% when the truth is **77.2%**.
+
+The point-in-time filter kept them out of the scored panel, which is why none
+reached a trade and why they surfaced as zero-coverage rather than as bad
+fills. That filter was doing all the work. They still sat in the execution
+panel, where `_resolve_leg_exit` walks forward for the next real quote when an
+exit cannot fill — the write-off grace period ends that walk first under the
+default policy, but `fallback="hold"` does not, and the walk would sell a 2019
+holding at an unrelated 2026 company's price.
+
+`drop_recycled_prices` blanks a departed ticker's prices that resume after a
+long dead period, and the build records which tickers it altered. A company
+*demoted* out of the index keeps trading with continuous prices across the
+boundary — those are the same company and are exactly what prices an exit
+after a name drops out, so they are untouched. A reused symbol has years of
+nothing first.
 
 ### What the survivorship gate still tolerates
 
@@ -252,10 +284,9 @@ Verification does not modify the baseline, and its verdict is a property of the
 recorded artifacts rather than of the machine it runs on. A baseline built
 before `vendor_absent.json` existed falls back to the live cache and says so.
 
-**Known gap surfaced by the per-session coverage check:** 12 priced departed
-names — APC, FB, HCP, INFO, LB, NFX, SBNY, SCG among them — reach the scored
-panel on *none* of their member sessions. Several look like further renames
-(FB→META, HCP→PEAK, LB→BBWI) that the rename map does not yet cover.
+Those 12 zero-coverage names turned out not to be renames but **reused
+symbols** — see above. One remains: `SCG` (SCANA, acquired by Dominion 2019)
+has a single eligible session and no price on it.
 
 If the survivorship gate reports recoverable names, fill them first — Tiingo's
 free tier allows ~50–76 new tickers per window, so this resumes:
