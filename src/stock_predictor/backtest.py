@@ -1350,6 +1350,7 @@ def run_rank_hold_backtest(
 _REPORTING_EXPORTS = (
     "plot_backtest",
     "plot_strategy_comparison",
+    "print_long_short_report",
     "print_report",
     "print_strategy_comparison",
 )
@@ -1385,10 +1386,39 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--mode",
         default="cohort",
-        choices=["cohort", "rank-hold"],
+        choices=["cohort", "rank-hold", "long-short"],
         help="cohort: fixed holding_days baskets; rank-hold: continuous portfolio, "
-        "sell only when a name's rank decays beyond --exit-rank",
+        "sell only when a name's rank decays beyond --exit-rank; long-short: "
+        "dollar-neutral decile spread",
     )
+    ls = p.add_argument_group(
+        "long-short (--mode long-short)",
+        "The book every alpha figure in this project's history came from, and "
+        "the only one that was never reachable from a command line.",
+    )
+    ls.add_argument("--decile", type=float, default=0.1,
+                    help="Fraction of the ranked universe taken on each side")
+    ls.add_argument("--long-weight", type=float, default=0.5, dest="long_weight",
+                    help="Notional per side as a fraction of capital; the "
+                         "defaults give 1.0x gross and 0.0 net")
+    ls.add_argument("--short-weight", type=float, default=0.5, dest="short_weight")
+    ls.add_argument("--rebalance-every", type=int, default=None,
+                    dest="rebalance_every",
+                    help="Sessions between reconstitutions; defaults to --holding-days "
+                         "so the exit rule and the label horizon cannot drift apart")
+    ls.add_argument("--short-borrow", type=float, default=0.005,
+                    dest="short_borrow_annual",
+                    help="Flat annualized borrow when no per-name rates exist")
+    ls.add_argument("--per-name-borrow", action="store_true",
+                    dest="per_name_borrow",
+                    help="Charge borrow per position instead of one flat rate")
+    ls.add_argument("--hedge-beta", type=float, default=None, dest="hedge_beta",
+                    help="Short this much benchmark exposure as an overlay. "
+                         "Dollar-neutral is not market-neutral: this book "
+                         "carries positive beta because the model ranks "
+                         "volatility positively")
+    ls.add_argument("--min-names-per-side", type=int, default=5,
+                    dest="min_names_per_side")
     p.add_argument("--top-n", type=int, default=15)
     p.add_argument("--holding-days", type=int, default=10)
     p.add_argument(
@@ -1632,9 +1662,50 @@ def main() -> None:
     from stock_predictor.backtest_reporting import (
         plot_backtest,
         plot_strategy_comparison,
+        print_long_short_report,
         print_report,
         print_strategy_comparison,
     )
+
+    if args.mode == "long-short":
+        # A separate engine with a separate result shape, so it gets its own
+        # config and its own report rather than being forced through the
+        # cohort one. This is the book the project's alpha figures came from;
+        # until now it could only be run by importing it in a REPL.
+        from stock_predictor.long_short import (
+            LongShortConfig,
+            run_long_short_backtest,
+        )
+
+        ls_config = LongShortConfig(
+            decile=args.decile,
+            long_weight=args.long_weight,
+            short_weight=args.short_weight,
+            rebalance_every=(args.rebalance_every
+                             if args.rebalance_every is not None
+                             else args.holding_days),
+            slippage_bps=args.slippage_bps,
+            commission_per_share=args.commission_per_share,
+            commission_per_order=args.commission_per_order,
+            short_borrow_annual=args.short_borrow_annual,
+            per_name_borrow=args.per_name_borrow,
+            hedge_beta=args.hedge_beta,
+            reject_stale_fills=not args.allow_stale_fills,
+            risk_free_rate=args.rf_rate if args.rf_rate is not None else 0.045,
+            initial_capital=args.capital,
+            benchmark_ticker=args.benchmark_ticker,
+            min_names_per_side=args.min_names_per_side,
+            delisting_policy=DelistingPolicy(
+                fallback=args.delisting_fallback,
+                grace_sessions=args.delisting_grace_sessions,
+            ),
+        )
+        ls_result = run_long_short_backtest(
+            scored, ls_config, provider=bt_provider, execution_prices=exec_px,
+            delisting_proceeds=kwargs.get("delisting_proceeds"),
+        )
+        print_long_short_report(ls_result)
+        return
 
     result = backtest_fn(scored, config, provider=bt_provider, **kwargs)
     print_report(result)

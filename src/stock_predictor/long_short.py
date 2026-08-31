@@ -24,7 +24,7 @@ label horizon, holding period and signal horizon agree.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -39,6 +39,11 @@ from stock_predictor.backtest import (
     daily_risk_free,
 )
 from stock_predictor.borrow import resolve_borrow_rates
+from stock_predictor.delisting import (
+    DelistingPolicy,
+    disposal_value,
+    load_proceeds,
+)
 from stock_predictor.stats import market_exposure
 
 TRADING_DAYS = 252
@@ -91,6 +96,13 @@ class LongShortConfig:
     between quotes; executing against a carried-forward price fills at a price
     that did not exist that session. This engine previously ignored both the
     distinction and the diagnostics."""
+    delisting_policy: DelistingPolicy = field(default_factory=DelistingPolicy)
+    """What happens to a position that stops being sellable.
+
+    This engine used to have no answer: a rejected exit simply retained the
+    position, forever, marked at a carried-forward price. The other two engines
+    defer and then dispose by evidence or a stated fallback (``specs.md:249``);
+    all three now agree."""
     risk_free_rate: float = 0.045
     """Earned on the cash balance and used for Sharpe."""
     initial_capital: float = 100_000.0
@@ -155,12 +167,21 @@ def run_long_short_backtest(
     *,
     provider: object | None = None,
     execution_prices: pd.DataFrame | None = None,
+    delisting_proceeds: pd.DataFrame | None = None,
 ) -> LongShortResult:
     """Simulate a dollar-neutral long-short book with borrow and trading costs."""
     df, trading_dates, price_panel, actual = _prepare_scored(
         scored_df, execution_prices,
     )
     tally = {"requested": 0, "filled": 0, "rejected": 0}
+    deferred_exits = 0
+    disposals: dict[str, int] = {}
+    proceeds_cash = 0.0
+    proceeds_evidence = load_proceeds(delisting_proceeds)
+    # Sessions since each name last printed, so the grace period is counted in
+    # sessions rather than in rebalances -- which are 63 apart here.
+    _pos = np.arange(len(actual), dtype=float)
+    _last_priced = actual.mul(_pos, axis=0).where(actual).cummax()
 
     # The hedge is a synthetic short in the benchmark, priced alongside the
     # stocks so it pays the same slippage, borrow and financing as any other
@@ -281,16 +302,38 @@ def run_long_short_backtest(
                 for t in sorted(traded):
                     px = prices.get(t, np.nan)
                     tally["requested"] += 1
-                    if px != px or px <= 0:
+                    real = (t in actual.columns and day in actual.index
+                            and bool(actual.at[day, t]))
+                    unfillable = (px != px or px <= 0
+                                  or (config.reject_stale_fills and not real))
+                    if unfillable:
                         tally["rejected"] += 1
-                        continue
-                    # A carried-forward price marks a position; it does not
-                    # fill one. This engine ignored the distinction entirely.
-                    if config.reject_stale_fills and not (
-                        t in actual.columns and day in actual.index
-                        and bool(actual.at[day, t])
-                    ):
-                        tally["rejected"] += 1
+                        held = shares.get(t, 0.0)
+                        # Refusing an *entry* is the end of it: nothing was
+                        # opened. Refusing an *exit* leaves a position that has
+                        # to be resolved, or it sits in the book forever at a
+                        # carried-forward mark.
+                        if abs(held) > 1e-12:
+                            last = (
+                                _last_priced.at[day, t]
+                                if t in _last_priced.columns
+                                and day in _last_priced.index
+                                else float("nan")
+                            )
+                            gap = i + 1 if last != last else int(i - last)
+                            disposal = disposal_value(
+                                t, day, evidence=proceeds_evidence,
+                                sessions_unpriced=gap,
+                                policy=config.delisting_policy,
+                            )
+                            if disposal is None:
+                                deferred_exits += 1
+                            else:
+                                dpx, source = disposal
+                                disposals[source] = disposals.get(source, 0) + 1
+                                proceeds_cash += held * dpx
+                                cash += held * dpx
+                                shares.pop(t, None)
                         continue
                     tally["filled"] += 1
                     want = target.get(t, 0.0) / px
@@ -327,6 +370,11 @@ def run_long_short_backtest(
     metrics["gross_leverage"] = config.long_weight + config.short_weight
     metrics["hedge_beta"] = hedge_beta
     metrics.update(_fill_metrics(tally))
+    # specs.md:249 -- missing exits appear in the diagnostics, by source.
+    metrics["exits_deferred"] = float(deferred_exits)
+    metrics["disposals_by_evidence"] = float(disposals.get("evidence", 0))
+    metrics["disposals_written_off"] = float(disposals.get("write_off", 0))
+    metrics["disposal_proceeds"] = float(proceeds_cash)
     metrics["effective_borrow_rate"] = (
         borrowed_rate_sum / borrowed_notional if borrowed_notional > 0
         else config.short_borrow_annual
