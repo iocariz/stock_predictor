@@ -56,6 +56,17 @@ ACCOUNTING_TOLERANCE = 1e-6
 approximation, so anything above this is a real discrepancy."""
 
 
+def read_manifest_key(baseline_dir: Path, key: str):
+    """A recorded build fact, or ``None``. Missing is not the same as empty."""
+    path = Path(baseline_dir) / "snapshot" / "manifest.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text()).get(key)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 def load_snapshot_stints(baseline_dir: Path) -> pd.DataFrame:
     """Index membership **as recorded with this baseline**.
 
@@ -385,7 +396,7 @@ def _vendor_absent(cache_dir: Path) -> set[str]:
 
 def gate_survivorship(execution: pd.DataFrame, scored: pd.DataFrame,
                       stints: pd.DataFrame, absent: set[str],
-                      absent_source: str) -> Gate:
+                      absent_source: str, recycled: set[str] | None = None) -> Gate:
     """Are the companies that left the index actually in the panel?
 
     Checking that the *column* exists is not enough, and that mistake has
@@ -415,19 +426,50 @@ def gate_survivorship(execution: pd.DataFrame, scored: pd.DataFrame,
         g.fail("no departed names found in the window; check the stint data")
         return g
 
+    # Priced *while it was a member*. Counting any prices at all credited
+    # reused symbols as survivorship recoveries -- Qwest's Q "recovered" by a
+    # different company's 2025 listing -- and put reported coverage 15.6
+    # points above the truth, 91.4% against 75.8%.
     priced, empty = [], []
     for t in names:
         if t not in execution.columns:
             empty.append(t)
             continue
         col = execution[t]
-        if int(((col.notna()) & (col > 0)).sum()) >= MIN_ROWS_TO_COUNT:
+        real = col[(col.notna()) & (col > 0)]
+        rows = st[st["ticker"] == t]
+        inside = pd.Series(False, index=real.index)
+        for r in rows.itertuples():
+            e0 = pd.Timestamp(r.end_date)
+            inside |= ((real.index >= pd.Timestamp(r.start_date))
+                       & (real.index <= (e0 if pd.notna(e0) else real.index.max())))
+        if int(inside.sum()) >= MIN_ROWS_TO_COUNT:
             priced.append(t)
         else:
             empty.append(t)
 
-    unavailable = sorted(t for t in empty if t in absent)
-    recoverable = sorted(t for t in empty if t not in absent)
+    # Three reasons a departed name can be missing, and only one is fixable.
+    #   absent    the vendor has nothing, or a stub
+    #   reused    the vendor has prices, but for whoever got the symbol next --
+    #             refetching returns the same wrong company
+    #   missing   nobody fetched it; this is the one that fails
+    # Reused symbols are read from the manifest where the build recorded them.
+    # Detecting them from the panel only worked before the contaminated prices
+    # were removed; afterwards the column is empty and indistinguishable from
+    # one nobody fetched.
+    recorded = set(recycled or ())
+    reused = sorted(
+        t for t in empty
+        if t not in absent and (
+            t in recorded or (
+                t in execution.columns
+                and int(((execution[t].notna()) & (execution[t] > 0)).sum())
+                >= MIN_ROWS_TO_COUNT
+            )
+        )
+    )
+    unavailable = sorted(set(t for t in empty if t in absent) | set(reused))
+    recoverable = sorted(t for t in empty if t not in unavailable)
     coverage = len(priced) / len(names)
     ceiling = (len(names) - len(unavailable)) / len(names)
 
@@ -436,6 +478,10 @@ def gate_survivorship(execution: pd.DataFrame, scored: pd.DataFrame,
     if unavailable:
         g.note(f"{len(unavailable)} unavailable upstream (tolerated): "
                + ", ".join(unavailable[:12]) + (" …" if len(unavailable) > 12 else ""))
+    if reused:
+        g.note(f"  of which {len(reused)} are reused symbols now held by another "
+               f"issuer: " + ", ".join(reused[:10])
+               + (" …" if len(reused) > 10 else ""))
     if recoverable:
         g.fail(f"{len(recoverable)} departed name(s) are recoverable but absent "
                f"-- refetch before quoting anything: {recoverable[:12]}")
@@ -487,6 +533,7 @@ def gate_survivorship(execution: pd.DataFrame, scored: pd.DataFrame,
         "coverage": round(coverage, 4),
         "vendor_ceiling": round(ceiling, 4),
         "unavailable_upstream": unavailable,
+        "reused_symbols": reused,
         "recoverable_but_absent": recoverable,
         "scored_session_coverage": round(covered, 4),
         "eligible_name_sessions": eligible,
@@ -659,7 +706,9 @@ def main() -> None:
         absent_source = (f"the LIVE cache at {DEFAULT_CACHE} — not reproducible; "
                          "rebuild to record it with the baseline")
 
-    surv = gate_survivorship(execution, scored, stints, absent, absent_source)
+    recycled = set(read_manifest_key(d, "recycled_symbols") or ())
+    surv = gate_survivorship(execution, scored, stints, absent, absent_source,
+                             recycled)
     if args.report is not None:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(getattr(surv, "residual", {}), indent=2))
