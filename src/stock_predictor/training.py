@@ -1202,6 +1202,8 @@ def build_feature_panel(
     stints: pd.DataFrame | None = None,
     sector_map: pd.DataFrame | None = None,
     fundamentals: pd.DataFrame | None = None,
+    macro_raw: pd.DataFrame | None = None,
+    sources: dict | None = None,
 ) -> tuple[pd.DataFrame, list[str]]:
     """Engineer all features and return the panel with the feature column list.
 
@@ -1237,8 +1239,15 @@ def build_feature_panel(
         FRED API key for Yahoo→FRED gap-fill; ``None`` uses ``FRED_API_KEY`` env
         after optional ``python-dotenv`` load.
     """
+    # Every external input is injectable and recorded. The panel used to reach
+    # out for the sector map and the macro series while it built, so a run
+    # could not be reproduced from what it saved: two of its five inputs were
+    # whatever the network returned that day. `sources` hands them back to the
+    # caller to snapshot, and passing them in replays the run exactly.
     if sector_map is None:
         sector_map = download_sector_map()
+    if sources is not None:
+        sources["sector_map"] = sector_map
 
     # 1. Time-series features on full contiguous per-ticker history.
     features = add_timeseries_features(labeled, volume)
@@ -1256,11 +1265,14 @@ def build_feature_panel(
     features = add_cross_sectional_features(features, sector_map)
 
     try:
-        if provider is not None:
+        replayed_macro = macro_raw is not None
+        if replayed_macro:
+            pass                       # supplied by the caller; already merged
+        elif provider is not None:
             macro_raw = provider.download_macro(start, end)
         else:
             macro_raw = _build_macro_panel_yfinance(start, end)
-        if macro_merge:
+        if macro_merge and not replayed_macro:
             _load_dotenv()
             fk = fred_api_key if fred_api_key is not None else os.environ.get("FRED_API_KEY", "")
             alt = _macro_fallback_panel(provider_name, start, end, fk)
@@ -1272,6 +1284,8 @@ def build_feature_panel(
                     else "FRED fills Yahoo gaps"
                 )
                 print(f"  Macro merge ({msg}): {len(macro_raw)} dates")
+        if sources is not None:
+            sources["macro_raw"] = macro_raw
         macro_panel = _derive_macro_features(macro_raw)
     except Exception as exc:
         print("Macro download failed:", exc)

@@ -138,6 +138,16 @@ def parse_args() -> argparse.Namespace:
         help="Write hashed parquet snapshots + manifest.json here (default: artifacts/runs/<run_id>/)",
     )
     p.add_argument(
+        "--replay-snapshot",
+        type=Path,
+        default=None,
+        dest="replay_snapshot",
+        help="Rebuild from a previous run's snapshot instead of downloading. "
+             "Hashes are verified first. Feature engineering, labelling and "
+             "training all re-run; only the inputs are replaced, so a code "
+             "change still shows.",
+    )
+    p.add_argument(
         "--no-snapshot",
         action="store_true",
         help="Disable reproducibility snapshots (no parquet dumps, minimal manifest)",
@@ -411,7 +421,22 @@ def main() -> None:
     args = parse_args()
     objective = resolve_objective(args)
     tune_metric = resolve_optuna_metric(args.optuna_metric, objective)
-    provider = get_provider(args.provider, batch_size=args.batch_size)
+    replay = getattr(args, "replay_snapshot", None)
+    replay_sector_map = replay_macro = None
+    if replay is not None:
+        from stock_predictor import replay as _replay
+
+        hashes = _replay.verify(replay)
+        print(f"Replaying {replay} ({len(hashes)} artifacts verified)")
+        gaps = _replay.missing_for_exact_replay(replay)
+        if gaps:
+            print(f"  WARNING: snapshot lacks {', '.join(gaps)}; this replay "
+                  "cannot be exact. Rebuild to record them.")
+        provider = _replay.SnapshotProvider(replay)
+        replay_sector_map = _replay.load_sector_map(replay)
+        replay_macro = _replay.load_macro(replay)
+    else:
+        provider = get_provider(args.provider, batch_size=args.batch_size)
     start, end = args.start, args.end
     train_end, test_start = args.train_end, args.test_start
     horizon, threshold = args.horizon, args.threshold
@@ -434,7 +459,14 @@ def main() -> None:
         repro.write_manifest(snapshot_root / "manifest.json", manifest)
 
     print("Loading PIT stints & ticker universe…")
-    stints = load_sp500_stints(SP500_STINTS_URL)
+    if replay is not None:
+        from stock_predictor import replay as _replay
+
+        # Recorded membership, not today's. The rename work rewrote 12 stints;
+        # replaying against the live table would reproduce a different run.
+        stints = _replay.load_stints(replay)
+    else:
+        stints = load_sp500_stints(SP500_STINTS_URL)
     # Three universes, three purposes. Sampling the download-window population
     # let names admitted to the index AFTER training compete for slots with the
     # historical ones, so future membership decided which past companies the
@@ -545,7 +577,22 @@ def main() -> None:
         macro_merge=not args.no_macro_merge,
         stints=stints,
         fundamentals=fundamentals,
+        sector_map=replay_sector_map,
+        macro_raw=replay_macro,
+        sources=(sources := {}),
     )
+
+    # The sector map and the macro series were downloaded mid-build and never
+    # recorded, so two of a run's five external inputs were whatever the
+    # network returned that day. Recording them is what makes replay exact.
+    if manifest is not None and snapshot_root is not None:
+        for name in ("sector_map", "macro"):
+            frame = sources.get("sector_map" if name == "sector_map" else "macro_raw")
+            if frame is None or not len(frame):
+                continue
+            meta = repro.snapshot_parquet(frame, snapshot_root / f"{name}.parquet")
+            repro.register_snapshot(manifest, name, meta)
+        repro.write_manifest(snapshot_root / "manifest.json", manifest)
 
     features_clean = select_training_rows(
         features, feature_cols, "target_5pct", strict=args.strict_dropna,
