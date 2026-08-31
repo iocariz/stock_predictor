@@ -56,6 +56,17 @@ ACCOUNTING_TOLERANCE = 1e-6
 approximation, so anything above this is a real discrepancy."""
 
 
+def read_manifest_key(baseline_dir: Path, key: str):
+    """A recorded build fact, or ``None``. Missing is not the same as empty."""
+    path = Path(baseline_dir) / "snapshot" / "manifest.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text()).get(key)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 def load_snapshot_stints(baseline_dir: Path) -> pd.DataFrame:
     """Index membership **as recorded with this baseline**.
 
@@ -385,7 +396,7 @@ def _vendor_absent(cache_dir: Path) -> set[str]:
 
 def gate_survivorship(execution: pd.DataFrame, scored: pd.DataFrame,
                       stints: pd.DataFrame, absent: set[str],
-                      absent_source: str) -> Gate:
+                      absent_source: str, recycled: set[str] | None = None) -> Gate:
     """Are the companies that left the index actually in the panel?
 
     Checking that the *column* exists is not enough, and that mistake has
@@ -442,10 +453,20 @@ def gate_survivorship(execution: pd.DataFrame, scored: pd.DataFrame,
     #   reused    the vendor has prices, but for whoever got the symbol next --
     #             refetching returns the same wrong company
     #   missing   nobody fetched it; this is the one that fails
+    # Reused symbols are read from the manifest where the build recorded them.
+    # Detecting them from the panel only worked before the contaminated prices
+    # were removed; afterwards the column is empty and indistinguishable from
+    # one nobody fetched.
+    recorded = set(recycled or ())
     reused = sorted(
         t for t in empty
-        if t not in absent and t in execution.columns
-        and int(((execution[t].notna()) & (execution[t] > 0)).sum()) >= MIN_ROWS_TO_COUNT
+        if t not in absent and (
+            t in recorded or (
+                t in execution.columns
+                and int(((execution[t].notna()) & (execution[t] > 0)).sum())
+                >= MIN_ROWS_TO_COUNT
+            )
+        )
     )
     unavailable = sorted(set(t for t in empty if t in absent) | set(reused))
     recoverable = sorted(t for t in empty if t not in unavailable)
@@ -685,7 +706,9 @@ def main() -> None:
         absent_source = (f"the LIVE cache at {DEFAULT_CACHE} — not reproducible; "
                          "rebuild to record it with the baseline")
 
-    surv = gate_survivorship(execution, scored, stints, absent, absent_source)
+    recycled = set(read_manifest_key(d, "recycled_symbols") or ())
+    surv = gate_survivorship(execution, scored, stints, absent, absent_source,
+                             recycled)
     if args.report is not None:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(getattr(surv, "residual", {}), indent=2))

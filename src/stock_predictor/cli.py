@@ -514,6 +514,15 @@ def main() -> None:
         print(f"  Dropped reused-symbol price blocks for {len(recycled)} "
               f"departed ticker(s): {', '.join(recycled[:8])}"
               + (" …" if len(recycled) > 8 else ""))
+    # Recorded, not dropped invisibly. Removing the contaminated prices also
+    # removes the evidence that the symbol was reused, so without this the
+    # survivorship gate cannot tell "another issuer holds this symbol now"
+    # from "nobody ever fetched it" -- and would demand a refetch that returns
+    # the same wrong company.
+    if manifest is not None:
+        manifest["recycled_symbols"] = recycled
+        if snapshot_root is not None:
+            repro.write_manifest(snapshot_root / "manifest.json", manifest)
     coverage = check_download_coverage(
         sample, adj_close,
         min_coverage=args.min_coverage,
