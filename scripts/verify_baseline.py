@@ -720,6 +720,33 @@ def main() -> None:
         surv,
     ]
 
+    # The long-short book, gated like the others now that it is reachable.
+    # Its NAV has no cohort ledger to reconcile against -- it is a continuously
+    # marked book, not a sequence of closed baskets -- so the accounting gate
+    # is not applicable and is not faked. Fills and determinism are.
+    from stock_predictor.long_short import LongShortConfig, run_long_short_backtest
+
+    ls_cfg = LongShortConfig(
+        rebalance_every=args.horizon, slippage_bps=args.slippage_bps,
+        benchmark_ticker=None, risk_free_rate=0.045, reject_stale_fills=True,
+    )
+    ls = run_long_short_backtest(scored, ls_cfg, execution_prices=execution)
+    gates.append(gate_fills(ls, "long-short"))
+    ls_b = run_long_short_backtest(scored, ls_cfg, execution_prices=execution)
+    g = Gate("deterministic backtest, fixed scores (long-short)")
+    ha, hb = _hash_series(ls.daily_nav), _hash_series(ls_b.daily_nav)
+    g.note(f"NAV hash {ha} / {hb}")
+    if ha != hb:
+        g.fail("two runs over identical inputs produced different NAV series")
+    if (ls.daily_nav <= 0).any():
+        g.fail("long-short NAV touches zero or below")
+    gates.append(g)
+    m = ls.metrics
+    print(f"{'long-short':10s} CAGR {m.get('cagr', float('nan')):7.2%}  "
+          f"Sharpe {m.get('sharpe', float('nan')):5.2f}  "
+          f"maxDD {m.get('max_drawdown', float('nan')):7.2%}  "
+          f"rebalances {int(m.get('n_rebalances', 0))}")
+
     for label, engine, extra in (
         ("cohort", run_backtest, {}),
         ("rank-hold", run_rank_hold_backtest, {"exit_rank": args.exit_rank}),

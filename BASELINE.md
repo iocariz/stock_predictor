@@ -53,7 +53,7 @@ Execution panel: 4,188 sessions × 834 tickers.
 
 ## Verification
 
-All ten gates pass. Each is a hard failure, not a warning. Verification is
+All twelve gates pass. Each is a hard failure, not a warning. Verification is
 **read-only and self-contained**: it reads membership from
 `snapshot/stints.parquet` and the vendor-absent set from `vendor_absent.json`
 recorded at build time, never from live state, and writes nothing into the
@@ -152,18 +152,36 @@ two current members are absent from every panel here.
 Out-of-sample 2019-01-02 → 2026-08-28, four independent rebuilds from the same
 commit and the same pinned window.
 
-| engine | CAGR (n=4) | this artifact | Sharpe | max drawdown |
-|---|---|---|---|---|
-| cohort (top-15, 63d) | **20.24% ± 2.45%** | 15.43% | 0.67 ± 0.07 | −45.2% ± 2.6% |
-| rank-hold (exit rank 40) | **26.41% ± 1.46%** | 21.11% | 0.73 ± 0.03 | −49.8% ± 3.6% |
-| SPY, same window | 17.60% | 17.60% | — | — |
+| engine | CAGR (n=4) | Sharpe | max drawdown | beta | alpha/yr | HAC t |
+|---|---|---|---|---|---|---|
+| **long-short** (decile, 1x gross) | **16.92% ± 1.19%** | **1.11 ± 0.11** | **−11.5% ± 0.4%** | **+0.21** | **+8.90% ± 0.72%** | **+2.76** |
+| cohort (top-15, 63d) | 20.24% ± 2.45% | 0.67 ± 0.07 | −45.2% ± 2.6% | +1.19 | +2.36% | +0.37 |
+| rank-hold (exit rank 40) | 26.41% ± 1.46% | 0.73 ± 0.03 | −49.8% ± 3.6% | +1.43 | +6.80% | +0.84 |
+| SPY, same window | 17.60% | — | — | 1.00 | — | — |
 
-The `n=4` column is the spread measured across four rebuilds; `this artifact`
-is the single run recorded above. **Both fall below the four-run band** —
-rank-hold by more than three of its standard deviations. Four runs is too few
-to have pinned the spread, and the honest reading is that it is wider than
-±1.5 points, not that this run is anomalous. Treat the range, not either
-column, as the estimate.
+Each figure is the mean across four fresh rebuilds, ± one standard deviation.
+
+**The long-short book is the only engine whose alpha survives measurement.**
+Every one of its four runs clears |t| = 2 (range +2.60 to +3.06), on beta 0.21
+and a drawdown a quarter the size of either long-only engine's. It also has the
+tightest spread — ±1.19 points against the cohort engine's ±2.45 — so its
+numbers are the ones least likely to be an artifact of which draw you took.
+
+The long-only engines return more in raw terms and do it by carrying beta above
+1.2. Neither shows alpha distinguishable from zero.
+
+**This does not make it a strategy.** Three things stand against reading
+t = +2.76 as settled:
+
+1. **Multiplicity.** This configuration — decile 0.1, 1.0x gross, 63-day
+   rebalance — was selected from a large historical search over exactly these
+   knobs. An uncorrected t from the best of dozens of variants is not a
+   pre-registered t. See the *descriptive, not confirmatory* section in the
+   README.
+2. **31 rebalances.** Seven and a half years at a 63-day horizon is a small
+   number of independent decisions.
+3. **It is not wired to anything live.** The live path trades the cohort
+   engine, which is the one with no measurable alpha.
 
 Against SPY, with CAPM on excess returns and Newey–West standard errors, mean
 of the same four runs:
@@ -259,8 +277,9 @@ Every performance number published before this file, including:
 - any alpha computed on raw rather than excess returns;
 - any figure quoted to two decimals without a run-to-run spread.
 
-The long-short book is **not** covered here. It is not wired into any CLI, so it
-has no baseline, and its previously quoted figures remain unreproduced.
+The long-short book is now covered: `backtest-sp500 --mode long-short`, gated
+alongside the other two, and measured above. Its previously quoted figures are
+still retired — they were measured on the old panels and on raw-return CAPM.
 
 ## Reproducing this
 
