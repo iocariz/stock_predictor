@@ -1,8 +1,12 @@
 # Full train-sp500 on demand (long-running). Configure repository Secrets first.
 #
-# Secrets (optional depending on provider):
-#   FRED_API_KEY   — Yahoo↔FRED macro merge; required for sensible macro if using merge
-#   TIINGO_API_KEY — only if workflow_dispatch inputs.provider = tiingo
+# Secrets:
+#   TIINGO_API_KEY — REQUIRED. Scheduled retrains train on the hybrid provider,
+#                    which recovers the delisted names Yahoo stops serving.
+#                    Training on yfinance alone gives a survivorship-biased
+#                    panel: 79 of 347 companies that left the index during the
+#                    window are missing or wrong without it.
+#   FRED_API_KEY   — optional; Yahoo↔FRED macro cross-fill
 #
 # Artifacts (retention default 90 days): model.pkl, wf_scored.parquet, plots/
 
@@ -10,7 +14,7 @@ name: train-sp500
 
 on:
   # Monthly retrain so the deployed model doesn't go stale: 05:00 UTC on the
-  # 1st (before US market open). Scheduled runs use the yfinance provider,
+  # 1st (before US market open). Scheduled runs use the *hybrid* provider,
   # full universe, and the lambdarank objective (see EXTRA_TRAIN_ARGS below).
   schedule:
     - cron: "0 5 1 * *"
@@ -52,7 +56,12 @@ jobs:
     timeout-minutes: 720
 
     env:
-      TRAIN_PROVIDER: ${{ github.event.inputs.provider }}
+      # Explicit, not inherited. A schedule event has no inputs, so this
+      # resolved to an empty string and fell through to the pipeline's hybrid
+      # default -- correct by accident, and it read as yfinance everywhere it
+      # was documented. The 2026-09-01 run died on the missing Tiingo key
+      # after 22 seconds.
+      TRAIN_PROVIDER: ${{ github.event.inputs.provider || 'hybrid' }}
       PREDICT_PROVIDER: ${{ github.event.inputs.provider }}
       SAMPLE_N: ${{ github.event.inputs.sample_n }}
       MODEL: artifacts/model.pkl
@@ -95,6 +104,17 @@ jobs:
       - name: Run backtest sweep (sweep-only mode)
         if: inputs.sweep_run_id != ''
         run: uv run python scripts/backtest_sweep.py artifacts/wf_scored.parquet ${{ inputs.sweep_args }}
+
+      - name: Check required secrets
+        if: inputs.sweep_run_id == '' && env.TRAIN_PROVIDER != 'yfinance'
+        run: |
+          if [ -z "${TIINGO_API_KEY}" ]; then
+            echo "::error::TIINGO_API_KEY is not set, and TRAIN_PROVIDER=${TRAIN_PROVIDER}"
+            echo "Training on yfinance alone produces a survivorship-biased panel."
+            echo "Add the secret, or dispatch manually with provider=yfinance and"
+            echo "treat the result as biased."
+            exit 1
+          fi
 
       - name: Run full training
         if: inputs.sweep_run_id == ''
