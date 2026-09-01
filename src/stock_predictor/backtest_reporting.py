@@ -457,3 +457,87 @@ def plot_backtest(result: BacktestResult, output_dir: Path) -> None:
         plt.close(fig3)
 
     print(f"Saved backtest plots to {output_dir}")
+
+
+def print_long_short_report(result) -> None:
+    """Operator-facing summary of a dollar-neutral long-short run.
+
+    Beta is printed next to the return, not below it, because the number this
+    book is most easily misread on is exposure: equalising notional equalises
+    dollars, not risk. This model ranks volatility positively, so the long leg
+    holds higher-beta names than the short leg and a "market-neutral" book
+    carries a market position. Alpha is on excess returns with Newey-West
+    errors; the t-statistic is the number worth reading.
+    """
+    c, m = result.config, result.metrics
+    width = 62
+    print()
+    print("=" * width)
+    print("LONG-SHORT (dollar-neutral decile spread)")
+    print("=" * width)
+    hedge = f", hedge_beta={c.hedge_beta:g}" if c.hedge_beta else ""
+    borrow = ("per-name" if c.per_name_borrow
+              else f"flat {c.short_borrow_annual:.2%}")
+    print(f"Config: decile={c.decile:g}, weights={c.long_weight:g}/{c.short_weight:g} "
+          f"({c.long_weight + c.short_weight:g}x gross), "
+          f"rebalance={c.rebalance_every}d, slippage={c.slippage_bps:g}bps")
+    print(f"        borrow={borrow}, rf={c.risk_free_rate:.2%}, "
+          f"min {c.min_names_per_side}/side{hedge}")
+    print("-" * width)
+
+    rows = [
+        ("Total return", _fmt_pct(m.get("total_return", float("nan")))),
+        ("CAGR", _fmt_pct(m.get("cagr", float("nan")))),
+        (f"Sharpe (rf={m.get('risk_free_rate_used', 0.0):.1%})",
+         _fmt_f(m.get("sharpe", float("nan")))),
+        ("Sortino", _fmt_f(m.get("sortino", float("nan")))),
+        ("Max drawdown", _fmt_pct(m.get("max_drawdown", float("nan")))),
+        ("Calmar", _fmt_f(m.get("calmar", float("nan")))),
+        ("Gross leverage", _fmt_f(m.get("gross_leverage", float("nan")))),
+        ("Rebalances", str(int(m.get("n_rebalances", 0)))),
+    ]
+    for label, value in rows:
+        print(f"{label:28s} {value:>14s}")
+
+    if "beta" in m:
+        print("-" * width)
+        print("Dollar-neutral is not market-neutral:")
+        print(f"{'  Beta vs benchmark':28s} {_fmt_f(m['beta']):>14s}"
+              f"   (t {_fmt_f(m.get('beta_t', float('nan')))})")
+        print(f"{'  CAPM alpha (ann, excess)':28s} "
+              f"{_fmt_pct(m.get('alpha_ann', float('nan'))):>14s}"
+              f"   (HAC t {_fmt_f(m.get('alpha_t', float('nan')))})")
+
+    print("-" * width)
+    costs = result.costs
+    # Summed from the cost ledger, not read from metrics["total_costs"] --
+    # that one is computed from closed cohorts, which this engine does not
+    # produce, so it reported $0 beside $3,921 of slippage.
+    trading = float(costs.get("total_trading",
+                              costs.get("slippage", 0.0)
+                              + costs.get("commission", 0.0)))
+    borrow_paid = float(costs.get("borrow", 0.0))
+    earned = float(costs.get("financing_earned", 0.0))
+    print(f"{'Net costs (trading+borrow)':28s} "
+          f"{_fmt_dollar(trading + borrow_paid):>14s}")
+    for key, label in (("slippage", "  slippage"), ("commission", "  commission"),
+                       ("borrow", "  borrow")):
+        if key in costs:
+            print(f"{label:28s} {_fmt_dollar(costs[key]):>14s}")
+    if earned:
+        # Not a cost. A dollar-neutral book sits on cash, and this is the
+        # interest it earns -- a large part of the headline return at a 4.5%
+        # rate, which is worth seeing separately from the strategy.
+        print(f"{'Financing earned on cash':28s} {_fmt_dollar(earned):>14s}")
+    if m.get("effective_borrow_rate"):
+        print(f"{'  effective borrow rate':28s} "
+              f"{_fmt_pct(m['effective_borrow_rate']):>14s}")
+
+    requested = int(m.get("fills_requested", 0))
+    rejected = int(m.get("fills_rejected", 0))
+    print(f"{'Fills requested':28s} {requested:>14d}")
+    if rejected:
+        print(f"{'  rejected (no real quote)':28s} {rejected:>14d}"
+              f"   ({m.get('fill_reject_rate', 0):.2%})")
+    print("=" * width)
+    print()
