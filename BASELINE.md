@@ -170,14 +170,53 @@ numbers are the ones least likely to be an artifact of which draw you took.
 The long-only engines return more in raw terms and do it by carrying beta above
 1.2. Neither shows alpha distinguishable from zero.
 
-**This does not make it a strategy.** Three things stand against reading
-t = +2.76 as settled:
+### The locked holdout
 
-1. **Multiplicity.** This configuration — decile 0.1, 1.0x gross, 63-day
-   rebalance — was selected from a large historical search over exactly these
-   knobs. An uncorrected t from the best of dozens of variants is not a
-   pre-registered t. See the *descriptive, not confirmatory* section in the
-   README.
+`scripts/locked_holdout.py` answers the multiplicity objection directly: search
+the grid on an early window only, commit to the single winner, evaluate it
+**once** on the later window. Selection by Sharpe, deliberately not by the alpha
+t-statistic that gets reported.
+
+| split | committed configuration | holdout alpha | HAC t | rank on holdout |
+|---|---|---|---|---|
+| 2023-01-01 | decile 0.20, 1.0x, 63d | +5.46% | **+1.78** | 9 / 18 |
+| 2022-01-01 | decile 0.20, 1.0x, 63d | +5.54% | **+2.26** | 5 / 18 |
+
+**The full-period t = +2.76 does not survive.** A pre-committed configuration
+gives +1.78 or +2.26 depending only on where the window is cut, and a result
+that flips across a reasonable split choice is not established.
+
+**The search carried no information.** The committed configuration lands
+mid-pack on the holdout both times — 9th and 5th of 18. Choosing on the first
+window told you nothing about which configuration would do well on the second,
+which is what fitting noise looks like from the outside. Note also that the
+honest procedure picks decile **0.20**, not the 0.10 this project has always
+quoted; the historically quoted configuration reaches t = +2.53 on the
+2023 holdout, but we only know that because we went and looked.
+
+**Two things do survive**, and they are worth more than the headline was:
+
+* Every one of the 18 configurations has **positive** holdout alpha under both
+  splits, with median t around +1.6 to +1.8. That is a consistent tilt, not a
+  peak.
+* The grid is **structured, not random**. Sorted by holdout t, it separates
+  almost perfectly by rebalance frequency: 21-day rebalancing destroys the
+  effect (t +0.22 to +0.80 across all six variants), while 63- and 126-day
+  work (+1.5 to +3.1). Tighter deciles (0.05, 0.10) beat 0.20 within every
+  bucket. A monotone pattern across a grid is harder to explain as noise than
+  any single maximum.
+
+So the defensible claim is a **positive but statistically unestablished tilt
+that lives at longer holding periods and tighter deciles** — not an edge of
++8.90% at t = +2.76.
+
+**This does not make it a strategy.** Three things stand against reading
+t = +2.76 as settled, and the holdout above confirms the first of them:
+
+1. **Multiplicity — demonstrated, not merely suspected.** The locked holdout
+   above shows a pre-committed configuration reaching only +1.78/+2.26, and
+   the selection ranking mid-pack. The +2.76 is the best of a correlated
+   search, quoted as though it were a test.
 2. **31 rebalances.** Seven and a half years at a 63-day horizon is a small
    number of independent decisions.
 3. **It is not wired to anything live.** The live path trades the cohort

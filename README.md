@@ -12,8 +12,13 @@ LightGBM model that ranks S&P 500 stocks by expected 10-day performance. Two tra
 >   dollar-neutral long-short book returns **16.92% ± 1.19%** with alpha
 >   **+8.90% (HAC t = +2.76)** on beta **+0.21** and a **−11.5%** drawdown,
 >   with all four runs above |t| = 2. It is now reachable as
->   `backtest-sp500 --mode long-short`. Read it against the multiplicity
->   caveat below: this configuration was selected from a large search.
+>   `backtest-sp500 --mode long-short`.
+> - **But it does not survive a locked holdout.** Choosing the configuration on
+>   2019–2022 and testing it once on 2023–2026 gives **t = +1.78** (+2.26 if the
+>   cut is moved a year), and the committed choice ranks mid-pack on the
+>   holdout — the search carried no information. What survives is a *positive
+>   but unestablished tilt*, structured by holding period: 21-day rebalancing
+>   destroys it, 63–126 day does not. See `BASELINE.md`.
 > - **The long-only engines show none.** Against SPY on excess returns, the cohort engine
 >   — the one the live path simulates — shows **+2.36%/yr (HAC t = +0.37)** on
 >   beta **+1.190**; rank-hold shows **+6.80% (t = +0.84)** on beta **+1.431**.
