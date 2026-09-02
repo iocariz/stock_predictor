@@ -101,6 +101,29 @@ def register_snapshot(manifest: dict[str, Any], name: str, snapshot_meta: dict[s
     manifest.setdefault("snapshots", {})[name] = snapshot_meta
 
 
+def register_output(manifest: dict[str, Any], name: str, path: Path) -> dict[str, Any]:
+    """Hash an artifact this run *produced*, under ``manifest["outputs"]``.
+
+    Inputs were hashed from the start; outputs were not, and the verifier reads
+    outputs. A forged ``wf_scored.parquet`` therefore passed every gate while
+    reporting a 98% CAGR. ``specs.md:334`` asks for both, and they are separate
+    claims: a snapshot says "this is what we downloaded", an output says "this
+    is what we computed from it".
+
+    ``provenance`` distinguishes a hash taken as the file was written from one
+    added to an older baseline afterwards, which is verifiable going forward but
+    says nothing about where the bytes came from.
+    """
+    meta = {
+        "path": str(path.resolve()),
+        "sha256": sha256_file(path),
+        "bytes": path.stat().st_size,
+        "provenance": "recorded-at-write",
+    }
+    manifest.setdefault("outputs", {})[name] = meta
+    return meta
+
+
 def wide_prices_to_long(adj_close: pd.DataFrame, volume: pd.DataFrame) -> pd.DataFrame:
     """Stack wide OHLCV panels into a long table for compact parquet snapshots."""
     ac = adj_close.stack(future_stack=True).rename("close").reset_index()
