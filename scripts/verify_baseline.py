@@ -8,8 +8,17 @@ rate. The common factor is that none of them failed loudly. They produced a
 number, and the number looked plausible.
 
 So a baseline is not trusted because it ran. It is trusted because it passes
-these four gates, each of which is a hard failure:
+these five gates, each of which is a hard failure:
 
+0. **The artifacts are the ones the run produced.** Inputs were hashed from the
+   start, and since the last round the manifest's snapshot hashes are actually
+   recomputed. But the two files this verifier *reads* -- ``wf_scored.parquet``
+   and ``execution_prices.parquet`` -- were hashed by nothing, and swapping the
+   scores for a forgery nudged 12% toward the realised forward return passed
+   every other gate here while printing a 98% cohort CAGR. Both are now hashed
+   at write time; on top of that the execution panel is re-derived from the
+   hashed snapshot it was pivoted from, which ties it to an input hash rather
+   than to a promise and survives a manifest rewritten to match.
 1. **Accounting reconciles exactly.** The NAV the engine reports must equal a
    NAV reconstructed independently from the cohort ledger. A mismatch means
    money appeared or vanished somewhere between the trades and the curve.
@@ -119,6 +128,122 @@ def verify_snapshot_hashes(baseline_dir: Path) -> "Gate":
                    f"{recorded[:16]}")
         else:
             g.note(f"{name:22s} {actual[:16]}  {meta.get('rows', '?')} rows")
+    return g
+
+
+OUTPUTS = ("wf_scored", "execution_prices")
+"""The artifacts this verifier reads. Hashing the inputs and then evaluating
+unhashed outputs checks the wrong files: a ``wf_scored.parquet`` whose scores
+were nudged toward the realised forward return passed all twelve gates while
+printing a 98% cohort CAGR against the real ~20%."""
+
+
+def gate_output_hashes(baseline_dir: Path) -> "Gate":
+    """Recompute the sha256 of every artifact the gates below evaluate.
+
+    ``specs.md:334`` requires output hashes alongside the input hashes. They
+    were the one class missing, and outputs are precisely what a reader of this
+    report cares about.
+    """
+    g = Gate("baseline outputs match their recorded hashes")
+    d = Path(baseline_dir)
+    outputs = read_manifest_key(d, "outputs")
+    if not outputs:
+        g.fail("the manifest records no output hashes, so these artifacts "
+               "cannot be vouched for. Rebuild, or seal an older baseline "
+               "with scripts/seal_baseline_outputs.py.")
+        return g
+
+    for name in OUTPUTS:
+        meta = outputs.get(name)
+        path = d / f"{name}.parquet"
+        if not meta:
+            g.fail(f"{name}: evaluated by this verifier but not recorded")
+            continue
+        if not path.exists():
+            g.fail(f"{name}: recorded in the manifest but missing from disk")
+            continue
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        recorded = str(meta.get("sha256", ""))
+        if actual != recorded:
+            g.fail(f"{name}: sha256 {actual[:16]} does not match the recorded "
+                   f"{recorded[:16]}; this is not the file the run produced")
+            continue
+        prov = str(meta.get("provenance", "unknown"))
+        g.note(f"{name:22s} {actual[:16]}  ({prov})")
+
+    # Sealing records the bytes as they stood when someone ran the sealer, not
+    # as they came out of the pipeline. That is worth having and is not the
+    # same claim, so it is never reported as though it were.
+    sealed = [n for n in OUTPUTS
+              if str(outputs.get(n, {}).get("provenance", "")).startswith("sealed")]
+    if sealed:
+        g.note(f"NOTE: {', '.join(sealed)} sealed after the fact — tamper-evident "
+               "from the seal onward, but not proof of provenance")
+    return g
+
+
+def gate_execution_derivation(baseline_dir: Path) -> "Gate":
+    """The root execution panel must be the pivot of the hashed snapshot.
+
+    Stronger than a recorded hash, because it ties the output to an input hash
+    rather than to a promise: it holds on baselines built before output hashing
+    existed, and it survives a manifest that was rewritten alongside the file.
+
+    ``pivot_table`` drops all-NaN columns, so the wide panel legitimately
+    carries names the long snapshot does not -- 70 of them in the real baseline,
+    every one empty. A column carrying *data* the snapshot never held is
+    fabricated, and that is the distinction drawn here.
+    """
+    g = Gate("execution panel derives from the hashed snapshot")
+    d = Path(baseline_dir)
+    src = d / "snapshot" / "execution_prices.parquet"
+    out = d / "execution_prices.parquet"
+    if not src.exists():
+        g.fail(f"no {src}; the execution panel's provenance cannot be checked")
+        return g
+    if not out.exists():
+        g.fail(f"no {out}")
+        return g
+
+    long = pd.read_parquet(src)
+    long["date"] = pd.to_datetime(long["date"])
+    value_col = "close" if "close" in long.columns else "adj_close"
+    expected = long.pivot_table(index="date", columns="ticker",
+                                values=value_col, aggfunc="first").sort_index()
+    actual = pd.read_parquet(out)
+    actual.index = pd.to_datetime(actual.index)
+    actual = actual.sort_index()
+
+    if not actual.index.equals(expected.index):
+        g.fail(f"sessions differ: output has {len(actual):,}, snapshot implies "
+               f"{len(expected):,}")
+        return g
+
+    missing = [c for c in expected.columns if c not in actual.columns]
+    if missing:
+        g.fail(f"{len(missing)} ticker(s) in the snapshot are absent from the "
+               f"output: {', '.join(map(str, missing[:8]))}")
+        return g
+
+    invented = [c for c in actual.columns
+                if c not in expected.columns and actual[c].notna().any()]
+    if invented:
+        g.fail(f"{len(invented)} ticker(s) carry prices the snapshot never "
+               f"held: {', '.join(map(str, invented[:8]))}")
+
+    aligned = actual.reindex(columns=expected.columns)
+    if not aligned.isna().equals(expected.isna()):
+        n = int((aligned.isna() != expected.isna()).sum().sum())
+        g.fail(f"{n:,} cell(s) present in one and absent in the other")
+    diff = (aligned - expected).abs().max().max()
+    if pd.notna(diff) and float(diff) > 0.0:
+        g.fail(f"prices diverge from the snapshot by up to {float(diff):.6g}")
+
+    empty = len(actual.columns) - len(expected.columns)
+    g.note(f"{actual.shape[0]:,} sessions x {expected.shape[1]:,} priced tickers "
+           f"reproduced exactly from the hashed snapshot"
+           + (f" (+{empty} empty column(s))" if empty > 0 else ""))
     return g
 
 
@@ -715,6 +840,8 @@ def main() -> None:
         print(f"Survivorship residual -> {args.report}")
     gates: list[Gate] = [
         integrity,
+        gate_output_hashes(d),
+        gate_execution_derivation(d),
         gate_pit(scored, execution, args.horizon, stints),
         gate_renames(stints, execution),
         surv,

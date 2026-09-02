@@ -566,6 +566,11 @@ def main() -> None:
                 snapshot_root / "execution_prices.parquet",
             )
             repro.register_snapshot(manifest, "execution_prices", meta)
+            # The wide panel at the baseline root is what every backtest and
+            # the verifier actually read, so it needs its own hash. The long
+            # snapshot above is the input it was pivoted from.
+            repro.register_output(manifest, "execution_prices",
+                                  args.execution_prices_path)
             repro.write_manifest(snapshot_root / "manifest.json", manifest)
 
     refit = bool(args.train_through_latest)
@@ -749,6 +754,11 @@ def main() -> None:
             args.wf_scores_path.parent.mkdir(parents=True, exist_ok=True)
             wf_scores.to_parquet(args.wf_scores_path, index=False)
             print(f"Saved walk-forward scores to {args.wf_scores_path}")
+            # Nothing else in the baseline can re-derive a model's scores, so
+            # this hash is the only thing standing between the verifier and a
+            # forged score file.
+            if manifest is not None:
+                repro.register_output(manifest, "wf_scored", args.wf_scores_path)
 
     if args.run_backtest:
         if wf_scores is None or len(wf_scores) == 0:
@@ -814,8 +824,10 @@ def main() -> None:
                 "path": str(p.resolve()),
                 "sha256": repro.sha256_file(p),
             }
+            meta_path = p.with_suffix(".meta.json")
             manifest["meta_json"] = {
-                "path": str(p.with_suffix(".meta.json").resolve()),
+                "path": str(meta_path.resolve()),
+                "sha256": repro.sha256_file(meta_path) if meta_path.exists() else None,
             }
 
     if manifest is not None:
