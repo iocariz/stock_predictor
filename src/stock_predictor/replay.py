@@ -103,6 +103,25 @@ def load_macro(baseline_dir: Path | str) -> pd.DataFrame | None:
     return _read(baseline_dir, "macro")
 
 
+def recorded_recycled_symbols(baseline_dir: Path | str) -> list[str] | None:
+    """The reused symbols the *source* run detected, or ``None`` if unrecorded.
+
+    Detection reads the evidence -- a departed ticker whose prices resume after
+    a long dead period -- and cleaning removes that evidence. A snapshot is
+    already cleaned, so re-running detection over it finds nothing: the real
+    baseline records 46 and re-detection from its own snapshot finds 0. Without
+    carrying the recorded list forward, a replay overwrites the manifest with
+    an empty one and the survivorship gate loses the classification it needs to
+    tell "another issuer holds this symbol now" from "nobody ever fetched it".
+    """
+    try:
+        man = read_manifest(baseline_dir)
+    except SnapshotIncomplete:
+        return None
+    val = man.get("recycled_symbols")
+    return list(val) if val is not None else None
+
+
 def missing_for_exact_replay(baseline_dir: Path | str) -> list[str]:
     """Optional inputs this snapshot lacks, and so cannot reproduce."""
     return [n for n in OPTIONAL

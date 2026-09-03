@@ -135,6 +135,11 @@ class LongShortResult:
     config: LongShortConfig
     daily_nav: pd.Series
     daily_returns: pd.Series
+    # specs.md:414 -- the ledger behind the curve, per session. Long-short
+    # accounting was skipped by the verifier entirely; it could not be checked
+    # without this.
+    daily_cash: pd.Series
+    daily_positions: pd.Series
     metrics: dict[str, float]
     turnover: pd.Series
     costs: dict[str, float]
@@ -242,6 +247,8 @@ def run_long_short_backtest(
     cash = config.initial_capital
     shares: dict[str, float] = {}
     nav = np.zeros(n_days)
+    cash_track = np.zeros(n_days)
+    pos_track = np.zeros(n_days)
     turnover = np.zeros(n_days)
     cost_slip = cost_comm = cost_borrow = 0.0
     financing = 0.0
@@ -361,8 +368,12 @@ def run_long_short_backtest(
         # Recorded after any fill, so nav[0] is untouched capital and the
         # opening trade's cost shows up in the first return rather than being
         # normalized away.
-        nav[i] = cash + sum(s * prices.get(t, 0.0) for t, s in shares.items())
+        cash_track[i] = cash
+        pos_track[i] = sum(s * prices.get(t, 0.0) for t, s in shares.items())
+        nav[i] = cash_track[i] + pos_track[i]
 
+    daily_cash = pd.Series(cash_track, index=nav_index, dtype=float)
+    daily_positions = pd.Series(pos_track, index=nav_index, dtype=float)
     daily_nav = pd.Series(nav, index=nav_index, dtype=float)
     daily_returns = daily_nav.pct_change().dropna()
     metrics = _compute_metrics(daily_nav, [], risk_free_rate=config.risk_free_rate)
@@ -408,6 +419,8 @@ def run_long_short_backtest(
         config=config,
         daily_nav=daily_nav,
         daily_returns=daily_returns,
+        daily_cash=daily_cash,
+        daily_positions=daily_positions,
         metrics=metrics,
         turnover=pd.Series(turnover, index=nav_index, dtype=float),
         costs={

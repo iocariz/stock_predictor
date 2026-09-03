@@ -203,7 +203,7 @@ def test_build_daily_nav_no_cohorts() -> None:
     dates = pd.bdate_range("2024-01-08", periods=10)
     panel = _make_price_panel(dates, ["AAA"])
     cfg = BacktestConfig(initial_capital=100_000.0, benchmark_ticker=None)
-    nav = _build_daily_nav([], dates.values, panel, cfg)
+    nav, _cash, _pos = _build_daily_nav([], dates.values, panel, cfg)
     assert len(nav) == 10
     assert all(v == pytest.approx(100_000.0) for v in nav.values)
 
@@ -230,7 +230,7 @@ def test_build_daily_nav_known_return() -> None:
         net_return=1.0,
     )
     cfg = BacktestConfig(initial_capital=100_000.0, max_overlapping_cohorts=2, benchmark_ticker=None)
-    nav = _build_daily_nav([cohort], dates.values, panel, cfg)
+    nav, _cash, _pos = _build_daily_nav([cohort], dates.values, panel, cfg)
     # On exit day: cohort value = 50k * (200/100) = 100k. Cash = 50k. Total = 150k.
     assert nav[dates[11]] == pytest.approx(150_000.0)
     # Before entry: all cash = 100k
@@ -410,7 +410,7 @@ def test_nav_holds_realized_value_after_exit() -> None:
     cfg = BacktestConfig(
         initial_capital=100_000.0, max_overlapping_cohorts=2, benchmark_ticker=None,
     )
-    nav = _build_daily_nav([cohort], dates.values, panel, cfg)
+    nav, _cash, _pos = _build_daily_nav([cohort], dates.values, panel, cfg)
     # Exit day realizes 50k * (1 + 1.0) = 100k; plus 50k never deployed.
     assert nav[dates[11]] == pytest.approx(150_000.0)
     # Regression: the gain must persist after the cohort closes.

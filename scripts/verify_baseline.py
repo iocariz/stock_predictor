@@ -477,6 +477,39 @@ def gate_accounting(result, config: BacktestConfig, label: str) -> Gate:
 
     if (nav <= 0).any():
         g.fail("NAV touches zero or below")
+
+    # specs.md:414 -- cash and holdings MUST reconcile on *every* session. The
+    # terminal identity above is one equation about one day; a curve that ends
+    # right and wanders in between satisfied it. This is the same identity
+    # asserted 1,924 times instead of once.
+    cash = getattr(result, "daily_cash", None)
+    held = getattr(result, "daily_positions", None)
+    if cash is None or held is None:
+        g.fail("engine reports no per-session ledger; only the final identity "
+               "could be checked")
+        return g
+
+    recomputed = cash + held
+    resid = (recomputed - nav).abs()
+    scale = float(max(abs(float(nav.iloc[0])), 1.0))
+    worst = float(resid.max()) if len(resid) else 0.0
+    if worst > ACCOUNTING_TOLERANCE * scale:
+        when = resid.idxmax()
+        g.fail(f"cash + holdings != NAV on {pd.Timestamp(when).date()}: "
+               f"{float(recomputed.loc[when]):,.2f} vs {float(nav.loc[when]):,.2f} "
+               f"({int((resid > ACCOUNTING_TOLERANCE * scale).sum())} session(s) "
+               "disagree)")
+    else:
+        g.note(f"cash + holdings = NAV on all {len(nav):,} sessions "
+               f"(worst residual {worst:.2e})")
+
+    # specs.md:417 -- fees applied after sizing must not overdraw the account.
+    # Only meaningful for a long-only book: short proceeds legitimately carry
+    # cash above capital, and a levered book can legitimately run it negative.
+    if float(held.min()) >= 0.0 and float(cash.min()) < -ACCOUNTING_TOLERANCE * scale:
+        when = cash.idxmin()
+        g.fail(f"cash is negative ({float(cash.min()):,.2f}) on "
+               f"{pd.Timestamp(when).date()}")
     return g
 
 
@@ -542,7 +575,11 @@ def gate_pit(scored: pd.DataFrame, execution: pd.DataFrame, horizon: int,
     st["end_date"] = pd.to_datetime(st["end_date"]).fillna(pd.Timestamp.max)
 
     merged = work.merge(st, on="ticker", how="left")
-    inside = (merged["date"] >= merged["start_date"]) & (merged["date"] <= merged["end_date"])
+    # Half-open, matching production: pit.filter_panel_to_pit keeps
+    # [start_date, end_date). Accepting `<= end_date` here made the gate one
+    # session looser than the filter it exists to police, so a regression that
+    # scored a company on its first *non*-member session would have passed.
+    inside = (merged["date"] >= merged["start_date"]) & (merged["date"] < merged["end_date"])
     ok_pairs = merged[inside][["date", "ticker"]].drop_duplicates()
     all_pairs = work.drop_duplicates()
     outside = len(all_pairs) - len(ok_pairs)
@@ -853,7 +890,20 @@ def gate_renames(stints: pd.DataFrame, execution: pd.DataFrame) -> Gate:
         if v["concurrent_sessions"]:
             concurrent.append(
                 f"{old_sym}/{v['successor']} {v['concurrent_sessions']} sessions")
-    g.note(f"{len(cov)} rename(s) applied and checked against this panel")
+    # Concurrency is the only real falsifier here -- after the symbol changed,
+    # both cannot trade -- and it needs the *predecessor* column, which
+    # canonicalisation removes before the panel is downloaded. On the real
+    # baseline that is 0 of 15, so reporting "15 checked" claimed a test that
+    # never ran. Coverage and concurrency are now counted separately.
+    testable = [k for k, v in cov.items() if v.get("concurrency_testable")]
+    g.note(f"{len(cov)} rename(s) checked for successor coverage")
+    g.note(f"{len(testable)} of {len(cov)} testable for concurrent trading "
+           f"(needs the predecessor's own prices, which canonicalisation "
+           f"removes from this panel)")
+    if not testable:
+        g.note("NOTE: coverage shows a successor prices the predecessor's "
+               "membership; it cannot show they are the same issuer. The "
+               "recorded note on each entry remains the warrant.")
     if weak:
         g.fail("successor does not price the predecessor's membership: "
                + ", ".join(weak))
@@ -1018,11 +1068,32 @@ def main() -> None:
               f"(t {m.get('alpha_t', float('nan')):+5.2f})")
     print()
 
-    # The long-short book has no cohort ledger to reconcile against -- it is a
-    # continuously marked book, not a sequence of closed baskets -- so the
-    # accounting gate is not applicable and is not faked. Fills and determinism
-    # are.
+    # The long-short book has no cohort ledger to reconcile a *terminal*
+    # identity against -- it is a continuously marked book, not a sequence of
+    # closed baskets -- which is why its accounting used to be skipped
+    # outright. The per-session identity specs.md:414 actually asks for does
+    # apply, and is checked here.
     ls = measured["long-short"]["result"]
+    g_ls = Gate("accounting reconciles (long-short)")
+    ls_cash = getattr(ls, "daily_cash", None)
+    ls_held = getattr(ls, "daily_positions", None)
+    if ls_cash is None or ls_held is None:
+        g_ls.fail("engine reports no per-session ledger")
+    else:
+        resid = (ls_cash + ls_held - ls.daily_nav).abs()
+        scale = float(max(abs(float(ls.daily_nav.iloc[0])), 1.0))
+        worst = float(resid.max()) if len(resid) else 0.0
+        if worst > ACCOUNTING_TOLERANCE * scale:
+            when = resid.idxmax()
+            g_ls.fail(f"cash + holdings != NAV on {pd.Timestamp(when).date()} "
+                      f"(worst residual {worst:.2e})")
+        else:
+            g_ls.note(f"cash + holdings = NAV on all {len(ls.daily_nav):,} "
+                      f"sessions (worst residual {worst:.2e})")
+        g_ls.note(f"short book carries cash above capital, as it must: "
+                  f"peak cash {float(ls_cash.max()):,.0f} vs capital "
+                  f"{ls.config.initial_capital:,.0f}")
+    gates.append(g_ls)
     gates.append(gate_fills(ls, "long-short"))
     from stock_predictor.long_short import run_long_short_backtest
 

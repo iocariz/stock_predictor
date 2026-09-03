@@ -61,7 +61,7 @@ Execution panel: 4,188 sessions × 834 tickers.
 
 ## Verification
 
-All sixteen gates pass. Each is a hard failure, not a warning. Verification is
+All seventeen gates pass. Each is a hard failure, not a warning. Verification is
 **read-only and self-contained**: it reads membership from
 `snapshot/stints.parquet`, the benchmark from `snapshot/benchmark.parquet`, and
 the vendor-absent set from `vendor_absent.json` recorded at build time — never
@@ -73,13 +73,14 @@ the survivorship residual elsewhere.
 | snapshot integrity | all eight input artifacts recomputed and matching their recorded sha256 |
 | output integrity | `wf_scored.parquet` and `execution_prices.parquet` recomputed against recorded hashes |
 | execution derivation | the wide panel reproduced exactly from the hashed long snapshot: 4,188 sessions × 764 priced tickers |
-| ticker renames | all 15 checked against this panel's own prices: each successor carries the predecessor's membership, and none trade concurrently after the effective date |
-| point-in-time integrity | 0 of 952,329 scored rows outside index membership; labels stop exactly at the last labelable session; execution covers every scored row; scored and execution prices agree on 952,329/952,329 cells |
+| ticker renames | 15 checked for successor coverage; **0 of 15 testable for concurrent trading** — canonicalisation removes the predecessor's own symbol from the panel, so the one real falsifier cannot run. Coverage shows a successor prices the predecessor's membership; it cannot show they are the same issuer, and each entry's recorded note remains the warrant |
+| point-in-time integrity | 0 of 952,329 scored rows outside index membership, on the half-open `[start_date, end_date)` convention production filters with; labels stop exactly at the last labelable session; execution covers every scored row; scored and execution prices agree on 952,329/952,329 cells |
 | survivorship | 268 of 347 departed names carry prices **during their membership** (**77.2%**, the measured ceiling); departed names are scored on **99.9%** of the sessions they were members (118,721/118,896) |
 | recorded benchmark | SPY, 1,924 sessions, from the snapshot — so beta, alpha and the HAC t are checkable offline |
 | pinned metrics | every published CAGR, Sharpe, drawdown, beta, alpha and HAC t recomputed against `expected_metrics.json` |
-| accounting (cohort) | NAV reconciles with the trade ledger to `1.19e-16` |
-| accounting (rank-hold) | reconciles to `1.25e-15`, with 15 open positions and −4,245.68 unrealized |
+| accounting (cohort) | NAV reconciles with the trade ledger to `1.19e-16`; cash + holdings = NAV on all 1,924 sessions (residual `0.00e+00`) |
+| accounting (rank-hold) | reconciles to `1.25e-15`, with 15 open positions and −4,245.68 unrealized; per-session residual `0.00e+00` |
+| accounting (long-short) | cash + holdings = NAV on all 1,924 sessions (residual `0.00e+00`). No cohort ledger to close a terminal identity against, but `specs.md:414`'s per-session identity applies and is checked |
 | fills (all three engines) | zero stale fills; every refusal disposed under a stated policy |
 | deterministic backtest (all three) | identical NAV hashes on repeat |
 

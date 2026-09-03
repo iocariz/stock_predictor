@@ -400,6 +400,43 @@ def plot_strategy_comparison(
     print(f"Saved strategy comparison plot to {output_path}")
 
 
+def plot_long_short(result, output_dir: Path) -> None:
+    """Equity curve and drawdown for the long-short book.
+
+    ``--plots-dir`` was accepted on this path and then ignored, because the
+    long-short branch returned before the plotting step and no plotter existed
+    for its result type.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(13, 5))
+    result.daily_nav.plot(ax=ax, label="Long-short", linewidth=1.5)
+    bench = getattr(result, "bench_daily_nav", None)
+    if bench is not None and len(bench) and bench.notna().any():
+        ticker = getattr(result.config, "benchmark_ticker", None)
+        bench.plot(ax=ax, linewidth=1.5, alpha=0.7,
+                   label=f"{ticker} (B&H)" if ticker else "Benchmark")
+    ax.set_title("Long-short equity curve")
+    ax.set_ylabel("Portfolio Value ($)")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    fig.savefig(output_dir / "long_short_equity.png", dpi=120)
+    plt.close(fig)
+
+    dd = result.daily_nav / result.daily_nav.cummax() - 1
+    fig2, ax2 = plt.subplots(figsize=(13, 3))
+    dd.plot(ax=ax2, color="tomato", linewidth=1)
+    ax2.fill_between(dd.index, dd.values, 0, color="tomato", alpha=0.2)
+    ax2.set_title("Long-short drawdown")
+    ax2.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1.0))
+    ax2.set_ylabel("Drawdown")
+    ax2.grid(True, alpha=0.3)
+    plt.tight_layout()
+    fig2.savefig(output_dir / "long_short_drawdown.png", dpi=120)
+    plt.close(fig2)
+
+
 def plot_backtest(result: BacktestResult, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
