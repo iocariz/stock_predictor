@@ -445,21 +445,69 @@ def _derive_q4(quarters: pd.DataFrame, annuals: pd.DataFrame) -> pd.DataFrame:
     inherits the annual report's filing date, which is exactly when it became
     knowable.
     """
+    cols = ["ticker", "concept", "period_end", "filed", "value", "fp", "fy"]
     if quarters.empty or annuals.empty:
-        return pd.DataFrame(columns=quarters.columns)
-    q_sum = (
-        quarters[quarters["fp"].isin(["Q1", "Q2", "Q3"])]
-        .groupby(["ticker", "concept", "fy"], sort=False)
-        .agg(n=("value", "size"), s=("value", "sum"))
-        .reset_index()
-    )
-    q_sum = q_sum[q_sum["n"] == 3]
-    if q_sum.empty:
-        return pd.DataFrame(columns=quarters.columns)
-    fy = annuals[["ticker", "concept", "fy", "period_end", "filed", "value"]]
-    merged = fy.merge(q_sum, on=["ticker", "concept", "fy"], how="inner")
-    out = merged.assign(value=merged["value"] - merged["s"], fp="Q4")
-    return out[["ticker", "concept", "period_end", "filed", "value", "fp", "fy"]]
+        return pd.DataFrame(columns=cols)
+    q123 = quarters[quarters["fp"].isin(["Q1", "Q2", "Q3"])]
+    if q123.empty:
+        return pd.DataFrame(columns=cols)
+
+    # Per annual *vintage*, not per fiscal year. A 10-K subtracts the Q1-Q3
+    # figures that were public when it was filed; a later amendment subtracts
+    # whatever had been restated by then. Summing across vintages instead --
+    # which a plain groupby does once revisions are kept -- would count some
+    # quarters twice and silently drop the year.
+    pools = {k: v for k, v in q123.groupby(["ticker", "concept", "fy"], sort=False)}
+    rows: list[dict] = []
+    for (tk, cc, fy), ann in annuals.groupby(["ticker", "concept", "fy"], sort=False):
+        pool = pools.get((tk, cc, fy))
+        if pool is None:
+            continue
+        for _, a in ann.iterrows():
+            known = pool[pool["filed"] <= a["filed"]]
+            if known.empty:
+                continue
+            latest = (known.sort_values(["fp", "filed"], kind="stable")
+                      .drop_duplicates("fp", keep="last"))
+            if len(latest) != 3:
+                continue
+            rows.append({
+                "ticker": tk, "concept": cc, "period_end": a["period_end"],
+                "filed": a["filed"],
+                "value": float(a["value"]) - float(latest["value"].sum()),
+                "fp": "Q4", "fy": fy,
+            })
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _ttm_by_vintage(grp: pd.DataFrame) -> pd.DataFrame:
+    """A trailing-twelve-month sum as it stood on each filing date.
+
+    One row per filing, not one per period. What a TTM was worth on a given day
+    depends on which revisions had landed by then, so the sum has to be
+    recomputed at every vintage rather than fixed once from the first filing of
+    each quarter. Collapsing to the earliest filing produced a single number
+    per period that no revision could ever move.
+
+    Each row is knowable on its own ``filed`` date by construction: every
+    component was filed on or before it.
+    """
+    known: dict[pd.Timestamp, float] = {}
+    rows: list[dict] = []
+    for filed, chunk in grp.sort_values(["filed", "period_end"],
+                                        kind="stable").groupby("filed", sort=True):
+        for pe, val in zip(chunk["period_end"], chunk["value"], strict=False):
+            known[pe] = float(val)
+        if len(known) < 4:
+            continue
+        recent = sorted(known)[-4:]
+        rows.append({
+            "period_end": recent[-1],
+            "filed": filed,
+            "value": known[recent[-1]],
+            "ttm": float(sum(known[p] for p in recent)),
+        })
+    return pd.DataFrame(rows)
 
 
 def trailing_twelve_months(fund: pd.DataFrame) -> pd.DataFrame:
@@ -477,19 +525,19 @@ def trailing_twelve_months(fund: pd.DataFrame) -> pd.DataFrame:
         return fund.assign(ttm=np.nan)
 
     work = _dedupe_filings(fund)
-    # Earliest filing per period: when the figure actually became public.
-    # Sort on both keys — pandas' default sort is not stable, so sorting on
-    # period_end alone leaves the filed order arbitrary and keep="first" then
-    # picks an arbitrary filing, silently selecting later restatements.
-    work = work.sort_values(["ticker", "concept", "period_end", "filed"], kind="stable")
-    work = work.drop_duplicates(["ticker", "concept", "period_end"], keep="first")
+    # Balance-sheet concepts have no period_start, so a frame carrying only
+    # those -- or one reassembled from per-ticker parquet caches -- hands back
+    # an all-null object column that .dt refuses.
+    for col in ("period_end", "period_start", "filed"):
+        work[col] = pd.to_datetime(work[col], errors="coerce")
     work["span_days"] = (work["period_end"] - work["period_start"]).dt.days
 
+    # Every filing vintage is kept, for flows as well as balances. Collapsing
+    # to the earliest filing per period discarded revisions outright rather
+    # than merely delaying them, so a restatement never became visible at all.
+    # The as-of join picks the newest filing on or before each date, which
+    # delays and then reveals them.
     flows = work[work["concept"].isin(FLOW_CONCEPTS)].copy()
-    # Balances keep every filing vintage. Collapsing to the earliest filing per
-    # period discarded revisions outright rather than merely delaying them, so
-    # a restatement never became visible at all. The as-of join picks the
-    # newest filing on or before each date, which delays and then reveals them.
     stocks = _dedupe_filings(fund[~fund["concept"].isin(FLOW_CONCEPTS)]).copy()
     stocks["ttm"] = np.nan
 
@@ -514,22 +562,14 @@ def trailing_twelve_months(fund: pd.DataFrame) -> pd.DataFrame:
     all_q["value"] = all_q["value"].astype(float)
 
     out: list[pd.DataFrame] = []
-    for _, grp in all_q.groupby(["ticker", "concept"], sort=False):
-        g = (
-            grp.sort_values(["period_end", "filed"], kind="stable")
-            .drop_duplicates("period_end", keep="first")
-            .reset_index(drop=True)
-        )
-        g["ttm"] = g["value"].rolling(4).sum()
-        # A TTM is knowable only once its newest component has been filed.
-        # rolling() cannot aggregate datetimes and int64 nanoseconds exceed
-        # float64's exact-integer range, so take the max across explicit
-        # shifts, which keeps the dtype and the precision.
-        window = pd.concat([g["filed"].shift(k) for k in range(4)], axis=1)
-        g["filed"] = window.max(axis=1)
-        out.append(g)
+    for (tk, cc), grp in all_q.groupby(["ticker", "concept"], sort=False):
+        vint = _ttm_by_vintage(grp)
+        if vint.empty:
+            continue
+        out.append(vint.assign(ticker=tk, concept=cc))
 
-    ttm_tbl = pd.concat(out, ignore_index=True)
+    ttm_tbl = (pd.concat(out, ignore_index=True) if out
+               else pd.DataFrame(columns=keep))
     # Annual rows stand on their own as a twelve-month figure.
     ann = annuals[["ticker", "concept", "period_end", "filed", "value"]].copy()
     ann["ttm"] = ann["value"]
@@ -557,10 +597,16 @@ def asof_join_fundamentals(
     date_col: str = "date",
     ticker_col: str = "ticker",
 ) -> pd.DataFrame:
-    """Attach, per (ticker, date), the newest figures **filed on or before** that date.
+    """Attach, per (ticker, date), the newest figures filed **strictly before** it.
 
     This is the point-in-time guarantee. Joining on ``period_end`` instead
     would hand the model figures weeks before they were public.
+
+    Strictly before, not on-or-before. EDGAR records ``filed`` as a date with
+    no time, and filings routinely land after the close, so a 10-Q filed on day
+    *D* was reaching day *D*'s signal. Same-day availability cannot be
+    established from a date alone, and ``specs.md:193`` asks for the join to
+    run on availability. A filing becomes usable the next session.
     """
     if fund is None or fund.empty:
         return panel
@@ -599,7 +645,7 @@ def asof_join_fundamentals(
         merged = pd.merge_asof(
             left, g[[ticker_col, "filed", "v", "period_end"]],
             left_on=date_col, right_on="filed", by=ticker_col,
-            direction="backward", allow_exact_matches=True,
+            direction="backward", allow_exact_matches=False,
         )
         wide_cols[f"raw_{concept}"] = merged["v"].to_numpy()
         if concept == "revenue":
