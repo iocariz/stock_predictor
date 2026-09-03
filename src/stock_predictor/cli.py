@@ -219,6 +219,41 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+BENCHMARK_TICKER = "SPY"
+"""What every relative metric in this project is measured against. Recorded
+with the run so beta, alpha and the HAC t-statistic can be re-derived from the
+artifacts instead of from a fresh download."""
+
+
+def _download_benchmark_series(provider, sessions) -> pd.DataFrame | None:
+    """The benchmark over the panel's window, long-form, or ``None``.
+
+    Never fatal: a run whose benchmark fetch fails still produces a usable
+    baseline, it just cannot have its relative metrics verified offline. The
+    verifier says so rather than assuming.
+    """
+    if provider is None or not len(sessions):
+        return None
+    try:
+        series = provider.download_benchmark(
+            BENCHMARK_TICKER,
+            str(pd.Timestamp(sessions.min()).date()),
+            str(pd.Timestamp(sessions.max()).date()),
+        )
+    except Exception as exc:  # noqa: BLE001 - vendor failures are not fatal here
+        print(f"  Note: benchmark not recorded ({type(exc).__name__}: {exc})")
+        return None
+    if series is None or not len(series):
+        print("  Note: benchmark not recorded (vendor returned nothing)")
+        return None
+    s = pd.Series(series).dropna()
+    return pd.DataFrame({
+        "date": pd.DatetimeIndex(s.index),
+        "ticker": BENCHMARK_TICKER,
+        "close": s.to_numpy(dtype=float),
+    })
+
+
 def resolve_objective(args: argparse.Namespace) -> str:
     """Reconcile --objective with the legacy --rank-objective flag."""
     if args.rank_objective and args.objective == "binary":
@@ -622,6 +657,17 @@ def main() -> None:
                 continue
             meta = repro.snapshot_parquet(frame, snapshot_root / f"{name}.parquet")
             repro.register_snapshot(manifest, name, meta)
+
+        # The benchmark is the fifth external input, and was the last one still
+        # fetched at report time: every published beta, alpha and HAC t was
+        # measured against whatever SPY the network served that day, so none of
+        # them could be checked against the artifacts afterwards.
+        bench = _download_benchmark_series(provider, adj_close.index)
+        if bench is not None:
+            meta = repro.snapshot_parquet(bench, snapshot_root / "benchmark.parquet")
+            repro.register_snapshot(manifest, "benchmark", meta)
+            print(f"  Recorded benchmark {BENCHMARK_TICKER}: {len(bench):,} sessions")
+
         repro.write_manifest(snapshot_root / "manifest.json", manifest)
 
     features_clean = select_training_rows(

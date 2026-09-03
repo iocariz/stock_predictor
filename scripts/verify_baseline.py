@@ -59,6 +59,7 @@ from stock_predictor.backtest import BacktestConfig, run_backtest, run_rank_hold
 from stock_predictor.bundle import describe_bundle, price_divergence, validate_execution_panel
 from stock_predictor.providers.hybrid_provider import DEFAULT_CACHE
 from stock_predictor.renames import rename_coverage
+from stock_predictor.replay import SnapshotIncomplete, SnapshotProvider
 
 ACCOUNTING_TOLERANCE = 1e-6
 """Relative. This is float arithmetic on the same quantities, not a modelling
@@ -244,6 +245,137 @@ def gate_execution_derivation(baseline_dir: Path) -> "Gate":
     g.note(f"{actual.shape[0]:,} sessions x {expected.shape[1]:,} priced tickers "
            f"reproduced exactly from the hashed snapshot"
            + (f" (+{empty} empty column(s))" if empty > 0 else ""))
+    return g
+
+
+PINNED_METRICS = ("cagr", "sharpe", "max_drawdown", "beta", "alpha_ann", "alpha_t")
+"""What a reader of BASELINE.md actually quotes. Anything published has to be
+checkable, or publishing it is an assertion rather than a measurement."""
+
+DEFAULT_TOLERANCE = {
+    "cagr": 5e-5, "sharpe": 5e-3, "max_drawdown": 5e-5,
+    "beta": 5e-3, "alpha_ann": 5e-5, "alpha_t": 5e-3,
+}
+"""Tight on purpose. Given the same artifacts and the same code these are
+deterministic -- the determinism gate proves the NAV is byte-identical -- so
+the only slack needed is float summation order across library versions. A drift
+worth arguing about is thousands of times larger than this."""
+
+RISK_FREE = 0.045
+
+
+def measure_engines(scored, execution, *, provider, top_n: int, horizon: int,
+                    max_cohorts: int, slippage_bps: float, rebalance_day: str,
+                    exit_rank: int) -> dict[str, dict]:
+    """Run all three engines and return both the results and their metrics.
+
+    Shared with ``scripts/pin_baseline_metrics.py`` so that what gets pinned and
+    what gets checked are the same computation rather than two that agree by
+    inspection.
+    """
+    from stock_predictor.backtest_reporting import relative_metrics
+    from stock_predictor.long_short import LongShortConfig, run_long_short_backtest
+
+    bench_ticker = "SPY" if provider is not None else None
+    out: dict[str, dict] = {}
+
+    ls_cfg = LongShortConfig(
+        rebalance_every=horizon, slippage_bps=slippage_bps,
+        benchmark_ticker=bench_ticker, risk_free_rate=RISK_FREE,
+        reject_stale_fills=True,
+    )
+    ls = run_long_short_backtest(scored, ls_cfg, provider=provider,
+                                 execution_prices=execution)
+    ls_metrics = dict(ls.metrics)
+    if len(getattr(ls, "bench_daily_nav", ())) > 1:
+        ls_metrics.update(relative_metrics(
+            ls.daily_nav, ls.bench_daily_nav,
+            overlap_days=horizon, risk_free_rate=RISK_FREE))
+    out["long-short"] = {"result": ls, "config": ls_cfg, "metrics": ls_metrics}
+
+    common = dict(top_n=top_n, holding_days=horizon,
+                  max_overlapping_cohorts=max_cohorts,
+                  slippage_bps=slippage_bps, benchmark_ticker=bench_ticker,
+                  rebalance_day=rebalance_day, reject_stale_fills=True)
+    for label, engine, extra in (
+        ("cohort", run_backtest, {}),
+        ("rank-hold", run_rank_hold_backtest, {"exit_rank": exit_rank}),
+    ):
+        cfg = BacktestConfig(**common, **extra)
+        res = engine(scored, cfg, provider=provider, execution_prices=execution)
+        metrics = dict(res.metrics)
+        bench_nav = getattr(res, "spy_daily_nav", None)
+        if bench_nav is not None and len(bench_nav) > 1:
+            metrics.update(relative_metrics(
+                res.daily_nav, bench_nav,
+                overlap_days=horizon, risk_free_rate=RISK_FREE))
+        out[label] = {"result": res, "config": cfg, "metrics": metrics}
+    return out
+
+
+def gate_expected_metrics(baseline_dir: Path, measured: dict[str, dict]) -> "Gate":
+    """Compare this run's headline figures against the ones pinned to it.
+
+    Every other gate here checks the baseline against *itself*: that it
+    reconciles, that it fills honestly, that its bytes are what was recorded.
+    None of them checks it against what was **published** about it, and that is
+    how the artifact came to be swapped without a word. At ``c656df9`` the
+    baseline was rebuilt -- new run id, new commit, every snapshot hash
+    different, 37,156 fewer labelled rows -- and BASELINE.md's results tables
+    were left describing the artifact that had just been replaced. Every gate
+    passed, because none of them was looking.
+    """
+    g = Gate("headline metrics match the values pinned to this baseline")
+    path = Path(baseline_dir) / "expected_metrics.json"
+    if not path.exists():
+        g.fail(f"no {path.name}; this baseline's published figures are not "
+               "checkable. Pin them with scripts/pin_baseline_metrics.py.")
+        return g
+    try:
+        pin = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        g.fail(f"{path.name} is unreadable: {exc}")
+        return g
+
+    # A pin taken against a different artifact is worse than no pin: it looks
+    # like verification and asserts nothing.
+    run_id = read_manifest_key(baseline_dir, "run_id")
+    if pin.get("run_id") and run_id and pin["run_id"] != run_id:
+        g.fail(f"pinned against run {pin['run_id']}, but these artifacts are "
+               f"{run_id}. Re-pin, or restore the artifacts.")
+        return g
+
+    tol = {**DEFAULT_TOLERANCE, **(pin.get("tolerance") or {})}
+    engines = pin.get("engines") or {}
+    if not engines:
+        g.fail(f"{path.name} pins no engines")
+        return g
+
+    for label in sorted(engines):
+        expected = engines[label]
+        if label not in measured:
+            g.fail(f"{label}: pinned but not measured by this verifier")
+            continue
+        actual = measured[label]["metrics"]
+        for key in PINNED_METRICS:
+            want = expected.get(key)
+            if want is None:
+                continue
+            got = actual.get(key)
+            if got is None or not pd.notna(got):
+                g.fail(f"{label}.{key}: pinned at {want:+.6g} but not measured")
+                continue
+            if abs(float(got) - float(want)) > tol.get(key, 5e-5):
+                g.fail(f"{label}.{key}: {float(got):+.6g} vs pinned "
+                       f"{float(want):+.6g} "
+                       f"(drift {float(got) - float(want):+.4g})")
+        g.note(f"{label:11s} CAGR {actual.get('cagr', float('nan')):7.2%}  "
+               f"alpha {actual.get('alpha_ann', float('nan')):+7.2%}  "
+               f"t {actual.get('alpha_t', float('nan')):+5.2f}")
+
+    prov = str(pin.get("provenance", "unknown"))
+    g.note(f"pinned {pin.get('pinned_at_utc', '?')} at commit "
+           f"{str(pin.get('pinned_at_commit', '?'))[:12]} ({prov})")
     return g
 
 
@@ -810,11 +942,6 @@ def main() -> None:
     print(f"execution  {execution.shape[0]:,} sessions x {execution.shape[1]:,} tickers")
     print()
 
-    common = dict(top_n=args.top_n, holding_days=args.horizon,
-                  max_overlapping_cohorts=args.max_cohorts,
-                  slippage_bps=args.slippage_bps, benchmark_ticker=None,
-                  rebalance_day=args.rebalance_day, reject_stale_fills=True)
-
     integrity = verify_snapshot_hashes(d)
     stints = load_snapshot_stints(d)
 
@@ -847,19 +974,60 @@ def main() -> None:
         surv,
     ]
 
-    # The long-short book, gated like the others now that it is reachable.
-    # Its NAV has no cohort ledger to reconcile against -- it is a continuously
-    # marked book, not a sequence of closed baskets -- so the accounting gate
-    # is not applicable and is not faked. Fills and determinism are.
-    from stock_predictor.long_short import LongShortConfig, run_long_short_backtest
+    # The benchmark comes from the snapshot. Turning it off -- which is what
+    # this verifier used to do -- meant beta, alpha and the HAC t-statistic
+    # were the one part of the published results that nothing checked, which is
+    # unfortunate given they are the part the conclusions rest on.
+    provider = None
+    try:
+        provider = SnapshotProvider(d)
+        provider.download_benchmark("SPY", None, None)
+    except (SnapshotIncomplete, FileNotFoundError, OSError) as exc:
+        print(f"NOTE: no recorded benchmark ({exc}); relative metrics cannot "
+              f"be verified. Record one with "
+              f"scripts/record_baseline_benchmark.py {d}\n")
+        provider = None
 
-    ls_cfg = LongShortConfig(
-        rebalance_every=args.horizon, slippage_bps=args.slippage_bps,
-        benchmark_ticker=None, risk_free_rate=0.045, reject_stale_fills=True,
+    measured = measure_engines(
+        scored, execution, provider=provider, top_n=args.top_n,
+        horizon=args.horizon, max_cohorts=args.max_cohorts,
+        slippage_bps=args.slippage_bps, rebalance_day=args.rebalance_day,
+        exit_rank=args.exit_rank,
     )
-    ls = run_long_short_backtest(scored, ls_cfg, execution_prices=execution)
+
+    bench_gate = Gate("relative metrics are measured against a recorded benchmark")
+    if provider is None:
+        bench_gate.fail("no benchmark in the snapshot, so beta, alpha and the "
+                        "HAC t-statistic are unverifiable from these artifacts")
+    else:
+        n = len(measured["long-short"]["result"].bench_daily_nav)
+        if n < 2:
+            bench_gate.fail("the recorded benchmark produced no usable series")
+        else:
+            bench_gate.note(f"SPY, {n:,} sessions, from the snapshot")
+    gates.append(bench_gate)
+    gates.append(gate_expected_metrics(d, measured))
+
+    for label in ("long-short", "cohort", "rank-hold"):
+        m = measured[label]["metrics"]
+        print(f"{label:10s} CAGR {m.get('cagr', float('nan')):7.2%}  "
+              f"Sharpe {m.get('sharpe', float('nan')):5.2f}  "
+              f"maxDD {m.get('max_drawdown', float('nan')):7.2%}  "
+              f"beta {m.get('beta', float('nan')):+5.2f}  "
+              f"alpha {m.get('alpha_ann', float('nan')):+7.2%} "
+              f"(t {m.get('alpha_t', float('nan')):+5.2f})")
+    print()
+
+    # The long-short book has no cohort ledger to reconcile against -- it is a
+    # continuously marked book, not a sequence of closed baskets -- so the
+    # accounting gate is not applicable and is not faked. Fills and determinism
+    # are.
+    ls = measured["long-short"]["result"]
     gates.append(gate_fills(ls, "long-short"))
-    ls_b = run_long_short_backtest(scored, ls_cfg, execution_prices=execution)
+    from stock_predictor.long_short import run_long_short_backtest
+
+    ls_b = run_long_short_backtest(scored, measured["long-short"]["config"],
+                                   provider=provider, execution_prices=execution)
     g = Gate("deterministic backtest, fixed scores (long-short)")
     ha, hb = _hash_series(ls.daily_nav), _hash_series(ls_b.daily_nav)
     g.note(f"NAV hash {ha} / {hb}")
@@ -868,26 +1036,14 @@ def main() -> None:
     if (ls.daily_nav <= 0).any():
         g.fail("long-short NAV touches zero or below")
     gates.append(g)
-    m = ls.metrics
-    print(f"{'long-short':10s} CAGR {m.get('cagr', float('nan')):7.2%}  "
-          f"Sharpe {m.get('sharpe', float('nan')):5.2f}  "
-          f"maxDD {m.get('max_drawdown', float('nan')):7.2%}  "
-          f"rebalances {int(m.get('n_rebalances', 0))}")
 
-    for label, engine, extra in (
-        ("cohort", run_backtest, {}),
-        ("rank-hold", run_rank_hold_backtest, {"exit_rank": args.exit_rank}),
-    ):
-        cfg = BacktestConfig(**common, **extra)
-        res = engine(scored, cfg, execution_prices=execution)
+    for label, engine in (("cohort", run_backtest),
+                          ("rank-hold", run_rank_hold_backtest)):
+        res = measured[label]["result"]
+        cfg = measured[label]["config"]
         gates.append(gate_accounting(res, cfg, label))
         gates.append(gate_fills(res, label))
         gates.append(gate_determinism(scored, execution, cfg, engine, label))
-        m = res.metrics
-        print(f"{label:10s} CAGR {m.get('cagr', float('nan')):7.2%}  "
-              f"Sharpe {m.get('sharpe', float('nan')):5.2f}  "
-              f"maxDD {m.get('max_drawdown', float('nan')):7.2%}  "
-              f"trades {int(m.get('n_cohorts', 0))}")
     print()
 
     for g in gates:
