@@ -231,7 +231,13 @@ def rename_coverage(
         # the same issuer, whatever the coverage says.
         concurrent = 0
         eff = EFFECTIVE.get(old)
-        if eff is not None and old in prices.columns and new in prices.columns:
+        # The falsifier can only run when both symbols are in the panel.
+        # Canonicalisation renames predecessors before the download, so on a
+        # production panel this is false for every entry -- which the caller
+        # has to be able to say rather than reporting a check it never made.
+        testable = bool(eff is not None and old in prices.columns
+                        and new in prices.columns)
+        if testable:
             after = idx[idx > eff]
             if len(after):
                 a = prices[old].reindex(after)
@@ -246,5 +252,6 @@ def rename_coverage(
             "sessions_priced": have,
             "coverage": (have / len(window)) if len(window) else 0.0,
             "concurrent_sessions": concurrent,
+            "concurrency_testable": testable,
         }
     return out

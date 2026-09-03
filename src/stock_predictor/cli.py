@@ -555,7 +555,24 @@ def main() -> None:
     # from "nobody ever fetched it" -- and would demand a refetch that returns
     # the same wrong company.
     if manifest is not None:
-        manifest["recycled_symbols"] = recycled
+        # A replay is served an already-cleaned snapshot, so detection
+        # necessarily finds nothing: the cleaning removed the evidence. Carry
+        # the source run's classification forward instead of overwriting it
+        # with the empty result of re-detecting on cleaned data.
+        if replay is not None:
+            inherited = _replay.recorded_recycled_symbols(replay)
+            if inherited is not None:
+                manifest["recycled_symbols"] = inherited
+                manifest["recycled_symbols_source"] = str(replay)
+                if recycled:
+                    manifest["recycled_symbols_redetected"] = recycled
+                print(f"  Inherited {len(inherited)} recycled symbol(s) from "
+                      f"the replayed manifest (re-detection found "
+                      f"{len(recycled)}; the snapshot is already cleaned)")
+            else:
+                manifest["recycled_symbols"] = recycled
+        else:
+            manifest["recycled_symbols"] = recycled
         if snapshot_root is not None:
             repro.write_manifest(snapshot_root / "manifest.json", manifest)
     coverage = check_download_coverage(

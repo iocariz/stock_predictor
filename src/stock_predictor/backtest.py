@@ -223,6 +223,11 @@ class BacktestResult:
     config: BacktestConfig
     daily_nav: pd.Series
     daily_returns: pd.Series
+    # The ledger behind the curve. specs.md:414 asks for cash and holdings to
+    # reconcile on every session; without these the gate could only compare a
+    # single terminal number and call it accounting.
+    daily_cash: pd.Series
+    daily_positions: pd.Series
     cohorts: tuple[Cohort, ...]
     spy_daily_nav: pd.Series
     spy_daily_returns: pd.Series
@@ -544,8 +549,8 @@ def _build_daily_nav(
     trading_dates: np.ndarray,
     price_panel: pd.DataFrame,
     config: BacktestConfig,
-) -> pd.Series:
-    """Cash-ledger NAV: capital leaves cash at entry and returns at exit.
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Cash-ledger NAV, plus the cash and holdings series behind it.
 
     Each cohort's capital is debited from cash on its entry date and credited
     back on its exit date as ``capital * (1 + net_return)`` — i.e. realized
@@ -557,7 +562,9 @@ def _build_daily_nav(
     n_days = len(trading_dates)
 
     if not cohorts:
-        return pd.Series(config.initial_capital, index=nav_index, dtype=float)
+        zero = pd.Series(0.0, index=nav_index, dtype=float)
+        cash_only = pd.Series(config.initial_capital, index=nav_index, dtype=float)
+        return cash_only, cash_only, zero
 
     cash_flow = np.zeros(n_days)
     invested = np.zeros(n_days)
@@ -568,6 +575,19 @@ def _build_daily_nav(
             continue
         i_exit = int(np.searchsorted(trading_dates, c.exit_date, side="left"))
 
+        # The round trip lives inside net_return, which is credited at exit,
+        # so an open cohort used to carry no commission drag at all: its NAV
+        # read as though the trade had been free until the day it closed.
+        #
+        # The entry half comes off the *position*, not off cash. Allocating C
+        # dollars and paying the fee out of it buys C - K_entry of stock, which
+        # is what a broker does; charging it to cash on top of C would drive
+        # cash negative when a cohort takes the whole balance, and
+        # ``specs.md:417`` forbids exactly that.
+        entry_comm = 0.5 * _cohort_commission_dollars(
+            np.array(c.weights), c.capital, list(c.entry_prices),
+            config.commission_per_share, config.commission_per_order,
+        )
         cash_flow[i0] -= c.capital
         if i_exit < n_days:
             cash_flow[i_exit] += c.capital * (1.0 + c.net_return)
@@ -585,7 +605,7 @@ def _build_daily_nav(
         # Vectorized price extraction for the active window
         present = [t for t in tickers if t in price_panel.columns]
         if not present:
-            invested[sl] += c.capital
+            invested[sl] += c.capital - entry_comm
             continue
 
         prices = price_panel.loc[nav_index[sl], present].values.copy()
@@ -597,10 +617,12 @@ def _build_daily_nav(
                 col[nans] = entry_prices[ti]  # flat if missing
                 rf[:, ti] = col / entry_prices[ti]
 
-        invested[sl] += c.capital * (rf @ weights)
+        invested[sl] += c.capital * (rf @ weights) - entry_comm
 
     cash = config.initial_capital + np.cumsum(cash_flow)
-    return pd.Series(cash + invested, index=nav_index, dtype=float)
+    cash_s = pd.Series(cash, index=nav_index, dtype=float)
+    pos_s = pd.Series(invested, index=nav_index, dtype=float)
+    return cash_s + pos_s, cash_s, pos_s
 
 
 # ---------------------------------------------------------------------------
@@ -1023,7 +1045,8 @@ def run_backtest(
             cash -= c.capital
 
     # Daily NAV
-    daily_nav = _build_daily_nav(cohorts, trading_dates, price_panel, config)
+    daily_nav, daily_cash, daily_positions = _build_daily_nav(
+        cohorts, trading_dates, price_panel, config)
     daily_returns = daily_nav.pct_change().dropna()
 
     # Metrics
@@ -1046,6 +1069,8 @@ def run_backtest(
         config=config,
         daily_nav=daily_nav,
         daily_returns=daily_returns,
+        daily_cash=daily_cash,
+        daily_positions=daily_positions,
         cohorts=tuple(cohorts),
         spy_daily_nav=spy_nav,
         spy_daily_returns=spy_ret,
@@ -1283,7 +1308,9 @@ def run_rank_hold_backtest(
         px_arr = price_panel[t].to_numpy()[entry_idx:hi]
         invested[entry_idx:hi] += shares * np.nan_to_num(px_arr, nan=0.0)
     cash_series = config.initial_capital + np.cumsum(cash_flow)
-    daily_nav = pd.Series(cash_series + invested, index=nav_index, dtype=float)
+    daily_cash = pd.Series(cash_series, index=nav_index, dtype=float)
+    daily_positions = pd.Series(invested, index=nav_index, dtype=float)
+    daily_nav = daily_cash + daily_positions
     daily_returns = daily_nav.pct_change().dropna()
 
     metrics = _compute_metrics(daily_nav, closed, risk_free_rate=risk_free)
@@ -1329,6 +1356,8 @@ def run_rank_hold_backtest(
         config=config,
         daily_nav=daily_nav,
         daily_returns=daily_returns,
+        daily_cash=daily_cash,
+        daily_positions=daily_positions,
         cohorts=tuple(closed),
         spy_daily_nav=spy_nav,
         spy_daily_returns=spy_ret,
@@ -1681,6 +1710,7 @@ def main() -> None:
     # __getattr__ serves external callers but not this module's own globals.
     from stock_predictor.backtest_reporting import (
         plot_backtest,
+        plot_long_short,
         plot_strategy_comparison,
         print_long_short_report,
         print_report,
@@ -1713,7 +1743,9 @@ def main() -> None:
             reject_stale_fills=not args.allow_stale_fills,
             risk_free_rate=args.rf_rate if args.rf_rate is not None else 0.045,
             initial_capital=args.capital,
-            benchmark_ticker=args.benchmark_ticker,
+            # --no-benchmark was dropped here while the other engines
+            # honoured it, so the flag silently did nothing on this path.
+            benchmark_ticker=None if args.no_benchmark else args.benchmark_ticker,
             min_names_per_side=args.min_names_per_side,
             delisting_policy=DelistingPolicy(
                 fallback=args.delisting_fallback,
@@ -1725,6 +1757,25 @@ def main() -> None:
             delisting_proceeds=kwargs.get("delisting_proceeds"),
         )
         print_long_short_report(ls_result)
+        if args.plots_dir is not None:
+            args.plots_dir.mkdir(parents=True, exist_ok=True)
+            plot_long_short(ls_result, args.plots_dir)
+        if args.compare_with is not None:
+            # Same execution semantics as the first leg, as everywhere else.
+            path_b = args.compare_with
+            scored_b = _load_scored(path_b)
+            print(f"Loaded {len(scored_b)} scored rows from {path_b} (comparison)")
+            _check_execution_panel(scored_b, exec_px, label="comparison",
+                                   allow_mismatch=args.allow_price_mismatch)
+            result_b = run_long_short_backtest(
+                scored_b, ls_config, provider=bt_provider,
+                execution_prices=exec_px,
+                delisting_proceeds=kwargs.get("delisting_proceeds"),
+            )
+            print_strategy_comparison(
+                ls_result, result_b,
+                label_a=args.compare_label_a or path.stem,
+                label_b=args.compare_label_b or path_b.stem)
         return
 
     result = backtest_fn(scored, config, provider=bt_provider, **kwargs)

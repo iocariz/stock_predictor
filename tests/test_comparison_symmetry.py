@@ -145,7 +145,9 @@ def test_the_comparison_leg_is_given_the_execution_panel() -> None:
     from stock_predictor import backtest
 
     src = inspect.getsource(backtest.main)
-    body = src.split("if args.compare_with is not None:")[1]
+    # The long-short branch has its own compare_with block, so take the last
+    # one -- the shared-engine path -- rather than the first.
+    body = src.split("if args.compare_with is not None:")[-1]
     call = next(ln for ln in body.splitlines() if "backtest_fn(scored_b" in ln)
     assert "**kwargs" in call, f"comparison leg still drops kwargs: {call.strip()}"
 
