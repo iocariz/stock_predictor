@@ -74,6 +74,8 @@ def _complete(tmp_path: Path) -> Path:
         "sector_map": pd.DataFrame({"ticker": ["AAA", "BBB"],
                                     "sector": ["Tech", "Health"]}),
         "execution_prices": _long_prices(),
+        "benchmark": pd.DataFrame({"date": DATES, "ticker": "SPY",
+                                   "close": 400.0 + pd.Series(range(len(DATES)))}),
     })
 
 
@@ -83,7 +85,7 @@ def _complete(tmp_path: Path) -> Path:
 
 
 def test_a_complete_snapshot_verifies(tmp_path: Path) -> None:
-    assert len(verify(_complete(tmp_path))) == 5
+    assert len(verify(_complete(tmp_path))) == 6
 
 
 def test_tampered_bytes_are_refused(tmp_path: Path) -> None:
@@ -109,7 +111,7 @@ def test_missing_optional_inputs_are_named(tmp_path: Path) -> None:
     d = _build(tmp_path, {"equity_prices_long": _long_prices(),
                           "stints": _stints()})
     assert set(missing_for_exact_replay(d)) == {"macro", "sector_map",
-                                                "execution_prices"}
+                                                "execution_prices", "benchmark"}
 
 
 def test_a_complete_snapshot_is_missing_nothing(tmp_path: Path) -> None:
@@ -156,9 +158,20 @@ def test_a_snapshot_without_macro_refuses_rather_than_downloads(tmp_path: Path) 
 
 
 def test_a_benchmark_the_snapshot_lacks_refuses(tmp_path: Path) -> None:
+    """Every published beta and alpha was measured against a benchmark fetched
+    at report time. A snapshot that did not record one must say so rather than
+    reach for the network and quietly compare against a different series."""
+    d = _build(tmp_path, {"equity_prices_long": _long_prices(),
+                          "stints": _stints()})
     with pytest.raises(SnapshotIncomplete, match="SPY"):
-        SnapshotProvider(_complete(tmp_path)).download_benchmark(
-            "SPY", "2024-01-01", "2024-02-09")
+        SnapshotProvider(d).download_benchmark("SPY", "2024-01-01", "2024-02-09")
+
+
+def test_a_recorded_benchmark_is_served_from_the_snapshot(tmp_path: Path) -> None:
+    s = SnapshotProvider(_complete(tmp_path)).download_benchmark(
+        "SPY", "2024-01-01", "2024-02-09")
+    assert len(s) == len(DATES)
+    assert float(s.iloc[0]) == 400.0
 
 
 def test_stints_come_from_the_snapshot(tmp_path: Path) -> None:

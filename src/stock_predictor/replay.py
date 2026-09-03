@@ -33,7 +33,7 @@ SNAPSHOT_DIRNAME = "snapshot"
 REQUIRED = ("equity_prices_long", "stints")
 """Without these there is nothing to replay."""
 
-OPTIONAL = ("macro", "sector_map", "execution_prices")
+OPTIONAL = ("macro", "sector_map", "execution_prices", "benchmark")
 """Recorded when the run used them. A snapshot without ``macro`` predates
 macro capture and cannot be replayed exactly; the caller is told rather than
 left to wonder why the numbers moved."""
@@ -130,6 +130,7 @@ class SnapshotProvider:
         self._vol = px.pivot_table(index="date", columns="ticker",
                                    values="volume", aggfunc="first").sort_index()
         self._macro = load_macro(baseline_dir)
+        self._bench = _read(baseline_dir, "benchmark")
 
     def _window(self, frame: pd.DataFrame, tickers: list[str],
                 start: str, end: str | None) -> pd.DataFrame:
@@ -157,11 +158,30 @@ class SnapshotProvider:
         return m[(m["date"] >= lo) & (m["date"] <= hi)].reset_index(drop=True)
 
     def download_benchmark(self, ticker: str, start: str, end: str):
-        """The benchmark, if the recorded panel happens to carry it.
+        """The recorded benchmark series.
 
-        Benchmarks are a reporting input rather than a training one, so a
-        snapshot without the column raises here instead of quietly fetching.
+        Every published beta, alpha and HAC t was measured against whatever the
+        vendor returned for SPY at report time -- the last of the five external
+        inputs still fetched mid-report, and the reason the verifier could not
+        check any of those figures offline. A recorded ``benchmark.parquet``
+        takes precedence; the price panel is a fallback for the rare snapshot
+        that carries the ticker as an ordinary column.
+
+        A snapshot holding neither raises rather than quietly fetching, because
+        silently reaching for the network is the behaviour replay removes.
         """
+        if self._bench is not None:
+            b = self._bench.copy()
+            b["date"] = pd.to_datetime(b["date"])
+            if "ticker" in b.columns:
+                b = b[b["ticker"].astype(str) == str(ticker)]
+            if len(b):
+                s = pd.Series(b["close"].to_numpy(dtype=float),
+                              index=pd.DatetimeIndex(b["date"]), name=ticker)
+                s = s.sort_index()
+                lo = pd.Timestamp(start) if start else s.index.min()
+                hi = pd.Timestamp(end) if end else s.index.max()
+                return s.loc[(s.index >= lo) & (s.index <= hi)]
         if ticker not in self._adj.columns:
             raise SnapshotIncomplete(
                 f"snapshot does not carry benchmark {ticker}"
