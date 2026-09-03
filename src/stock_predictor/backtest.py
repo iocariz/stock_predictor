@@ -1368,6 +1368,34 @@ def __dir__() -> list[str]:
     return sorted([*globals(), *_REPORTING_EXPORTS])
 
 
+def _check_execution_panel(
+    scored: pd.DataFrame,
+    execution: pd.DataFrame | None,
+    *,
+    label: str,
+    allow_mismatch: bool,
+) -> None:
+    """Refuse to price *scored* against a panel that cannot cover it.
+
+    Applied to every leg, not just the first. ``--compare-with`` used to run the
+    second strategy with no execution panel at all, so it skipped this check and
+    priced its fills from the point-in-time scored panel while the first leg
+    used real quotes. On rank-hold that substitution is worth +17.28% against
+    +22.95%, which is larger than most differences a comparison is run to find.
+    """
+    findings = validate_execution_panel(scored, execution)
+    if not findings:
+        return
+    print(describe_bundle(findings))
+    if not allow_mismatch:
+        sys.exit(
+            f"Refusing to backtest the {label} against a mismatched execution "
+            "panel. Regenerate it with train-sp500 --execution-prices-path, or "
+            "pass --allow-price-mismatch to proceed."
+        )
+    print(f"  --allow-price-mismatch: proceeding with the {label} anyway.")
+
+
 def _load_scored(path: Path) -> pd.DataFrame:
     if path.suffix.lower() == ".parquet":
         return pd.read_parquet(path)
@@ -1622,16 +1650,8 @@ def main() -> None:
     # Nothing used to produce an execution panel, so the backtest paired
     # whatever stale parquet was on disk -- or, absent one, fell back to
     # forward-filled prices, which on rank-hold is +17.28% against +22.95%.
-    findings = validate_execution_panel(scored, exec_px)
-    if findings:
-        print(describe_bundle(findings))
-        if not args.allow_price_mismatch:
-            sys.exit(
-                "Refusing to backtest against a mismatched execution panel. "
-                "Regenerate it with train-sp500 --execution-prices-path, or "
-                "pass --allow-price-mismatch to proceed."
-            )
-        print("  --allow-price-mismatch: proceeding anyway.")
+    _check_execution_panel(scored, exec_px, label="strategy",
+                           allow_mismatch=args.allow_price_mismatch)
 
     # The scored panel's adj_close no longer prices anything (specs.md:233),
     # so this is what it is still good for: two sources that disagree
@@ -1717,7 +1737,12 @@ def main() -> None:
         path_b = args.compare_with
         scored_b = _load_scored(path_b)
         print(f"Loaded {len(scored_b)} scored rows from {path_b} (comparison)")
-        result_b = backtest_fn(scored_b, config, provider=bt_provider)
+        # Same execution semantics as the first leg, and the same coverage
+        # check. Comparing a run priced from real quotes against one priced
+        # from the scored panel measures the price source, not the strategies.
+        _check_execution_panel(scored_b, exec_px, label="comparison",
+                               allow_mismatch=args.allow_price_mismatch)
+        result_b = backtest_fn(scored_b, config, provider=bt_provider, **kwargs)
         la = args.compare_label_a or path.stem
         lb = args.compare_label_b or path_b.stem
         print_strategy_comparison(result, result_b, label_a=la, label_b=lb)
