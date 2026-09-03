@@ -101,19 +101,25 @@ def _panel(dates: list[str], ticker: str = "AAA") -> pd.DataFrame:
 
 def test_figures_are_invisible_before_they_are_filed() -> None:
     """The core hazard: Q1 ends 2024-03-31 but is not filed until 2024-05-10,
-    so 2024-04-15 must see nothing at all."""
+    so 2024-04-15 must see nothing at all.
+
+    The filing date itself is also blind. EDGAR records a date with no time and
+    filings routinely land after the close, so same-day availability cannot be
+    established; a figure becomes usable the next session.
+    """
     fund = trailing_twelve_months(extract_concepts(_stock_facts(), "AAA"))
     joined = asof_join_fundamentals(
-        _panel(["2024-04-15", "2024-05-09", "2024-05-10", "2024-06-01",
-                "2024-08-09"]),
+        _panel(["2024-04-15", "2024-05-09", "2024-05-10", "2024-05-13",
+                "2024-06-01", "2024-08-12"]),
         fund,
     )
     vals = joined["raw_assets"].tolist()
     assert np.isnan(vals[0]), "period end must not make a figure available"
     assert np.isnan(vals[1]), "the day before filing must still be blind"
-    assert vals[2] == 1000.0, "available on the filing date"
-    assert vals[3] == 1000.0, "carried forward until the next filing"
-    assert vals[4] == 1100.0, "advances when the next report lands"
+    assert np.isnan(vals[2]), "the filing date itself must still be blind"
+    assert vals[3] == 1000.0, "available the session after it was filed"
+    assert vals[4] == 1000.0, "carried forward until the next filing"
+    assert vals[5] == 1100.0, "advances when the next report lands"
 
 
 def test_a_flow_column_never_mixes_quarterly_and_annual_figures() -> None:
@@ -124,7 +130,7 @@ def test_a_flow_column_never_mixes_quarterly_and_annual_figures() -> None:
     level shift the model would learn as signal.
     """
     joined = asof_join_fundamentals(
-        _panel(["2024-06-01", "2024-08-09", "2024-11-08", "2025-02-14"]),
+        _panel(["2024-06-01", "2024-08-12", "2024-11-12", "2025-02-18"]),
         _fund_table(),
     )
     seen = joined["raw_revenue"].tolist()
@@ -191,10 +197,15 @@ def test_empty_fundamentals_returns_the_panel_untouched() -> None:
 
 
 def test_ttm_needs_four_quarters_before_it_reports() -> None:
-    ttm = _fund_table().sort_values("period_end")
-    vals = ttm["ttm"].tolist()
-    assert all(np.isnan(v) for v in vals[:3]), "cannot sum a year from three quarters"
-    assert vals[3] == pytest.approx(100 + 110 + 120 + 130)
+    """A TTM is emitted per *filing vintage* now, so incomplete periods produce
+    no row at all rather than a row carrying NaN. Either way the property is
+    the same: no twelve-month figure exists until four quarters have been
+    filed, and none is dated earlier than the last of them."""
+    ttm = _fund_table()
+    complete = ttm[ttm["ttm"].notna()].sort_values("filed")
+    assert not complete.empty, "four quarters were filed and produced no TTM"
+    assert complete["filed"].min() == pd.Timestamp("2025-02-14")
+    assert complete["ttm"].iloc[0] == pytest.approx(100 + 110 + 120 + 130)
 
 
 def test_ttm_inherits_the_newest_component_filing_date() -> None:

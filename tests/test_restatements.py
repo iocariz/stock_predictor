@@ -46,7 +46,10 @@ def test_a_restatement_is_invisible_before_it_is_filed() -> None:
     fund = trailing_twelve_months(
         pd.concat([extract_concepts(_facts(), "AAA"), _restated()], ignore_index=True)
     )
-    seen = _joined(["2024-05-10", "2024-07-01", "2024-11-07"], fund)
+    # 2024-05-13, not the 2024-05-10 filing date itself: EDGAR dates carry no
+    # time and filings routinely land after the close, so a figure is usable
+    # from the next session.
+    seen = _joined(["2024-05-13", "2024-07-01", "2024-11-07"], fund)
     assert seen[0] == 1000.0
     assert seen[1] == 1000.0
     assert seen[2] == 1100.0, "Q2 filing supersedes Q1 by July"
