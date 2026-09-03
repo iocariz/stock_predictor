@@ -240,14 +240,29 @@ the grid on an early window only, commit to the single winner, evaluate it
 **once** on the later window. Selection by Sharpe, deliberately not by the alpha
 t-statistic that gets reported.
 
+The holdout is measured as a **continuation**: the engine runs once over the
+whole panel and the holdout window is read out of the running NAV, so the book
+arrives at the split holding what it held, on the calendar it was already on.
+Re-running the engine over a truncated panel — which is what this did at first —
+restarts the rebalance schedule and begins flat, which measures a fresh
+strategy launched on the holdout's first session rather than the one under test.
+
 | split | committed configuration | holdout alpha | HAC t | rank on holdout |
 |---|---|---|---|---|
-| 2023-01-01 | decile 0.20, 1.0x, 63d | +5.46% | **+1.78** | 9 / 18 |
-| 2022-01-01 | decile 0.20, 1.0x, 63d | +5.54% | **+2.26** | 5 / 18 |
+| 2023-01-01 | decile 0.20, 1.0x, 63d | +6.04% | **+1.95** | 9 / 18 |
+| 2022-01-01 | decile 0.20, 1.0x, 63d | +5.20% | **+1.87** | 5 / 18 |
 
 **The full-period t = +2.60 does not survive.** A pre-committed configuration
-gives +1.78 or +2.26 depending only on where the window is cut, and a result
-that flips across a reasonable split choice is not established.
+reaches +1.95 and +1.87 — neither split clears |t| = 2, and both fall well
+short of the figure the full-period search produced.
+
+*Correction.* An earlier version of this table reported **+1.78 / +2.26**, from
+a holdout that restarted the strategy instead of continuing it. The 2022 split
+was the one that moved: a book relaunched flat on 2022-01-04 skipped the
+drawdown a continuing book carried across the boundary, which is what lifted it
+above +2. The corrected pair is more consistent than the pair it replaces, and
+the conclusion is the same one, stated more firmly — it no longer depends on
+which split you pick.
 
 **The search carried no information.** The committed configuration lands
 mid-pack on the holdout both times — 9th and 5th of 18. Choosing on the first
@@ -259,15 +274,29 @@ quoted; the historically quoted configuration reaches t = +2.53 on the
 
 **Two things do survive**, and they are worth more than the headline was:
 
-* Every one of the 18 configurations has **positive** holdout alpha under both
-  splits, with median t around +1.6 to +1.8. That is a consistent tilt, not a
-  peak.
-* The grid is **structured, not random**. Sorted by holdout t, it separates
-  almost perfectly by rebalance frequency: 21-day rebalancing destroys the
-  effect (t +0.22 to +0.80 across all six variants), while 63- and 126-day
-  work (+1.5 to +3.1). Tighter deciles (0.05, 0.10) beat 0.20 within every
-  bucket. A monotone pattern across a grid is harder to explain as noise than
-  any single maximum.
+* The grid is **structured, not random**, and this is the finding that holds up
+  best. Sorted by holdout alpha t it separates almost perfectly by rebalance
+  frequency, and the same way under both splits:
+
+  | rebalance | t at the 2023 split | t at the 2022 split |
+  |---|---|---|
+  | 21d | +0.31 … +0.96 | −0.15 … +0.55 |
+  | 63d | +1.89 … +2.74 | +1.81 … +2.15 |
+  | 126d | +1.59 … +2.94 | +0.90 … +1.05 |
+
+  **21-day rebalancing destroys the effect under both splits; 63-day carries it
+  under both.** 126-day is strong at one split and weak at the other, so only
+  63-day is consistent. Tighter deciles (0.05, 0.10) beat 0.20 in both, though
+  the margin at the 2022 split is small. A pattern that repeats across an
+  independent cut is harder to explain as noise than any single maximum.
+* The tilt is **mostly positive but not uniformly so**. All 18 configurations
+  have positive holdout alpha at the 2023 split (median t +1.92, 8 of 18 above
+  +2); at the 2022 split only 14 of 18 are positive and the median is +1.02.
+
+  *Correction.* The earlier version of this section claimed all 18 were positive
+  under **both** splits. That was true only of the restarted holdout; measured
+  as a continuation, four configurations — all of them 21-day — go negative at
+  the 2022 split.
 
 So the defensible claim is a **positive but statistically unestablished tilt
 that lives at longer holding periods and tighter deciles** — not an edge of
@@ -277,7 +306,7 @@ that lives at longer holding periods and tighter deciles** — not an edge of
 t = +2.60 as settled, and the holdout above confirms the first of them:
 
 1. **Multiplicity — demonstrated, not merely suspected.** The locked holdout
-   above shows a pre-committed configuration reaching only +1.78/+2.26, and
+   above shows a pre-committed configuration reaching only +1.95/+1.87, and
    the selection ranking mid-pack. The +2.60 is the best of a correlated
    search, quoted as though it were a test.
 2. **31 rebalances.** Seven and a half years at a 63-day horizon is a small

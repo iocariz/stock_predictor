@@ -256,6 +256,17 @@ def print_report(result: BacktestResult) -> None:
 # ---------------------------------------------------------------------------
 
 
+def nav_metrics(nav: pd.Series, *, risk_free_rate: float = 0.0) -> dict[str, float]:
+    """Risk/return stats for an arbitrary slice of a NAV curve.
+
+    Public because measuring a *segment* of a continuing strategy is a distinct
+    need from measuring a whole run. Re-running the engine over a truncated
+    panel is not the same thing: it restarts the rebalance calendar and begins
+    flat, which turns a held-out period into a different strategy.
+    """
+    return _nav_only_metrics(nav, risk_free_rate=risk_free_rate)
+
+
 def _nav_only_metrics(nav: pd.Series, *, risk_free_rate: float = 0.0) -> dict[str, float]:
     """Risk/return stats from a NAV series alone (no cohort breakdown)."""
     nav = nav.astype(float).dropna()

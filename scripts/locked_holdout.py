@@ -1,15 +1,28 @@
-"""Choose the configuration on one window; test it once on another.
+"""Choose the configuration on one window; test it once on the next.
 
-The long-short book measures alpha of +8.90%/yr at HAC t = +2.76, every run
-above |t| = 2. The objection to reading that as an edge is multiplicity: the
-configuration it was measured at -- decile 0.1, 1.0x gross, 63-day rebalance --
-was picked from a search over exactly those knobs, on the same data. The best of
-dozens of correlated variants is not a pre-registered test, and that is true no
-matter how carefully each individual variant was measured.
+The long-short book measures alpha of +7.98%/yr at HAC t = +2.60 over the full
+period. The objection to reading that as an edge is multiplicity: the
+configuration it was measured at was picked from a search over exactly those
+knobs, on the same data. The best of dozens of correlated variants is not a
+pre-registered test, however carefully each variant was measured.
 
 So: split the out-of-sample period. Search the grid on the **selection** window
 only, commit to the single winner, and evaluate it **once** on the holdout. The
 holdout is never consulted while choosing.
+
+**The holdout must continue the strategy, not restart it.** The first version of
+this script re-ran the engine over a truncated panel, which is a different
+thing in three ways: the rebalance calendar is anchored to row zero of whatever
+frame it is handed, so slicing moved every trade date; the book began flat, so
+positions and short liabilities open at the split were discarded; and both
+slices included the split session. What that measured was a fresh strategy
+launched on the holdout's first session -- not the strategy under test, carried
+forward. Here the engine runs once over the whole panel and the holdout window
+is *measured out of the continuing NAV*, so the trades either side of the split
+are the trades the strategy would actually have made.
+
+Selection still runs on a truncated panel, which is correct: there the
+truncation is the real beginning, not a boundary cut through a live book.
 
 Two numbers come out, and the second matters as much as the first:
 
@@ -32,13 +45,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from stock_predictor.backtest_reporting import relative_metrics
+from stock_predictor.backtest_reporting import nav_metrics, relative_metrics
 from stock_predictor.long_short import LongShortConfig, run_long_short_backtest
+from stock_predictor.replay import SnapshotIncomplete, SnapshotProvider
 
 RISK_FREE = 0.045
 
@@ -54,39 +69,52 @@ that gets reported. Selecting on the statistic you then quote invites the same
 objection one level down."""
 
 
-class _Bench:
-    """Serves one downloaded benchmark series to every run."""
+def _before(scored: pd.DataFrame, split: str) -> pd.DataFrame:
+    """Sessions strictly before the split.
 
-    def __init__(self, nav: pd.Series):
-        self._nav = nav
-
-    def download_benchmark(self, ticker, start, end):
-        s = self._nav
-        return s.loc[(s.index >= pd.Timestamp(start)) & (s.index <= pd.Timestamp(end))]
-
-
-def _slice(scored: pd.DataFrame, lo: str | None, hi: str | None) -> pd.DataFrame:
-    d = pd.to_datetime(scored["date"])
-    m = pd.Series(True, index=scored.index)
-    if lo:
-        m &= d >= pd.Timestamp(lo)
-    if hi:
-        m &= d <= pd.Timestamp(hi)
-    return scored[m]
+    Strict, so that no session appears in both windows. With the default splits
+    this changes nothing -- 1 January is never a trading day -- but a split on a
+    session the market was open would have put that day's signal on both sides.
+    """
+    return scored[pd.to_datetime(scored["date"]) < pd.Timestamp(split)]
 
 
-def _evaluate(scored, execution, bench, decile, gross, rebalance) -> dict:
+def _run(scored, execution, provider, decile, gross, rebalance):
     cfg = LongShortConfig(
         decile=decile, long_weight=gross / 2, short_weight=gross / 2,
         rebalance_every=rebalance, slippage_bps=5.0,
         risk_free_rate=RISK_FREE, benchmark_ticker="SPY",
     )
-    res = run_long_short_backtest(scored, cfg, provider=bench,
-                                  execution_prices=execution)
+    return run_long_short_backtest(scored, cfg, provider=provider,
+                                   execution_prices=execution)
+
+
+def _whole(res, rebalance: int) -> dict:
     m = dict(res.metrics)
     if len(res.bench_daily_nav) > 1:
         m.update(relative_metrics(res.daily_nav, res.bench_daily_nav,
                                   overlap_days=rebalance,
+                                  risk_free_rate=RISK_FREE))
+    return m
+
+
+def _segment(res, split: str, rebalance: int) -> dict:
+    """Measure the holdout window out of a run that spans the whole panel.
+
+    The strategy is not restarted at the split: it arrives holding whatever it
+    held, on the rebalance calendar it was already on, and this reads the
+    performance of that continuing book from the split onward.
+    """
+    lo = pd.Timestamp(split)
+    nav = res.daily_nav
+    seg = nav.loc[nav.index >= lo]
+    if len(seg) < 3:
+        return {}
+    m = nav_metrics(seg, risk_free_rate=RISK_FREE)
+    bench = res.bench_daily_nav
+    bseg = bench.loc[bench.index >= lo] if len(bench) else bench
+    if len(bseg) > 1:
+        m.update(relative_metrics(seg, bseg, overlap_days=rebalance,
                                   risk_free_rate=RISK_FREE))
     return m
 
@@ -103,18 +131,22 @@ def main() -> None:
     scored["date"] = pd.to_datetime(scored["date"])
     execution = pd.read_parquet(args.baseline_dir / "execution_prices.parquet")
 
-    sel = _slice(scored, None, args.split)
-    hold = _slice(scored, args.split, None)
+    # The benchmark comes from the snapshot. Downloading it here made the
+    # result depend on what Yahoo served that afternoon, which is the opposite
+    # of what a pre-registered test is for.
+    try:
+        provider = SnapshotProvider(args.baseline_dir)
+        provider.download_benchmark("SPY", None, None)
+    except (SnapshotIncomplete, FileNotFoundError) as exc:
+        sys.exit(f"{exc}\n\nRecord it first: uv run python "
+                 f"scripts/record_baseline_benchmark.py {args.baseline_dir}")
+
+    sel = _before(scored, args.split)
+    hold_dates = scored.loc[scored["date"] >= pd.Timestamp(args.split), "date"]
     print(f"selection {sel['date'].min().date()}..{sel['date'].max().date()} "
           f"({sel['date'].nunique()} sessions)")
-    print(f"holdout   {hold['date'].min().date()}..{hold['date'].max().date()} "
-          f"({hold['date'].nunique()} sessions)")
-
-    import yfinance as yf
-    raw = yf.download("SPY", start=str(scored["date"].min().date()),
-                      end=str((scored["date"].max() + pd.Timedelta(days=1)).date()),
-                      progress=False, auto_adjust=True)["Close"]
-    bench = _Bench(raw.squeeze().dropna())
+    print(f"holdout   {hold_dates.min().date()}..{hold_dates.max().date()} "
+          f"({hold_dates.nunique()} sessions), measured as a continuation")
 
     combos = [(d, g, r) for d in GRID_DECILE for g in GRID_GROSS
               for r in GRID_REBALANCE]
@@ -123,7 +155,7 @@ def main() -> None:
 
     sel_rows = []
     for d, g, r in combos:
-        m = _evaluate(sel, execution, bench, d, g, r)
+        m = _whole(_run(sel, execution, provider, d, g, r), r)
         sel_rows.append({"decile": d, "gross": g, "rebalance": r,
                          "sharpe": m.get("sharpe", float("nan")),
                          "cagr": m.get("cagr", float("nan")),
@@ -136,9 +168,25 @@ def main() -> None:
           f"rebalance={int(win.rebalance)}d "
           f"(selection Sharpe {win.sharpe:.2f}, t {win.alpha_t:+.2f})")
 
-    print("\nEvaluating the committed configuration on the holdout, once.")
-    held = _evaluate(hold, execution, bench, win.decile, win.gross,
-                     int(win.rebalance))
+    # One full-panel run per configuration. The committed configuration's
+    # holdout figures and the whole-grid control both come out of these, so the
+    # control is measured the same way as the headline rather than by a second
+    # code path that might not agree.
+    print("\nRunning the grid over the whole panel and measuring from the "
+          "split forward…")
+    hold_rows = []
+    held: dict = {}
+    for d, g, r in combos:
+        m = _segment(_run(scored, execution, provider, d, g, r), args.split, r)
+        row = {"decile": d, "gross": g, "rebalance": r,
+               "alpha_t": m.get("alpha_t", float("nan")),
+               "alpha_ann": m.get("alpha_ann", float("nan")),
+               "sharpe": m.get("sharpe", float("nan"))}
+        hold_rows.append(row)
+        if (d, g, int(r)) == (win.decile, win.gross, int(win.rebalance)):
+            held = m
+
+    print("\nThe committed configuration on the holdout:")
     print(f"  CAGR    {held.get('cagr', float('nan')):+.2%}")
     print(f"  Sharpe  {held.get('sharpe', float('nan')):.2f}")
     print(f"  max DD  {held.get('max_drawdown', float('nan')):+.2%}")
@@ -148,13 +196,6 @@ def main() -> None:
 
     # The control: what the rest of the grid did on the holdout. If everything
     # works, the winner tells you nothing about the winner.
-    hold_rows = []
-    for d, g, r in combos:
-        m = _evaluate(hold, execution, bench, d, g, r)
-        hold_rows.append({"decile": d, "gross": g, "rebalance": r,
-                          "alpha_t": m.get("alpha_t", float("nan")),
-                          "alpha_ann": m.get("alpha_ann", float("nan")),
-                          "sharpe": m.get("sharpe", float("nan"))})
     hold_df = pd.DataFrame(hold_rows)
     t = hold_df["alpha_t"].dropna()
     print(f"\nWhole grid on the holdout: alpha t median {t.median():+.2f}, "
@@ -169,6 +210,8 @@ def main() -> None:
         args.report.write_text(json.dumps({
             "split": args.split,
             "criterion": SELECTION_CRITERION,
+            "holdout_measured_as": "continuation of a whole-panel run",
+            "benchmark": "SPY, from the baseline snapshot",
             "committed": {k: float(win[k]) for k in ("decile", "gross", "rebalance")},
             "holdout": {k: (None if not np.isfinite(v) else float(v))
                         for k, v in held.items() if isinstance(v, (int, float))},
