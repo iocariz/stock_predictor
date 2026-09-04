@@ -136,7 +136,7 @@ with nothing looking wrong.
 | `MIN_PROB`, `MIN_CROSS_SECTION` | unset (omitted) | both |
 | `COMMISSION_PER_SHARE`, `COMMISSION_PER_ORDER` | 0, 0 | both |
 | `REBALANCE_DAY` | `Friday` (`any` to trade every session) | both |
-| `HOLD_MODE` | `fixed` (`rank` for rank-decay exits) | both |
+| `HOLD_MODE` | `long-short` (`fixed` for cohort expiry, `rank` for rank-decay exits) | both |
 | `MAX_DD` | 0.15 | live only — the kill switch has no simulation twin |
 
 `HOLDING_DAYS` **derives from `HORIZON`** rather than being a second number to
@@ -274,7 +274,7 @@ The alpha t-statistic is **Newey–West (HAC)**, with the lag window set to at l
 - **predict-sp500:** entry is the first session **strictly after** *today* (same next-day convention as the backtest); fixed mode expiries use the same trading-day count as the backtest, rank mode positions carry an open-ended expiry sentinel and close on rank decay. Orders use **integer shares** (lot sizes differ from a fractional simulation).
 - **Position sizing:** both paths fund a new cohort with `free_cash / free_slots`. (Live previously divided by `max_cohorts`, so a portfolio with one of two slots open deployed half its free cash and the remainder never got invested.)
 - **Duplicate holdings:** both paths allow a persistently top-ranked name in two overlapping cohorts at double weight. Pass `--one-lot-per-ticker` to cap live at one lot, accepting that it will then under-weight names the simulation kept buying.
-- **Parity:** Use the same `--weighting`, `--slippage-bps`, `--holding-days` / `--exit-rank`, and commission flags in both CLIs when comparing research simulation to generated orders. Do **not** switch `--hold-mode` on an existing state file.
+- **Parity:** Use the same `--weighting`, `--slippage-bps`, `--holding-days` / `--exit-rank`, and commission flags in both CLIs when comparing research simulation to generated orders. Switching `--hold-mode` on an existing state file is **refused**: the three engines read positions under different rules, so each would mis-manage another's book.
 
 #### Comparing two strategies
 
@@ -619,7 +619,7 @@ uv run predict-sp500 --model models/latest.pkl --skip-earnings --confirm
 | `--top-n` | 15 | Stocks per cohort / portfolio slots |
 | `--max-cohorts` | 2 | Fixed mode: max overlapping cohorts |
 | `--holding-days` | 10 | Fixed mode: trading days until cohort expiry |
-| `--hold-mode` | fixed | `fixed` (expiry after `--holding-days`) or `rank` (sell on rank decay; parity with `backtest-sp500 --mode rank-hold`). Don't switch modes on an existing state file |
+| `--hold-mode` | fixed | `fixed` (expiry after `--holding-days`), `rank` (sell on rank decay; parity with `backtest-sp500 --mode rank-hold`), or `long-short` (decile-vs-decile book rebalanced every `--rebalance-every` sessions, shorts as negative shares; parity with `backtest-sp500 --mode long-short`). Switching modes on an existing state file is refused unless `--allow-mode-switch`; use a separate `--state` file instead |
 | `--exit-rank` | 40 | Rank mode: sell held names ranked worse than this (≥ top-n) |
 | `--max-drawdown` | 0.15 | Kill-switch: halt if drawdown exceeds this |
 | `--slippage-bps` | 5 | Slippage per side (basis points) |

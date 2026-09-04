@@ -857,3 +857,53 @@ def _long_short_reason(have: int, want: int) -> str:
     if (have > 0) != (want > 0):
         return "ls_flip"
     return "ls_resize"
+
+
+class ModeMismatch(RuntimeError):
+    """The state file was written by a different hold-mode."""
+
+
+def _book_mode(state: PortfolioState) -> str | None:
+    """Which engine wrote these positions, or ``None`` for an empty book.
+
+    Read off the positions rather than recorded, so a state file written before
+    this check existed is still classified correctly.
+    """
+    if not state.positions:
+        return None
+    if any(p.cohort_id == LONG_SHORT_COHORT for p in state.positions):
+        return "long-short"
+    if all(p.expiry_date == OPEN_ENDED_EXPIRY for p in state.positions):
+        return "rank"
+    return "fixed"
+
+
+def assert_mode_matches_state(
+    state: PortfolioState, hold_mode: str, *, allow_switch: bool = False,
+) -> None:
+    """Refuse to run an engine against another engine's book.
+
+    The three live engines disagree about what a position *is*: a fixed-hold
+    leg expires on a date, a rank-hold position is open-ended and closed by rank
+    decay, a long-short position may carry negative shares and is closed by the
+    next rebalance's target. Pointed at the wrong file, each reads the other's
+    positions under its own rules -- the fixed-expiry sweep waits for
+    ``9999-12-31``, rank-hold sees a short as a holding ranked below everything.
+
+    ``--hold-mode`` has warned about this in its help text since rank-hold was
+    added and nothing enforced it. An empty book is always safe.
+    """
+    if allow_switch:
+        return
+    written_by = _book_mode(state)
+    if written_by is None or written_by == hold_mode:
+        return
+    raise ModeMismatch(
+        f"this state file holds a {written_by} book "
+        f"({len(state.positions)} position(s)), and --hold-mode is "
+        f"{hold_mode}. The two engines read positions under different rules, "
+        f"so running this would mis-manage the existing book.\n"
+        f"Use --state with a separate file for the {hold_mode} book, close the "
+        f"{written_by} book first, or pass --allow-mode-switch if you have "
+        f"decided the positions should be reinterpreted."
+    )

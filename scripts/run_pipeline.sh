@@ -64,7 +64,17 @@ cd "$ROOT"
 # simulated. Set to "any" only if you also change the backtest.
 : "${REBALANCE_DAY:=Friday}"
 # fixed = holding_days expiry (cohort engine); rank = exit_rank decay.
-: "${HOLD_MODE:=fixed}"   # fixed | rank | long-short
+# The traded engine. long-short since 2026-09-05, on the evidence in
+# BASELINE.md: it is the only engine whose alpha survives four independent
+# rebuilds (t +2.44..+2.94) and the only one whose measured drawdown (-13.03%)
+# fits the MAX_DD kill switch below. The long-only engines' alpha is
+# indistinguishable from zero in every draw -- cohort's changes sign -- and
+# their drawdowns are three times the switch.
+#
+# This is a tilt, not an established edge: it does not clear the locked holdout
+# (+1.66/+1.87/+1.95/+2.12 across two artifacts and two splits). Set
+# HOLD_MODE=fixed to go back.
+: "${HOLD_MODE:=long-short}"   # fixed | rank | long-short
 # Long-short only. Defaults follow the backtest's own defaults; the locked
 # holdout does not identify a best configuration, so these are the documented
 # starting point rather than a tuned one.
@@ -74,6 +84,10 @@ cd "$ROOT"
 : "${REBALANCE_EVERY:=63}"
 : "${MIN_NAMES_PER_SIDE:=3}"
 : "${SHORT_BORROW_ANNUAL:=0}"
+# Coherent with the traded engine for the first time: long-short's measured
+# max drawdown is -13.03%, inside this switch. Under HOLD_MODE=fixed or rank it
+# is not -- those engines draw down -45.94% and -51.90% -- so switching back
+# means raising this or expecting a halt.
 : "${MAX_DD:=0.15}"
 : "${OPTUNA_TRIALS:=40}"
 : "${TS_CV_SPLITS:=5}"
