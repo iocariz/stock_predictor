@@ -25,8 +25,10 @@ from stock_predictor.pit import (
     tickers_overlapping_window,
 )
 from stock_predictor.portfolio import (
+    ModeMismatch,
     Order,
     PortfolioState,
+    assert_mode_matches_state,
     check_kill_switch,
     generate_orders,
     generate_orders_long_short,
@@ -426,6 +428,12 @@ def parse_args() -> argparse.Namespace:
         "on an existing state file.",
     )
     p.add_argument(
+        "--allow-mode-switch", action="store_true", dest="allow_mode_switch",
+        help="Reinterpret an existing book under a different --hold-mode. The "
+             "engines disagree about what a position is, so this is almost "
+             "always the wrong answer; prefer a separate --state file.",
+    )
+    p.add_argument(
         "--decile", type=float, default=0.10, dest="decile",
         help="long-short only: fraction of the cross-section taken on each "
              "side.",
@@ -785,6 +793,14 @@ def main() -> None:
     ) if len(adj_close) and stale else ""
     if gaps:
         print(gaps, file=sys.stderr)
+
+    # Each engine reads positions under its own rules, so running one against
+    # another's book mis-manages it. Checked before any order is generated.
+    try:
+        assert_mode_matches_state(state, args.hold_mode,
+                                  allow_switch=args.allow_mode_switch)
+    except ModeMismatch as exc:
+        sys.exit(f"Refusing to trade: {exc}")
 
     # Generate orders (calendar = session dates in downloaded OHLC index)
     trading_dates = trading_dates_from_index(adj_close.index)
