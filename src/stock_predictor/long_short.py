@@ -148,10 +148,14 @@ class LongShortResult:
     bench_metrics: dict[str, float]
 
 
-def _target_book(
+def target_book(
     scored_day: pd.DataFrame, config: LongShortConfig, capital: float,
 ) -> dict[str, float]:
-    """Target dollar exposure per ticker: positive long, negative short."""
+    """Target dollar exposure per ticker: positive long, negative short.
+
+    Public because the live path uses it. Two copies of a sizing rule is how a
+    live book and its simulation drift apart, and this project has already paid
+    for that once with the execution panel."""
     ranked = scored_day.sort_values("prob", ascending=False)
     n_side = int(len(ranked) * config.decile)
     if n_side < config.min_names_per_side:
@@ -299,7 +303,7 @@ def run_long_short_backtest(
             equity = cash + sum(
                 s * prices.get(t, 0.0) for t, s in shares.items()
             )
-            target = _target_book(by_date.get_group(signal_day), config, equity)
+            target = target_book(by_date.get_group(signal_day), config, equity)
             if target and hedge_beta > 0:
                 # Added after selection, so it never consumes a decile slot.
                 target[hedge_ticker] = -hedge_beta * equity

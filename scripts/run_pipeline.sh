@@ -64,7 +64,16 @@ cd "$ROOT"
 # simulated. Set to "any" only if you also change the backtest.
 : "${REBALANCE_DAY:=Friday}"
 # fixed = holding_days expiry (cohort engine); rank = exit_rank decay.
-: "${HOLD_MODE:=fixed}"
+: "${HOLD_MODE:=fixed}"   # fixed | rank | long-short
+# Long-short only. Defaults follow the backtest's own defaults; the locked
+# holdout does not identify a best configuration, so these are the documented
+# starting point rather than a tuned one.
+: "${DECILE:=0.10}"
+: "${LONG_WEIGHT:=0.5}"
+: "${SHORT_WEIGHT:=0.5}"
+: "${REBALANCE_EVERY:=63}"
+: "${MIN_NAMES_PER_SIDE:=3}"
+: "${SHORT_BORROW_ANNUAL:=0}"
 : "${MAX_DD:=0.15}"
 : "${OPTUNA_TRIALS:=40}"
 : "${TS_CV_SPLITS:=5}"
@@ -86,6 +95,17 @@ strategy_flags() {
     --commission-per-share "$COMMISSION_PER_SHARE"
     --commission-per-order "$COMMISSION_PER_ORDER"
   )
+  # The long-short book is sized from both ends of the ranking and turns over
+  # on a calendar, so it takes its own flags. Passed only in that mode: the
+  # long-only paths reject them.
+  if [[ "$HOLD_MODE" == "long-short" ]]; then
+    f+=(--decile "$DECILE"
+        --long-weight "$LONG_WEIGHT"
+        --short-weight "$SHORT_WEIGHT"
+        --rebalance-every "$REBALANCE_EVERY"
+        --min-names-per-side "$MIN_NAMES_PER_SIDE"
+        --short-borrow-annual "$SHORT_BORROW_ANNUAL")
+  fi
   [[ -n "$MIN_PROB" ]] && f+=(--min-prob "$MIN_PROB")
   [[ -n "$MIN_CROSS_SECTION" ]] && f+=(--min-cross-section "$MIN_CROSS_SECTION")
   [[ "$REBALANCE_DAY" != "any" ]] && f+=(--rebalance-day "$REBALANCE_DAY")
@@ -138,6 +158,7 @@ backtest_only() {
   while IFS= read -r _line; do flags+=("$_line"); done < <(strategy_flags)
   local -a mode=()
   [[ "$HOLD_MODE" == "rank" ]] && mode=(--mode rank-hold)
+  [[ "$HOLD_MODE" == "long-short" ]] && mode=(--mode long-short)
   # Absent used to mean "silently fall back to forward-filled prices", which
   # is a different backtest, not a smaller one.
   if [[ ! -f "$EXECUTION_PRICES" && -z "${DRY_RUN:-}" ]]; then
@@ -198,7 +219,9 @@ Strategy (one definition, applied to BOTH the backtest and the live path):
   HORIZON=63 TOP_N=15 HOLDING_DAYS=$HORIZON MAX_COHORTS=2 WEIGHTING=equal
   EXIT_RANK=40 RANK_OFFSET=0 MIN_PROB= MIN_CROSS_SECTION=
   REBALANCE_DAY=Friday  (use "any" to trade every session)
-  HOLD_MODE=fixed|rank  COMMISSION_PER_SHARE=0 COMMISSION_PER_ORDER=0
+  HOLD_MODE=fixed|rank|long-short   COMMISSION_PER_SHARE=0 COMMISSION_PER_ORDER=0
+  DECILE=0.10 LONG_WEIGHT=0.5 SHORT_WEIGHT=0.5 REBALANCE_EVERY=63
+    (long-short only; MIN_NAMES_PER_SIDE=3 SHORT_BORROW_ANNUAL=0)
 
   DRY_RUN=1 prints the command instead of running it:
     DRY_RUN=1 TOP_N=25 ./scripts/run_pipeline.sh predict

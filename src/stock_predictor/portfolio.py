@@ -39,6 +39,10 @@ class Position:
     entry_date: str  # ISO YYYY-MM-DD
     expiry_date: str
     cohort_id: str
+    sessions_unpriced: int = 0
+    """Consecutive sessions with no usable quote. A duration, not a verdict:
+    a gap alone never proves a delisting, which is why the policy carries a
+    grace period."""
     last_price: float = 0.0
     """Most recent observed price, refreshed whenever a quote is available.
 
@@ -69,6 +73,11 @@ class PortfolioState:
     last_signal_date: str = ""
     """as_of of the last run that opened a cohort, so re-running one signal
     does not open a second."""
+    last_accrual_date: str = ""
+    """as_of of the last session whose carry was charged. Distinct from
+    *last_signal_date*: borrow accrues every session the short leg is open, and
+    measuring it from the last rebalance instead charges 1+2+...+n sessions
+    over an n-session holding period rather than n."""
 
     def __post_init__(self) -> None:
         if not self.created_at:
@@ -634,3 +643,217 @@ def generate_orders_rank_hold(
         last_signal_date=as_of if buy_orders else state.last_signal_date,
     )
     return (*sell_orders, *buy_orders), new_state
+
+
+# ---------------------------------------------------------------------------
+# Long-short
+# ---------------------------------------------------------------------------
+
+TRADING_DAYS = 252
+"""Sessions per year, for pro-rating the borrow charge. Matches the
+backtest's constant so the two books accrue at the same rate."""
+
+LONG_SHORT_COHORT = "long-short"
+"""One book, not a sequence of baskets. Every position carries this id so the
+cohort machinery can tell them apart from a fixed-hold basket, and so
+:func:`active_cohort_ids` never counts them as competing for a slot."""
+
+
+def _sessions_between(trading_dates, start: str, end: str) -> int:
+    """Trading sessions strictly after *start*, up to and including *end*."""
+    if not start:
+        return 10**9          # never rebalanced: treat as overdue
+    idx = pd.DatetimeIndex(pd.to_datetime(trading_dates)).sort_values()
+    lo, hi = pd.Timestamp(start), pd.Timestamp(end)
+    return int(((idx > lo) & (idx <= hi)).sum())
+
+
+def generate_orders_long_short(
+    state: PortfolioState,
+    ranked_picks: list[dict],
+    prices: dict[str, float],
+    *,
+    decile: float,
+    long_weight: float,
+    short_weight: float,
+    rebalance_every: int,
+    slippage_bps: float,
+    as_of: str,
+    trading_dates,
+    min_names_per_side: int = 3,
+    short_borrow_annual: float = 0.0,
+    commission_per_share: float = 0.0,
+    commission_per_order: float = 0.0,
+    allow_new: bool = True,
+    force: bool = False,
+    delisting_policy=None,
+    delisting_proceeds: pd.DataFrame | None = None,
+) -> tuple[tuple[Order, ...], PortfolioState]:
+    """Live long-short rebalance, mirroring :func:`run_long_short_backtest`.
+
+    *ranked_picks* must be the FULL universe scored today, best first: the book
+    is built from both ends of the ranking, so a truncated list silently
+    changes what gets shorted.
+
+    Sizing comes from :func:`~stock_predictor.long_short.target_book` and costs
+    from :class:`~stock_predictor.execution.CostModel` -- the same functions the
+    backtest uses, not reimplementations of them.
+
+    Two things differ from the long-only paths. Shares go **negative**: a short
+    is a liability that ``portfolio_value`` must mark against, not an absent
+    position. And there is **no per-position expiry**: the book turns over on a
+    calendar, so positions carry :data:`OPEN_ENDED_EXPIRY` and are closed by the
+    next rebalance's target rather than by the fixed-expiry sweep. Do not point
+    this at a state file a fixed-hold or rank-hold run has written.
+
+    Set *allow_new* to ``False`` to unwind without re-entering, which is what a
+    tripped kill switch wants.
+    """
+    from stock_predictor.delisting import (
+        DelistingPolicy,
+        disposal_value,
+        load_proceeds,
+    )
+    from stock_predictor.execution import CostModel
+    from stock_predictor.long_short import LongShortConfig, target_book
+
+    costs = CostModel(
+        slippage_bps=slippage_bps,
+        commission_per_share=commission_per_share,
+        commission_per_order=commission_per_order,
+    )
+    cash = float(state.cash)
+
+    # Borrow accrues on every session the short leg was open, whether or not
+    # today is a rebalance. Charging it only when the book turns over would
+    # make a long holding period look free.
+    elapsed = _sessions_between(trading_dates, state.last_signal_date, as_of)
+    # Carry is charged for sessions not yet charged, not for sessions since the
+    # last rebalance. Measuring it from last_signal_date bills 1+2+...+n over an
+    # n-session hold: a 63-session cycle paid 2,016 session-days of borrow
+    # instead of 63, which cost ~20 points of NAV against the backtest.
+    since_accrual = _sessions_between(trading_dates, state.last_accrual_date, as_of)
+    if short_borrow_annual > 0 and 0 < since_accrual < 10**9:
+        short_notional = sum(
+            abs(p.shares) * mark_price(p, prices)
+            for p in state.positions if p.shares < 0
+        )
+        cash -= (short_notional * short_borrow_annual
+                 / TRADING_DAYS * since_accrual)
+
+    # Refresh marks even on a quiet session, so a name that stops printing is
+    # still valued from its last real quote rather than its entry price.
+    marked = tuple(
+        replace(p, last_price=mark_price(p, prices),
+                sessions_unpriced=(0 if valid_quote(prices, p.ticker) is not None
+                                   else p.sessions_unpriced + 1))
+        for p in state.positions
+    )
+    quiet = replace(state, cash=cash, positions=marked,
+                    last_accrual_date=as_of,
+                    updated_at=datetime.now(timezone.utc).isoformat())
+
+    due = force or elapsed >= rebalance_every
+    if not due:
+        return (), quiet
+
+    nav = portfolio_value(quiet, prices)
+    current = {p.ticker: p for p in marked}
+    proceeds_by_ticker = load_proceeds(delisting_proceeds)
+    policy = delisting_policy or DelistingPolicy()
+    deferred: list[str] = []
+    disposed: list[tuple[str, str]] = []
+
+    target: dict[str, float] = {}
+    if allow_new:
+        frame = pd.DataFrame(ranked_picks)
+        if not frame.empty and {"ticker", "prob"} <= set(frame.columns):
+            cfg = LongShortConfig(
+                decile=decile, long_weight=long_weight,
+                short_weight=short_weight, rebalance_every=rebalance_every,
+                slippage_bps=slippage_bps, min_names_per_side=min_names_per_side,
+            )
+            target = target_book(frame, cfg, nav)
+        if not target:
+            # Too thin a cross-section to build a book. Hold what is there
+            # rather than liquidating into a bad tape.
+            return (), quiet
+
+    orders: list[Order] = []
+    positions: dict[str, Position] = {}
+    for ticker in sorted(set(current) | set(target)):
+        held = current.get(ticker)
+        have = held.shares if held else 0
+        px = valid_quote(prices, ticker)
+        if px is None:
+            # No executable quote, so no fill: pricing one against a mark is
+            # what specs.md:405 forbids. But holding it forever is the other
+            # failure -- the backtest engine had exactly this bug, and a live
+            # book carrying eight delisted names accumulates uncontrolled
+            # exposure. Defer, then dispose under the stated policy.
+            if held is None:
+                continue
+            unpriced = held.sessions_unpriced + 1
+            settled = disposal_value(
+                ticker, as_of, evidence=proceeds_by_ticker,
+                sessions_unpriced=unpriced, policy=policy,
+            )
+            if settled is None:
+                positions[ticker] = replace(held, sessions_unpriced=unpriced)
+                deferred.append(ticker)
+                continue
+            per_share, source = settled
+            cash += held.shares * per_share
+            disposed.append((ticker, source))
+            continue
+        # Nearest, not truncated. int() rounds toward zero, which biases every
+        # leg of a ~50-name book downward by up to a share -- measured at ~9%
+        # of intended gross exposure against the backtest's fractional sizing.
+        want = int(round(target.get(ticker, 0.0) / px))
+        delta = want - have
+        if delta == 0:
+            if want:
+                positions[ticker] = held if held else None
+                if positions[ticker] is None:
+                    del positions[ticker]
+            elif held is not None and have:
+                positions[ticker] = held
+            continue
+
+        side = 1 if delta > 0 else -1
+        fill = costs.fill_price(px, side)
+        cash -= delta * fill + costs.commission(delta)
+        orders.append(Order(
+            action="BUY" if delta > 0 else "SELL",
+            ticker=ticker, shares=abs(delta), price=fill,
+            cohort_id=LONG_SHORT_COHORT,
+            reason=_long_short_reason(have, want),
+        ))
+        if want:
+            positions[ticker] = Position(
+                ticker=ticker, shares=want,
+                entry_price=fill if have == 0 else (held.entry_price if held else fill),
+                entry_date=as_of if have == 0 else (held.entry_date if held else as_of),
+                expiry_date=OPEN_ENDED_EXPIRY, cohort_id=LONG_SHORT_COHORT,
+                last_price=px,
+            )
+
+    new_state = replace(
+        quiet,
+        cash=cash,
+        positions=tuple(positions[t] for t in sorted(positions)),
+        last_signal_date=as_of,
+        updated_at=datetime.now(timezone.utc).isoformat(),
+    )
+    return tuple(orders), new_state
+
+
+def _long_short_reason(have: int, want: int) -> str:
+    """Why a leg traded, in the language the report prints."""
+    if have == 0:
+        return "ls_open_long" if want > 0 else "ls_open_short"
+    if want == 0:
+        return "ls_close_long" if have > 0 else "ls_cover_short"
+    if (have > 0) != (want > 0):
+        return "ls_flip"
+    return "ls_resize"
