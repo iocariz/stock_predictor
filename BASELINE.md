@@ -7,9 +7,19 @@ scored panel pricing its own fills, an alpha that was mostly the risk-free
 rate. **Those numbers are obsolete.** This file records what replaces them,
 what verified it, and how much of it is trustworthy.
 
-The short version: after rebuilding cleanly and measuring properly, the
-long-only strategy shows **no statistically significant alpha**, and its
-headline return is **not stable enough to quote to two decimals**.
+The short version, after four independent rebuilds of one commit and one
+pinned window:
+
+* **Neither long-only engine shows alpha distinguishable from zero**, and
+  neither is stable enough to quote from a single run. Cohort alpha changes
+  sign between draws; rank-hold's CAGR carries a ±10.7-point band.
+* **The long-short book is the one result that survives its own noise** — all
+  four draws clear |t| = 2 — but it still fails the locked holdout on two
+  independent artifacts (+1.66, +1.87, +1.95, +2.12), so it is a measured tilt
+  rather than an established edge.
+* **Any comparison must clear the spread to mean anything**: ±3.3 points of
+  CAGR on long-short, ±7.5 on cohort, ±10.7 on rank-hold. Use
+  `--replay-snapshot` for code comparisons; a fresh rebuild has a price.
 
 ---
 
@@ -17,8 +27,8 @@ headline return is **not stable enough to quote to two decimals**.
 
 | | |
 |---|---|
-| commit | `05442e0057c4` (clean tree) |
-| run id | `20260831T085207Z_8e4abc34` |
+| commit | `b8ab695c173d` (clean tree) |
+| run id | `20260904T051107Z_1a6a5664` |
 | built by | `./scripts/rebuild_baseline.sh` |
 | verified by | `uv run python scripts/verify_baseline.py artifacts/baseline` |
 
@@ -38,21 +48,22 @@ Input snapshot hashes (`artifacts/baseline/snapshot/manifest.json`):
 
 | snapshot | sha256 (16) | rows |
 |---|---|---|
-| `equity_prices_long` | `063e8e757758d42a` | 3,492,792 |
-| `execution_prices` | `063e8e757758d42a` | 3,492,792 |
-| `features_clean` | `b612b49decab5d23` | 1,939,552 |
-| `labeled` | `ce423802b677d449` | 2,753,719 |
-| `macro` | `3592ae0a96d169d0` | 4,227 |
+| `equity_prices_long` | `325b0a4c27b5ec79` | 3,492,792 |
+| `execution_prices` | `325b0a4c27b5ec79` | 3,492,792 |
+| `features_clean` | `66ea526ef5bf3147` | 1,940,969 |
+| `labeled` | `f1e2281fd9dcbb13` | 2,770,323 |
+| `macro` | `9e16de179cc5ad22` | 4,228 |
 | `sector_map` | `408da130fa1f0985` | 503 |
 | `stints` | `27dbf956b96a35ae` | 1,247 |
-| `benchmark` | `42e66f949c7f7d99` | 4,190 |
+| `benchmark` | `09e5960f468c526b` | 4,190 |
 
-Output hashes (`manifest["outputs"]`, checked on every verification):
+Output hashes (`manifest["outputs"]`, checked on every verification, both
+**recorded at write time** by the run that produced them):
 
 | output | sha256 (16) |
 |---|---|
-| `wf_scored` | `9bf3b4b650480db7` |
-| `execution_prices` | `c36d16dbf6944ca4` |
+| `wf_scored` | `2494cf089ec17042` |
+| `execution_prices` | `f593a935eb2dc413` |
 
 Scored panel: 952,329 rows, 1,924 sessions, 643 tickers.
 Execution panel: 4,188 sessions × 834 tickers.
@@ -70,27 +81,25 @@ the survivorship residual elsewhere.
 
 | gate | result |
 |---|---|
-| snapshot integrity | all eight input artifacts recomputed and matching their recorded sha256 |
+| snapshot integrity | all eight input artifacts recomputed and matching their recorded sha256, all written by this run |
 | output integrity | `wf_scored.parquet` and `execution_prices.parquet` recomputed against recorded hashes |
 | execution derivation | the wide panel reproduced exactly from the hashed long snapshot: 4,188 sessions × 764 priced tickers |
 | ticker renames | 15 checked for successor coverage; **0 of 15 testable for concurrent trading** — canonicalisation removes the predecessor's own symbol from the panel, so the one real falsifier cannot run. Coverage shows a successor prices the predecessor's membership; it cannot show they are the same issuer, and each entry's recorded note remains the warrant |
 | point-in-time integrity | 0 of 952,329 scored rows outside index membership, on the half-open `[start_date, end_date)` convention production filters with; labels stop exactly at the last labelable session; execution covers every scored row; scored and execution prices agree on 952,329/952,329 cells |
-| survivorship | 268 of 347 departed names carry prices **during their membership** (**77.2%**, the measured ceiling); departed names are scored on **99.9%** of the sessions they were members (118,721/118,896) |
+| survivorship | 272 of 347 departed names carry prices **during their membership** (**78.4%**, the measured ceiling); departed names are scored on **99.9%** of the sessions they were members (118,721/118,896) |
 | recorded benchmark | SPY, 1,924 sessions, from the snapshot — so beta, alpha and the HAC t are checkable offline |
 | pinned metrics | every published CAGR, Sharpe, drawdown, beta, alpha and HAC t recomputed against `expected_metrics.json` |
-| accounting (cohort) | NAV reconciles with the trade ledger to `1.19e-16`; cash + holdings = NAV on all 1,924 sessions (residual `0.00e+00`) |
-| accounting (rank-hold) | reconciles to `1.25e-15`, with 15 open positions and −4,245.68 unrealized; per-session residual `0.00e+00` |
+| accounting (cohort) | NAV reconciles with the trade ledger to `3.37e-16`; cash + holdings = NAV on all 1,924 sessions (residual `0.00e+00`) |
+| accounting (rank-hold) | reconciles to `7.83e-16`, with 15 open positions and −27,937.51 unrealized; per-session residual `0.00e+00` |
 | accounting (long-short) | cash + holdings = NAV on all 1,924 sessions (residual `0.00e+00`). No cohort ledger to close a terminal identity against, but `specs.md:414`'s per-session identity applies and is checked |
 | fills (all three engines) | zero stale fills; every refusal disposed under a stated policy |
 | deterministic backtest (all three) | identical NAV hashes on repeat |
 
-Two gates are newer than the artifacts and are marked accordingly. The output
-hashes were **sealed after the fact** rather than recorded at write time, and
-the benchmark was **recorded after the fact** — both are tamper-evident from
-the seal onward and neither is proof of provenance. The next rebuild records
-both properly. The execution panel is the exception: it re-derives exactly from
-a snapshot hash that predates all of this, so its provenance is established
-rather than asserted.
+Nothing here is sealed or backfilled. The previous baseline carried both
+output hashes as `sealed-after-the-fact` and its benchmark as
+`recorded-after-the-fact`, because the pipeline did not yet capture them; this
+one records all three during the run that produced them. The seal and the
+backfill scripts remain for older artifacts and are no longer used here.
 
 ### Ticker renames
 
@@ -135,9 +144,12 @@ issuer's* prices under a departed member's name:
 | Q | Qwest, left the index 2011-04 | from 2025-10-27 (14.6 years later) |
 | SNDK | SanDisk, acquired 2016 | from 2025-02-13 (a re-IPO, new entity) |
 
-**48 of 347 departed names are like this** — priced only outside the window
-they were ever members. They were being counted as survivorship recoveries,
-which is why coverage was reported as 91.4% when the truth is **77.2%**.
+**50 of 347 departed names are like this** in this panel — priced only outside
+the window they were ever members. They were being counted as survivorship
+recoveries, which is why coverage was once reported as 91.4% when the truth is
+**78.4%**. The count moves between downloads (46, 49 and 50 across rebuilds of
+the same window) because symbols keep being reassigned; it is recorded per run
+in `manifest["recycled_symbols"]` rather than assumed constant.
 
 The point-in-time filter kept them out of the scored panel, which is why none
 reached a trade and why they surfaced as zero-coverage rather than as bad
@@ -179,60 +191,70 @@ verification fails if any of them moves.
 <!-- pinned-metrics:start -->
 | engine | CAGR | Sharpe | max drawdown | beta | alpha/yr | HAC t |
 |---|---|---|---|---|---|---|
-| long-short | 15.47% | 1.02 | -12.02% | +0.18 | +7.98% | +2.60 |
-| cohort | 23.17% | 0.74 | -44.70% | +1.21 | +4.72% | +0.78 |
-| rank-hold | 18.83% | 0.58 | -51.57% | +1.41 | +0.45% | +0.07 |
+| long-short | 18.04% | 1.12 | -13.03% | +0.24 | +9.53% | +2.56 |
+| cohort | 24.07% | 0.79 | -45.94% | +1.21 | +5.00% | +0.89 |
+| rank-hold | 35.94% | 0.95 | -51.90% | +1.40 | +13.92% | +1.78 |
 <!-- pinned-metrics:end -->
 
 SPY over the same window: **17.55%** CAGR, beta 1.00 by construction.
 
-Generated by `scripts/pin_baseline_metrics.py`, not typed. The table above is
-compared against `expected_metrics.json` by a test, because the previous
-version of this section was maintained by hand and stopped being true — see
-below.
+Generated by `scripts/pin_baseline_metrics.py`, not typed, and compared against
+`expected_metrics.json` by a test.
 
-**The long-short book is still the only engine whose alpha is distinguishable
-from zero here**: +7.98% at HAC t = +2.60, on beta 0.18 and a drawdown a
-quarter the size of either long-only engine's. The long-only engines return
-more in raw terms and do it by carrying beta above 1.2. Cohort alpha is +4.72%
-at t = +0.78; rank-hold alpha is +0.45% at t = +0.07, which is nothing at all.
+**Read none of those numbers on their own.** They are one draw. The table below
+is the one to quote from.
 
-Read that alongside [the locked holdout](#the-locked-holdout) below, which is
-the stronger test and which the long-short alpha does **not** clear.
+### The spread, measured
 
-### These numbers replace a table that had gone stale
+Four fresh rebuilds — **one commit, one pinned window, one seed**, differing
+only in when the download ran. The panels agree to vendor float noise; LightGBM
+splits flip on near-ties, a different fifteen names get held, and the curve
+lands somewhere else.
 
-The previous version of this section reported a mean over four fresh rebuilds:
-long-short 16.92% ± 1.19%, cohort 20.24% ± 2.45%, rank-hold **26.41% ± 1.46%**.
-Those were measured on run `20260830T204011Z_f814aa3d` at commit `4a9e226c4008`
-— the panel *before* 48 reused ticker symbols were removed.
+| engine | CAGR (n=4) | Sharpe | alpha/yr | HAC t | range of t |
+|---|---|---|---|---|---|
+| **long-short** | **17.22% ± 1.66%** | **1.07 ± 0.12** | **+8.99% ± 1.47%** | **+2.61 ± 0.22** | **+2.44 … +2.94** |
+| cohort | 19.72% ± 3.74% | 0.66 ± 0.11 | +1.36% ± 3.15% | +0.23 ± 0.55 | −0.29 … +0.89 |
+| rank-hold | 32.95% ± 5.35% | 0.88 ± 0.11 | +11.82% ± 3.99% | +1.41 ± 0.43 | +0.80 … +1.78 |
 
-At `c656df9` the baseline was rebuilt on the cleaned panel. The provenance table
-and the survivorship section in this document were updated. The results tables
-were not, and went on describing an artifact that no longer existed. Nothing
-failed, because every gate checked the baseline against itself and none checked
-it against what had been published about it.
+`uv run python scripts/baseline_spread.py artifacts/baseline artifacts/baseline_v3 artifacts/baseline_v4 artifacts/baseline_v5`
 
-The difference is not cosmetic:
+**What a difference has to clear before it means anything (2 sd on CAGR):**
 
-| | published (contaminated panel) | actual (cleaned panel) |
-|---|---|---|
-| rank-hold CAGR | 26.41% ± 1.46% | **18.83%** |
-| rank-hold alpha | +6.80% | **+0.45%** |
-| rank-hold HAC t | +0.84 | **+0.07** |
+| engine | band |
+|---|---|
+| long-short | ±3.32% |
+| cohort | **±7.48%** |
+| rank-hold | **±10.69%** |
 
-**Removing the contaminated prices removed almost all of the rank-hold engine's
-apparent return**, and it was the engine that looked best on raw CAGR. Cohort
-moved the other way (20.24% → 23.17%, alpha +2.36% → +4.72%, still
-insignificant), and long-short barely moved (16.92% → 15.47%, t +2.76 → +2.60).
-The engine most exposed to departed names was the one most flattered by their
-recycled prices, which is the direction you would expect and had not been
-checked.
+Most improvements this project has ever quoted sit inside one of those bands.
+Use `--replay-snapshot` to compare code changes; a fresh rebuild now has a
+measured price.
 
-The ± spreads are gone from the table because they described four rebuilds of a
-panel that has since been replaced. One verified artifact is on disk; a spread
-across fresh rebuilds of *this* panel has not been measured. The historical
-spread — which is a real and separate problem — is [below](#the-historical-spread-fresh-rebuilds).
+### Only one engine's result survives its own noise
+
+**Long-short.** Every one of the four draws clears |t| = 2 — +2.44, +2.56,
++2.61, +2.94 — on a beta that barely moves (0.223 ± 0.011) and the tightest
+CAGR band of the three. Four independent downloads agree on the statistic the
+conclusion rests on. That does *not* make it an edge; see the locked holdout
+below, which it still fails.
+
+**Cohort alpha changes sign between draws**: +5.00%, +2.93%, −1.68%, −0.83%.
+The distribution is centred near zero (+1.36% ± 3.15%, t = +0.23). Any single
+figure — including the +4.72% and the +2.36% this document has previously
+published — is a draw, not a measurement.
+
+**Rank-hold cannot be quoted at all.** Its alpha spans +5.87% to +14.33% across
+draws; the entire reported effect fits inside its own noise. Both the 26.41%
+CAGR this document once carried and the 18.83% published as its *correction*
+are draws from a distribution with a ±10.69% band.
+
+*Correction.* The previous revision reported rank-hold at 18.83% CAGR and
++0.45% alpha, and treated the fall from 26.41% as the effect of removing
+contaminated prices. Four draws show 25.04%, 34.37%, 35.94% and 36.44%: the
+18.83% was an outlier, and the confident story told about *why* it fell was
+built on a single draw. The direction of the recycled-symbol correction may
+still be right; the magnitude was never measurable this way.
 
 ### The locked holdout
 
@@ -248,96 +270,107 @@ Re-running the engine over a truncated panel — which is what this did at first
 restarts the rebalance schedule and begins flat, which measures a fresh
 strategy launched on the holdout's first session rather than the one under test.
 
-| split | committed configuration | holdout alpha | HAC t | rank on holdout |
-|---|---|---|---|---|
-| 2023-01-01 | decile 0.20, 1.0x, 63d | +6.04% | **+1.95** | 9 / 18 |
-| 2022-01-01 | decile 0.20, 1.0x, 63d | +5.20% | **+1.87** | 5 / 18 |
+Run on **two independent artifacts**, because the spread showed that a single
+draw cannot carry a conclusion:
 
-**The full-period t = +2.60 does not survive.** A pre-committed configuration
-reaches +1.95 and +1.87 — neither split clears |t| = 2, and both fall well
-short of the figure the full-period search produced.
+| artifact | split | committed configuration | holdout alpha | HAC t | rank |
+|---|---|---|---|---|---|
+| current | 2023-01-01 | decile 0.05, 1.0x, **21d** | +10.14% | **+1.66** | 13 / 18 |
+| current | 2022-01-01 | decile 0.10, 1.0x, 63d | +6.86% | **+2.12** | 7 / 18 |
+| `baseline_v1` | 2023-01-01 | decile 0.20, 1.0x, 63d | +6.04% | +1.95 | 9 / 18 |
+| `baseline_v1` | 2022-01-01 | decile 0.20, 1.0x, 63d | +5.20% | +1.87 | 5 / 18 |
 
-*Correction.* An earlier version of this table reported **+1.78 / +2.26**, from
-a holdout that restarted the strategy instead of continuing it. The 2022 split
-was the one that moved: a book relaunched flat on 2022-01-04 skipped the
-drawdown a continuing book carried across the boundary, which is what lifted it
-above +2. The corrected pair is more consistent than the pair it replaces, and
-the conclusion is the same one, stated more firmly — it no longer depends on
-which split you pick.
+**The full-period t does not survive, on either artifact.** Four
+pre-committed evaluations give +1.66, +1.87, +1.95 and +2.12 — straddling
+|t| = 2 with no draw or split clearing it decisively, against a full-period
+figure of +2.56 on this artifact and +2.60 on the last.
 
-**The search carried no information.** The committed configuration lands
-mid-pack on the holdout both times — 9th and 5th of 18. Choosing on the first
-window told you nothing about which configuration would do well on the second,
-which is what fitting noise looks like from the outside. Note also that the
-honest procedure picks decile **0.20**, not the 0.10 this project has always
-quoted; the historically quoted configuration reaches t = +2.53 on the
-2023 holdout, but we only know that because we went and looked.
+**The search carries no information.** The committed configuration lands
+mid-pack every time — 13th, 7th, 9th and 5th of 18. Choosing on the first
+window tells you nothing about which configuration does well on the second.
+Worse, **the winner is not even stable**: the two artifacts commit to three
+different configurations across four runs (0.05/21d, 0.10/63d, 0.20/63d twice).
+The selection procedure is picking noise, and that is now demonstrated rather
+than suspected.
 
-**Two things do survive**, and they are worth more than the headline was:
+**What replicates across both artifacts and both splits (4 of 4):**
 
-* The grid is **structured, not random**, and this is the finding that holds up
-  best. Sorted by holdout alpha t it separates almost perfectly by rebalance
-  frequency, and the same way under both splits:
+* **Rebalance frequency orders the grid monotonically**, always the same way.
 
-  | rebalance | t at the 2023 split | t at the 2022 split |
-  |---|---|---|
-  | 21d | +0.31 … +0.96 | −0.15 … +0.55 |
-  | 63d | +1.89 … +2.74 | +1.81 … +2.15 |
-  | 126d | +1.59 … +2.94 | +0.90 … +1.05 |
+  | rebalance | current, 2023 | current, 2022 | v1, 2023 | v1, 2022 |
+  |---|---|---|---|---|
+  | 21d | +0.21 … +1.66 | +0.42 … +2.09 | +0.31 … +0.96 | −0.15 … +0.55 |
+  | 63d | +1.92 … +2.30 | +1.93 … +2.43 | +1.89 … +2.74 | +1.81 … +2.15 |
+  | 126d | +2.50 … +3.53 | +1.45 … +2.43 | +1.59 … +2.94 | +0.90 … +1.05 |
 
-  **21-day rebalancing destroys the effect under both splits; 63-day carries it
-  under both.** 126-day is strong at one split and weak at the other, so only
-  63-day is consistent. Tighter deciles (0.05, 0.10) beat 0.20 in both, though
-  the margin at the 2022 split is small. A pattern that repeats across an
-  independent cut is harder to explain as noise than any single maximum.
-* The tilt is **mostly positive but not uniformly so**. All 18 configurations
-  have positive holdout alpha at the 2023 split (median t +1.92, 8 of 18 above
-  +2); at the 2022 split only 14 of 18 are positive and the median is +1.02.
+  21-day is weakest in all four; longer holds are stronger. This is the most
+  durable thing in the whole document — the only claim here that has survived
+  an independent redraw.
+* **Decile 0.20 is the worst of the three** in all four, so the effect lives in
+  tighter selections.
 
-  *Correction.* The earlier version of this section claimed all 18 were positive
-  under **both** splits. That was true only of the restarted holdout; measured
-  as a continuation, four configurations — all of them 21-day — go negative at
-  the 2022 split.
+*Corrections, from re-running on the new artifact.* Two claims the previous
+revision made do **not** replicate, and both were stated too strongly from one
+draw:
 
-So the defensible claim is a **positive but statistically unestablished tilt
-that lives at longer holding periods and tighter deciles** — not an edge of
-+7.98% at t = +2.60.
+* *"21-day rebalancing destroys the effect."* It does not. It is consistently
+  the weakest bucket, but on the current artifact it reaches +1.66 and +2.09.
+  The ordering replicates; the word "destroys" was a description of one draw.
+* *"Four configurations — all 21-day — go negative at the 2022 split."* On the
+  current artifact **all 18 are positive at both splits** (grid median t +2.17
+  and +2.06, with 10 of 18 above +2 each time). The 14-of-18 I reported was
+  itself a draw, and so was the correction I built on it.
 
-**This does not make it a strategy.** Three things stand against reading
-t = +2.60 as settled, and the holdout above confirms the first of them:
+The grid also looks *better* on this artifact than the last — median holdout t
+above +2 at both splits, against +1.92 and +1.02 before. That is the same
+draw-to-draw variation seen everywhere else in this document, and it cuts both
+ways: it is not evidence the book improved.
 
-1. **Multiplicity — demonstrated, not merely suspected.** The locked holdout
-   above shows a pre-committed configuration reaching only +1.95/+1.87, and
-   the selection ranking mid-pack. The +2.60 is the best of a correlated
-   search, quoted as though it were a test.
-2. **31 rebalances.** Seven and a half years at a 63-day horizon is a small
-   number of independent decisions.
-3. **It is not wired to anything live.** The live path trades the cohort
-   engine, which is the one with no measurable alpha.
+So the defensible claim is a **positive tilt that lives at longer holding
+periods and tighter deciles, and that does not clear pre-registration** — not
+an edge of +9.53% at t = +2.56.
+
+**This does not make it a strategy.** Three things stand against reading the
+full-period figure as settled, and the holdout above confirms the first two:
+
+1. **Multiplicity — demonstrated, not suspected.** Four pre-committed
+   evaluations reach +1.66 to +2.12, and the selection procedure commits to
+   three different configurations across them. The full-period figure is the
+   best of a correlated search, quoted as though it were a test.
+2. **Draw dependence — also demonstrated.** Every number here moves when the
+   data is re-downloaded from the same window; see [the spread](#the-spread-measured).
+3. **31 rebalances, and it is not wired to anything live.** Seven and a half
+   years at a 63-day horizon is a small number of independent decisions, and
+   the live path trades the cohort engine — the one whose alpha changes sign
+   between draws.
 
 Against SPY, with CAPM on excess returns and Newey–West standard errors. These
 are the pinned figures from [the results table](#results), measured on the
 recorded benchmark rather than a fresh download:
 
-| engine | beta | alpha/yr | HAC t |
-|---|---|---|---|
-| cohort | **+1.21** | +4.72% | **+0.78** |
-| rank-hold | **+1.41** | +0.45% | **+0.07** |
+| engine | beta | alpha/yr (this draw) | HAC t | alpha across 4 draws |
+|---|---|---|---|---|
+| cohort | **+1.21** | +5.00% | **+0.89** | +1.36% ± 3.15%, sign unstable |
+| rank-hold | **+1.40** | +13.92% | **+1.78** | +11.82% ± 3.99%, t +0.80…+1.78 |
 
-**Neither engine shows evidence of skill.** Cohort alpha is +4.72% at t = +0.78;
-rank-hold is +0.45% at t = +0.07, which is indistinguishable from nothing at
-all. Both carry beta well above 1 (1.21 and 1.41), so most of what they beat
-the index by is leverage, not selection.
+**Neither engine shows evidence of skill**, and neither can be quoted from a
+single draw. Cohort alpha is centred near zero and changes sign between
+rebuilds; rank-hold's spans +5.87% to +14.33% and never clears t = 2. Both
+carry beta well above 1 (1.21 and 1.40), so most of what they beat the index by
+is leverage, not selection.
 
-Three corrections landed on these figures and are recorded because the
-direction matters. Resolving ticker renames moved cohort alpha from +1.00% to
-−2.47%. Fixing the cohort expiry boundary — a cohort selling on a signal
-session was counted as still holding its slot, and its cash withheld from that
-session's entry, on 13 of 57 cohorts — moved it back to +2.36%. Removing the
-recycled ticker symbols moved cohort alpha to +4.72% and cut rank-hold alpha
-from +6.80% to +0.45%. The sign and size of both engines' alpha turned out to
-be an artifact of data defects, in both directions; their *insignificance*
-never was.
+Three corrections were previously recorded here as having moved these figures:
+ticker renames taking cohort alpha from +1.00% to −2.47%, the cohort expiry
+boundary taking it back to +2.36%, and recycled-symbol removal taking it to
++4.72% while cutting rank-hold from +6.80% to +0.45%.
+
+**Those attributions do not survive the spread.** Each was a single draw
+compared against another single draw, and cohort alpha varies by ±3.15% across
+draws of one commit — wider than two of the three "effects". The *fixes* are
+right on their own terms, each with a test and a mechanism; what cannot be
+supported is the claim that any of them moved alpha by a specific amount. The
+one durable finding is the one that never depended on a difference: neither
+long-only engine's alpha is distinguishable from zero, in any draw.
 
 Signal quality, walk-forward, per signal date: precision@15 ≈ 0.47, rank IC
 ≈ +0.05, top-15 excess ≈ +3.1% per 63-session horizon. The ranking carries some
@@ -384,6 +417,12 @@ replay to compare code changes; use fresh rebuilds only to refresh the data.
 
 ## The historical spread (fresh rebuilds)
 
+> Superseded by [*The spread, measured*](#the-spread-measured), which repeats
+> this exercise on the current code and reports per-engine bands. The passage
+> below is the first time the problem was quantified and is kept for the
+> record; its ±2.5-point figure was measured on the cohort engine alone and
+> understates two of the three engines.
+
 The four runs above used **one commit, one pinned data window, one seed**. Their
 execution panels agree to `2e-6` relative — float noise in the vendor's
 adjustment arithmetic, not revised data, with identical coverage. They produced
@@ -395,8 +434,9 @@ names get held. **All four passed every gate.**
 Three consequences, and they are not small:
 
 1. **Two-decimal precision is fiction.** Any figure from this pipeline carries
-   roughly ±2.5 points of CAGR at one sigma. Every number this project has ever
-   quoted implied a precision that does not exist.
+   roughly ±2.5 points of CAGR at one sigma on the cohort engine — and, as the
+   current measurement shows, ±5.35 points on rank-hold. Every number this
+   project has ever quoted implied a precision that does not exist.
 2. **Most historical comparisons were noise.** Configuration A beating
    configuration B by two or three points of CAGR says nothing. The search
    described under *"multiplicity"* in the README compared options whose true
