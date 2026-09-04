@@ -55,11 +55,11 @@ def test_config_rejects_nonsense() -> None:
 
 def test_book_is_dollar_neutral_and_gross_matches_weights() -> None:
     """Equal notional per side, and gross exposure equal to the configured sum."""
-    from stock_predictor.long_short import _target_book
+    from stock_predictor.long_short import target_book
 
     day = pd.DataFrame({"ticker": [f"T{i:02d}" for i in range(60)],
                         "prob": np.linspace(1, 0, 60)})
-    book = _target_book(day, LongShortConfig(), capital=100_000.0)
+    book = target_book(day, LongShortConfig(), capital=100_000.0)
     longs = sum(v for v in book.values() if v > 0)
     shorts = -sum(v for v in book.values() if v < 0)
     assert longs == pytest.approx(50_000.0)
@@ -69,10 +69,10 @@ def test_book_is_dollar_neutral_and_gross_matches_weights() -> None:
 
 
 def test_thin_universe_produces_no_book() -> None:
-    from stock_predictor.long_short import _target_book
+    from stock_predictor.long_short import target_book
 
     day = pd.DataFrame({"ticker": ["A", "B"], "prob": [1.0, 0.0]})
-    assert _target_book(day, LongShortConfig(), 100_000.0) == {}
+    assert target_book(day, LongShortConfig(), 100_000.0) == {}
 
 
 # ---------------------------------------------------------------------------

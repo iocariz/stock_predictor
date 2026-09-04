@@ -29,6 +29,7 @@ from stock_predictor.portfolio import (
     PortfolioState,
     check_kill_switch,
     generate_orders,
+    generate_orders_long_short,
     generate_orders_rank_hold,
     init_state,
     load_state,
@@ -414,12 +415,41 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--hold-mode",
         default="fixed",
-        choices=["fixed", "rank"],
+        choices=["fixed", "rank", "long-short"],
         dest="hold_mode",
         help="fixed: sell after --holding-days sessions (cohort parity); "
         "rank: sell only when a holding's rank decays beyond --exit-rank "
-        "(parity with backtest-sp500 --mode rank-hold). Do not switch modes "
+        "(parity with backtest-sp500 --mode rank-hold); long-short: hold a "
+        "decile-vs-decile book rebalanced every --rebalance-every sessions, "
+        "with short positions carried as negative shares (parity with "
+        "backtest-sp500 --mode long-short). Do not switch modes "
         "on an existing state file.",
+    )
+    p.add_argument(
+        "--decile", type=float, default=0.10, dest="decile",
+        help="long-short only: fraction of the cross-section taken on each "
+             "side.",
+    )
+    p.add_argument(
+        "--long-weight", type=float, default=0.5, dest="long_weight",
+        help="long-short only: gross long exposure as a fraction of NAV.",
+    )
+    p.add_argument(
+        "--short-weight", type=float, default=0.5, dest="short_weight",
+        help="long-short only: gross short exposure as a fraction of NAV.",
+    )
+    p.add_argument(
+        "--rebalance-every", type=int, default=63, dest="rebalance_every",
+        help="long-short only: sessions between rebalances.",
+    )
+    p.add_argument(
+        "--min-names-per-side", type=int, default=3, dest="min_names_per_side",
+        help="long-short only: refuse to build a book thinner than this.",
+    )
+    p.add_argument(
+        "--short-borrow-annual", type=float, default=0.0,
+        dest="short_borrow_annual",
+        help="long-short only: annual borrow rate charged on short notional.",
     )
     p.add_argument(
         "--exit-rank",
@@ -758,7 +788,26 @@ def main() -> None:
 
     # Generate orders (calendar = session dates in downloaded OHLC index)
     trading_dates = trading_dates_from_index(adj_close.index)
-    if args.hold_mode == "rank":
+    if args.hold_mode == "long-short":
+        # Both ends of the ranking, so the full cross-section is required.
+        orders, new_state = generate_orders_long_short(
+            state, scored.to_dict("records"), latest_prices,
+            decile=args.decile,
+            long_weight=args.long_weight,
+            short_weight=args.short_weight,
+            rebalance_every=args.rebalance_every,
+            slippage_bps=args.slippage_bps,
+            as_of=date.today().isoformat(),
+            trading_dates=trading_dates,
+            min_names_per_side=args.min_names_per_side,
+            short_borrow_annual=args.short_borrow_annual,
+            commission_per_share=args.commission_per_share,
+            commission_per_order=args.commission_per_order,
+            # A tripped kill switch unwinds the book instead of re-entering it.
+            allow_new=not halted,
+            force=args.force_rebalance,
+        )
+    elif args.hold_mode == "rank":
         # Rank exits need the FULL ranking, not just the top of the list.
         orders, new_state = generate_orders_rank_hold(
             state, scored.to_dict("records"), latest_prices,
