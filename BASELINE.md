@@ -14,8 +14,9 @@ pinned window:
   neither is stable enough to quote from a single run. Cohort alpha changes
   sign between draws; rank-hold's CAGR carries a ±10.7-point band.
 * **The long-short book is the one result that survives its own noise** — all
-  four draws clear |t| = 2 — but it still fails the locked holdout, so it is a
-  measured tilt rather than an established edge.
+  four draws clear |t| = 2 — but it still fails the locked holdout on two
+  independent artifacts (+1.66, +1.87, +1.95, +2.12), so it is a measured tilt
+  rather than an established edge.
 * **Any comparison must clear the spread to mean anything**: ±3.3 points of
   CAGR on long-short, ±7.5 on cohort, ±10.7 on rank-hold. Use
   `--replay-snapshot` for code comparisons; a fresh rebuild has a price.
@@ -262,13 +263,6 @@ the grid on an early window only, commit to the single winner, evaluate it
 **once** on the later window. Selection by Sharpe, deliberately not by the alpha
 t-statistic that gets reported.
 
-**These figures were measured on the previous artifact** (`20260831T085207Z`,
-now `artifacts/baseline_v1`) and have not been re-run on this one. They are
-kept because what they establish is about the *procedure* — whether selecting
-on one window generalises to the next — which the spread does not overturn. But
-they are a single draw like everything else, and the long-short CAGR band of
-±1.66% applies to them too.
-
 The holdout is measured as a **continuation**: the engine runs once over the
 whole panel and the holdout window is read out of the running NAV, so the book
 arrives at the split holding what it held, on the calendar it was already on.
@@ -276,72 +270,79 @@ Re-running the engine over a truncated panel — which is what this did at first
 restarts the rebalance schedule and begins flat, which measures a fresh
 strategy launched on the holdout's first session rather than the one under test.
 
-| split | committed configuration | holdout alpha | HAC t | rank on holdout |
-|---|---|---|---|---|
-| 2023-01-01 | decile 0.20, 1.0x, 63d | +6.04% | **+1.95** | 9 / 18 |
-| 2022-01-01 | decile 0.20, 1.0x, 63d | +5.20% | **+1.87** | 5 / 18 |
+Run on **two independent artifacts**, because the spread showed that a single
+draw cannot carry a conclusion:
 
-**The full-period t = +2.60 does not survive.** A pre-committed configuration
-reaches +1.95 and +1.87 — neither split clears |t| = 2, and both fall well
-short of the figure the full-period search produced.
+| artifact | split | committed configuration | holdout alpha | HAC t | rank |
+|---|---|---|---|---|---|
+| current | 2023-01-01 | decile 0.05, 1.0x, **21d** | +10.14% | **+1.66** | 13 / 18 |
+| current | 2022-01-01 | decile 0.10, 1.0x, 63d | +6.86% | **+2.12** | 7 / 18 |
+| `baseline_v1` | 2023-01-01 | decile 0.20, 1.0x, 63d | +6.04% | +1.95 | 9 / 18 |
+| `baseline_v1` | 2022-01-01 | decile 0.20, 1.0x, 63d | +5.20% | +1.87 | 5 / 18 |
 
-*Correction.* An earlier version of this table reported **+1.78 / +2.26**, from
-a holdout that restarted the strategy instead of continuing it. The 2022 split
-was the one that moved: a book relaunched flat on 2022-01-04 skipped the
-drawdown a continuing book carried across the boundary, which is what lifted it
-above +2. The corrected pair is more consistent than the pair it replaces, and
-the conclusion is the same one, stated more firmly — it no longer depends on
-which split you pick.
+**The full-period t does not survive, on either artifact.** Four
+pre-committed evaluations give +1.66, +1.87, +1.95 and +2.12 — straddling
+|t| = 2 with no draw or split clearing it decisively, against a full-period
+figure of +2.56 on this artifact and +2.60 on the last.
 
-**The search carried no information.** The committed configuration lands
-mid-pack on the holdout both times — 9th and 5th of 18. Choosing on the first
-window told you nothing about which configuration would do well on the second,
-which is what fitting noise looks like from the outside. Note also that the
-honest procedure picks decile **0.20**, not the 0.10 this project has always
-quoted; the historically quoted configuration reaches t = +2.53 on the
-2023 holdout, but we only know that because we went and looked.
+**The search carries no information.** The committed configuration lands
+mid-pack every time — 13th, 7th, 9th and 5th of 18. Choosing on the first
+window tells you nothing about which configuration does well on the second.
+Worse, **the winner is not even stable**: the two artifacts commit to three
+different configurations across four runs (0.05/21d, 0.10/63d, 0.20/63d twice).
+The selection procedure is picking noise, and that is now demonstrated rather
+than suspected.
 
-**Two things do survive**, and they are worth more than the headline was:
+**What replicates across both artifacts and both splits (4 of 4):**
 
-* The grid is **structured, not random**, and this is the finding that holds up
-  best. Sorted by holdout alpha t it separates almost perfectly by rebalance
-  frequency, and the same way under both splits:
+* **Rebalance frequency orders the grid monotonically**, always the same way.
 
-  | rebalance | t at the 2023 split | t at the 2022 split |
-  |---|---|---|
-  | 21d | +0.31 … +0.96 | −0.15 … +0.55 |
-  | 63d | +1.89 … +2.74 | +1.81 … +2.15 |
-  | 126d | +1.59 … +2.94 | +0.90 … +1.05 |
+  | rebalance | current, 2023 | current, 2022 | v1, 2023 | v1, 2022 |
+  |---|---|---|---|---|
+  | 21d | +0.21 … +1.66 | +0.42 … +2.09 | +0.31 … +0.96 | −0.15 … +0.55 |
+  | 63d | +1.92 … +2.30 | +1.93 … +2.43 | +1.89 … +2.74 | +1.81 … +2.15 |
+  | 126d | +2.50 … +3.53 | +1.45 … +2.43 | +1.59 … +2.94 | +0.90 … +1.05 |
 
-  **21-day rebalancing destroys the effect under both splits; 63-day carries it
-  under both.** 126-day is strong at one split and weak at the other, so only
-  63-day is consistent. Tighter deciles (0.05, 0.10) beat 0.20 in both, though
-  the margin at the 2022 split is small. A pattern that repeats across an
-  independent cut is harder to explain as noise than any single maximum.
-* The tilt is **mostly positive but not uniformly so**. All 18 configurations
-  have positive holdout alpha at the 2023 split (median t +1.92, 8 of 18 above
-  +2); at the 2022 split only 14 of 18 are positive and the median is +1.02.
+  21-day is weakest in all four; longer holds are stronger. This is the most
+  durable thing in the whole document — the only claim here that has survived
+  an independent redraw.
+* **Decile 0.20 is the worst of the three** in all four, so the effect lives in
+  tighter selections.
 
-  *Correction.* The earlier version of this section claimed all 18 were positive
-  under **both** splits. That was true only of the restarted holdout; measured
-  as a continuation, four configurations — all of them 21-day — go negative at
-  the 2022 split.
+*Corrections, from re-running on the new artifact.* Two claims the previous
+revision made do **not** replicate, and both were stated too strongly from one
+draw:
 
-So the defensible claim is a **positive but statistically unestablished tilt
-that lives at longer holding periods and tighter deciles** — not an edge of
-+7.98% at t = +2.60.
+* *"21-day rebalancing destroys the effect."* It does not. It is consistently
+  the weakest bucket, but on the current artifact it reaches +1.66 and +2.09.
+  The ordering replicates; the word "destroys" was a description of one draw.
+* *"Four configurations — all 21-day — go negative at the 2022 split."* On the
+  current artifact **all 18 are positive at both splits** (grid median t +2.17
+  and +2.06, with 10 of 18 above +2 each time). The 14-of-18 I reported was
+  itself a draw, and so was the correction I built on it.
 
-**This does not make it a strategy.** Three things stand against reading
-t = +2.60 as settled, and the holdout above confirms the first of them:
+The grid also looks *better* on this artifact than the last — median holdout t
+above +2 at both splits, against +1.92 and +1.02 before. That is the same
+draw-to-draw variation seen everywhere else in this document, and it cuts both
+ways: it is not evidence the book improved.
 
-1. **Multiplicity — demonstrated, not merely suspected.** The locked holdout
-   above shows a pre-committed configuration reaching only +1.95/+1.87, and
-   the selection ranking mid-pack. The +2.60 is the best of a correlated
-   search, quoted as though it were a test.
-2. **31 rebalances.** Seven and a half years at a 63-day horizon is a small
-   number of independent decisions.
-3. **It is not wired to anything live.** The live path trades the cohort
-   engine, which is the one with no measurable alpha.
+So the defensible claim is a **positive tilt that lives at longer holding
+periods and tighter deciles, and that does not clear pre-registration** — not
+an edge of +9.53% at t = +2.56.
+
+**This does not make it a strategy.** Three things stand against reading the
+full-period figure as settled, and the holdout above confirms the first two:
+
+1. **Multiplicity — demonstrated, not suspected.** Four pre-committed
+   evaluations reach +1.66 to +2.12, and the selection procedure commits to
+   three different configurations across them. The full-period figure is the
+   best of a correlated search, quoted as though it were a test.
+2. **Draw dependence — also demonstrated.** Every number here moves when the
+   data is re-downloaded from the same window; see [the spread](#the-spread-measured).
+3. **31 rebalances, and it is not wired to anything live.** Seven and a half
+   years at a 63-day horizon is a small number of independent decisions, and
+   the live path trades the cohort engine — the one whose alpha changes sign
+   between draws.
 
 Against SPY, with CAPM on excess returns and Newey–West standard errors. These
 are the pinned figures from [the results table](#results), measured on the
