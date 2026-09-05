@@ -83,7 +83,21 @@ cd "$ROOT"
 : "${SHORT_WEIGHT:=0.5}"
 : "${REBALANCE_EVERY:=63}"
 : "${MIN_NAMES_PER_SIDE:=3}"
-: "${SHORT_BORROW_ANNUAL:=0}"
+# Flat annualized borrow on the short leg. 1% is above the 0.90% this book's
+# short side measures under the stylised per-name proxy (borrow.py), which is
+# a shape, not a price -- so the rate is rounded up rather than quoted to the
+# proxy's precision. Erring high is the safe direction for the least knowable
+# input in the engine.
+#
+# The short book is *cheaper* than the universe (0.90% against 1.22%, 0.74x),
+# because the model ranks volatility positively and parks the expensive,
+# hard-to-borrow names in the LONG book where no borrow is paid. The opposite
+# was assumed for a long time and was wrong.
+#
+# Sensitivity on the pinned baseline: alpha holds t +2.63 at 0%, +2.49 at 1%,
+# +2.36 at 2%, and only falls below 2 near 5%. Borrow is not what decides this
+# strategy.
+: "${SHORT_BORROW_ANNUAL:=0.01}"
 # Coherent with the traded engine for the first time: long-short's measured
 # max drawdown is -13.03%, inside this switch. Under HOLD_MODE=fixed or rank it
 # is not -- those engines draw down -45.94% and -51.90% -- so switching back
@@ -118,7 +132,7 @@ strategy_flags() {
         --short-weight "$SHORT_WEIGHT"
         --rebalance-every "$REBALANCE_EVERY"
         --min-names-per-side "$MIN_NAMES_PER_SIDE"
-        --short-borrow-annual "$SHORT_BORROW_ANNUAL")
+        --short-borrow "$SHORT_BORROW_ANNUAL")
   fi
   [[ -n "$MIN_PROB" ]] && f+=(--min-prob "$MIN_PROB")
   [[ -n "$MIN_CROSS_SECTION" ]] && f+=(--min-cross-section "$MIN_CROSS_SECTION")
@@ -235,7 +249,7 @@ Strategy (one definition, applied to BOTH the backtest and the live path):
   REBALANCE_DAY=Friday  (use "any" to trade every session)
   HOLD_MODE=fixed|rank|long-short   COMMISSION_PER_SHARE=0 COMMISSION_PER_ORDER=0
   DECILE=0.10 LONG_WEIGHT=0.5 SHORT_WEIGHT=0.5 REBALANCE_EVERY=63
-    (long-short only; MIN_NAMES_PER_SIDE=3 SHORT_BORROW_ANNUAL=0)
+    (long-short only; MIN_NAMES_PER_SIDE=3 SHORT_BORROW_ANNUAL=0.01)
 
   DRY_RUN=1 prints the command instead of running it:
     DRY_RUN=1 TOP_N=25 ./scripts/run_pipeline.sh predict

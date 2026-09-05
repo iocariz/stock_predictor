@@ -140,3 +140,56 @@ def test_predict_checks_before_it_trades() -> None:
     guard = src.index("assert_mode_matches_state")
     for generator in ("generate_orders_long_short(", "generate_orders_rank_hold("):
         assert src.index(generator) > guard, f"{generator} runs before the guard"
+
+
+# ---------------------------------------------------------------------------
+# One flag set, two CLIs
+# ---------------------------------------------------------------------------
+
+
+def _pipeline_flags(hold_mode: str) -> list[str]:
+    """The long option names run_pipeline.sh emits for a given HOLD_MODE."""
+    import re
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    out = subprocess.run(
+        ["bash", "-c",
+         f'set -a; HOLD_MODE={hold_mode} DRY_RUN=1; '
+         f'cd "{root}" && ./scripts/run_pipeline.sh predict'],
+        capture_output=True, text=True, timeout=120,
+    ).stdout
+    return sorted(set(re.findall(r"--[a-z][a-z0-9-]+", out)))
+
+
+def _accepted(cli: str) -> set[str]:
+    import re
+    import subprocess
+
+    out = subprocess.run(["uv", "run", cli, "--help"],
+                         capture_output=True, text=True, timeout=180).stdout
+    return set(re.findall(r"--[a-z][a-z0-9-]+", out))
+
+
+@pytest.mark.parametrize("mode", ["fixed", "rank", "long-short"])
+def test_every_pipeline_flag_is_accepted_by_predict(mode: str) -> None:
+    emitted = _pipeline_flags(mode)
+    assert emitted, "the pipeline emitted no flags"
+    unknown = [f for f in emitted if f not in _accepted("predict-sp500")]
+    assert not unknown, f"predict-sp500 rejects {unknown}"
+
+
+def test_the_long_short_flags_have_one_name_across_both_clis() -> None:
+    """The bug this catches: ``--short-borrow-annual`` existed on
+    predict-sp500 and ``--short-borrow`` on backtest-sp500, and
+    ``strategy_flags`` feeds one list to both. ``run_pipeline.sh backtest``
+    with HOLD_MODE=long-short exited on 'unrecognized arguments' -- the mode
+    was unrunnable through the pipeline it had just been wired into.
+    """
+    shared = ("--decile", "--long-weight", "--short-weight",
+              "--rebalance-every", "--min-names-per-side", "--short-borrow")
+    predict, backtest = _accepted("predict-sp500"), _accepted("backtest-sp500")
+    missing = [f for f in shared
+               if f not in predict or f not in backtest]
+    assert not missing, f"not on both CLIs: {missing}"

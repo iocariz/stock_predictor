@@ -455,9 +455,15 @@ def parse_args() -> argparse.Namespace:
         help="long-short only: refuse to build a book thinner than this.",
     )
     p.add_argument(
-        "--short-borrow-annual", type=float, default=0.0,
+        # Named to match backtest-sp500. The two CLIs share one flag set via
+        # run_pipeline.sh's strategy_flags, and a name that exists on only one
+        # of them makes the other exit on "unrecognized arguments".
+        "--short-borrow", type=float, default=0.005,
         dest="short_borrow_annual",
-        help="long-short only: annual borrow rate charged on short notional.",
+        help="long-short only: flat annualized borrow charged on short "
+             "notional. Defaults to general collateral, matching "
+             "backtest-sp500 and LongShortConfig, so the live book never "
+             "charges less than the simulation it was validated against.",
     )
     p.add_argument(
         "--exit-rank",
