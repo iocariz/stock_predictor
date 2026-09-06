@@ -189,8 +189,15 @@ def run_long_short_backtest(
     proceeds_evidence = load_proceeds(delisting_proceeds)
     # Sessions since each name last printed, so the grace period is counted in
     # sessions rather than in rebalances -- which are 63 apart here.
+    #
+    # ffill, not cummax alone: cummax skips NaN but does not fill it, so the
+    # frame was NaN on exactly the rows where a quote is missing -- the only
+    # rows the disposal branch ever reads. The NaN test below always fired and
+    # the gap always came out as "sessions since the start of the backtest",
+    # so a name that printed for a year and missed one session had any grace
+    # period already exhausted and was written off to zero on the spot.
     _pos = np.arange(len(actual), dtype=float)
-    _last_priced = actual.mul(_pos, axis=0).where(actual).cummax()
+    _last_priced = actual.mul(_pos, axis=0).where(actual).cummax().ffill()
 
     # The hedge is a synthetic short in the benchmark, priced alongside the
     # stocks so it pays the same slippage, borrow and financing as any other
@@ -336,6 +343,8 @@ def run_long_short_backtest(
                                 t, day, evidence=proceeds_evidence,
                                 sessions_unpriced=gap,
                                 policy=config.delisting_policy,
+                                direction=1 if held > 0 else -1,
+                                mark=float(prices.get(t, 0.0) or 0.0),
                             )
                             if disposal is None:
                                 deferred_exits += 1
@@ -389,6 +398,12 @@ def run_long_short_backtest(
     metrics["exits_deferred"] = float(deferred_exits)
     metrics["disposals_by_evidence"] = float(disposals.get("evidence", 0))
     metrics["disposals_written_off"] = float(disposals.get("write_off", 0))
+    # A short with no settlement evidence covers at its last observed mark
+    # rather than at zero, so it is reported under its own source: writing a
+    # liability off at zero would be a profit, not a conservative estimate.
+    metrics["disposals_covered_at_mark"] = float(
+        disposals.get("cover_at_mark", 0))
+    metrics["disposals_total"] = float(sum(disposals.values()))
     metrics["disposal_proceeds"] = float(proceeds_cash)
     metrics["effective_borrow_rate"] = (
         borrowed_rate_sum / borrowed_notional if borrowed_notional > 0

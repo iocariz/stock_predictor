@@ -148,7 +148,10 @@ train_full() {
     # run is not a measurement. Use `evaluate` for that.
     opts+=(--train-through-latest)
   fi
-  [[ "$OBJECTIVE" == "rank" ]] && opts+=(--rank-objective)
+  # Explicit, not inferred from absence. train-sp500 defaults to
+  # --objective rank, so omitting a flag for OBJECTIVE=binary trained a ranker
+  # and reported it as a classifier comparison.
+  opts+=(--objective "$OBJECTIVE")
   [[ "$USE_OPTUNA" == "0" ]] && opts+=(--no-optuna)
   [[ "$SKIP_EARNINGS" == "1" ]] && opts+=(--skip-earnings)
   ${DRY_RUN:+echo} uv run train-sp500 \

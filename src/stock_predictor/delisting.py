@@ -99,12 +99,23 @@ def disposal_value(
     evidence: dict[str, tuple[pd.Timestamp, float]],
     sessions_unpriced: int,
     policy: DelistingPolicy,
+    direction: int = 1,
+    mark: float = 0.0,
 ) -> tuple[float, str] | None:
-    """Per-share proceeds and their source, or ``None`` to keep holding.
+    """Per-share settlement price and its source, or ``None`` to keep holding.
 
     *sessions_unpriced* is how long the holding has had no usable quote. It is
     a duration, not a verdict: a gap alone never proves a delisting, which is
     why the grace period exists.
+
+    *direction* is ``+1`` for a long and ``-1`` for a short, and it decides
+    what "conservative" means. Settling at zero writes a long's claim off in
+    full, which is the conservative reading of an unexplained silence. Applied
+    to a **short** the same number erases a liability for nothing, which is the
+    maximum possible profit -- a dark short book manufactured $50,000 on
+    $100,000 of capital. A short with no evidence therefore settles at *mark*,
+    the last price actually observed: you still owe what it was last worth.
+    Zero settlement for a short requires evidence.
     """
     known = evidence.get(str(ticker))
     if known is not None:
@@ -116,5 +127,7 @@ def disposal_value(
     if policy.fallback == "hold":
         return None
     if sessions_unpriced > policy.grace_sessions:
+        if direction < 0:
+            return (float(mark), "cover_at_mark")
         return (0.0, "write_off")
     return None

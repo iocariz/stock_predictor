@@ -159,7 +159,11 @@ def test_training_defaults_match_the_deployed_configuration() -> None:
     """A monthly retrain must reproduce the model that is deployed, not
     silently revert to an older configuration."""
     cmd = _cmd("train-full")
-    assert "--rank-objective" in cmd
+    # Stated as --objective rank rather than the legacy --rank-objective flag:
+    # train-sp500 now defaults to rank, so inferring the objective from a
+    # missing flag meant OBJECTIVE=binary silently trained a ranker.
+    assert "--objective" in cmd
+    assert cmd[cmd.index("--objective") + 1] == "rank"
     assert "--skip-earnings" in cmd
     assert "--no-optuna" in cmd, "tuning never helped and costs hours"
     assert _flag(cmd, "--horizon") == "63"

@@ -117,6 +117,10 @@ def load_state(path: Path) -> PortfolioState:
         updated_at=raw.get("updated_at", ""),
         history=history,
         last_signal_date=raw.get("last_signal_date", ""),
+        # Absent in files written before carry was tracked; "" means "never
+        # accrued", which the caller reads as nothing owed yet rather than as
+        # a charge to skip.
+        last_accrual_date=raw.get("last_accrual_date", ""),
     )
 
 
@@ -131,6 +135,9 @@ def save_state(state: PortfolioState, path: Path) -> None:
         "updated_at": now,
         "history": list(state.history),
         "last_signal_date": state.last_signal_date,
+        # Without this every reload reset the accrual clock and the guard below
+        # skipped the charge, so a live book never paid borrow across runs.
+        "last_accrual_date": state.last_accrual_date,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
@@ -682,6 +689,7 @@ def generate_orders_long_short(
     trading_dates,
     min_names_per_side: int = 3,
     short_borrow_annual: float = 0.0,
+    risk_free_rate: float = 0.0,
     commission_per_share: float = 0.0,
     commission_per_order: float = 0.0,
     allow_new: bool = True,
@@ -733,13 +741,19 @@ def generate_orders_long_short(
     # n-session hold: a 63-session cycle paid 2,016 session-days of borrow
     # instead of 63, which cost ~20 points of NAV against the backtest.
     since_accrual = _sessions_between(trading_dates, state.last_accrual_date, as_of)
-    if short_borrow_annual > 0 and 0 < since_accrual < 10**9:
-        short_notional = sum(
-            abs(p.shares) * mark_price(p, prices)
-            for p in state.positions if p.shares < 0
-        )
-        cash -= (short_notional * short_borrow_annual
-                 / TRADING_DAYS * since_accrual)
+    if 0 < since_accrual < 10**9:
+        if short_borrow_annual > 0:
+            short_notional = sum(
+                abs(p.shares) * mark_price(p, prices)
+                for p in state.positions if p.shares < 0
+            )
+            cash -= (short_notional * short_borrow_annual
+                     / TRADING_DAYS * since_accrual)
+        # Cash earns the same rate the backtest credits it. Charging borrow
+        # without crediting interest made the live book poorer than its own
+        # simulation by the financing leg alone.
+        if risk_free_rate > 0:
+            cash += cash * risk_free_rate / TRADING_DAYS * since_accrual
 
     # Refresh marks even on a quiet session, so a name that stops printing is
     # still valued from its last real quote rather than its entry price.
@@ -752,8 +766,17 @@ def generate_orders_long_short(
     quiet = replace(state, cash=cash, positions=marked,
                     last_accrual_date=as_of,
                     updated_at=datetime.now(timezone.utc).isoformat())
+    # The peak has to move with NAV or the kill switch measures drawdown from
+    # the opening balance forever: a book that ran to 130,000 and back to
+    # 100,000 reported 0% instead of -23.1% and never halted.
+    quiet = replace(quiet, high_watermark=max(
+        float(state.high_watermark), portfolio_value(quiet, prices)))
 
-    due = force or elapsed >= rebalance_every
+    # A tripped kill switch is a risk event, not a scheduling one. Returning
+    # here first meant a halted book kept its exposure until the next
+    # rebalance -- up to 63 sessions of exactly what the switch exists to end.
+    unwinding = not allow_new and any(p.shares for p in marked)
+    due = force or unwinding or elapsed >= rebalance_every
     if not due:
         return (), quiet
 
@@ -793,13 +816,20 @@ def generate_orders_long_short(
             # exposure. Defer, then dispose under the stated policy.
             if held is None:
                 continue
-            unpriced = held.sessions_unpriced + 1
+            # Already incremented when marks were refreshed above; adding one
+            # again here would end the grace period a session early.
+            unpriced = held.sessions_unpriced
             settled = disposal_value(
                 ticker, as_of, evidence=proceeds_by_ticker,
                 sessions_unpriced=unpriced, policy=policy,
+                # A short settles at its last observed mark, not at zero:
+                # erasing a liability for nothing is the maximum profit, not a
+                # conservative estimate. specs.md:181.
+                direction=1 if held.shares > 0 else -1,
+                mark=mark_price(held, prices),
             )
             if settled is None:
-                positions[ticker] = replace(held, sessions_unpriced=unpriced)
+                positions[ticker] = held
                 deferred.append(ticker)
                 continue
             per_share, source = settled
