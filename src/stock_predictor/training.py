@@ -1071,7 +1071,13 @@ def build_labeled_panel(
     long["target_5pct"] = np.where(
         long["has_label"], (long["fwd_ret"] >= threshold).astype(float), np.nan,
     )
-    labeled = long[long["is_tradable"]]
+    # Unpriced rows stay on the frame. Dropping them here compacted the
+    # session grid before the rolling features were computed, so every window
+    # silently spanned more calendar time than its name claimed: across a
+    # one-session gap, `ret_1d` read as a 1-day return while actually covering
+    # two sessions, and `vol_10d` covered eleven. The consumer drops them after
+    # features exist -- see build_feature_panel.
+    labeled = long
     if drop_unlabeled:
         labeled = labeled[labeled["has_label"]]
     if stints is None:
@@ -1249,8 +1255,20 @@ def build_feature_panel(
     if sources is not None:
         sources["sector_map"] = sector_map
 
-    # 1. Time-series features on full contiguous per-ticker history.
+    # 1. Time-series features on full contiguous per-ticker history, computed
+    #    on the complete session grid so a missing quote is a gap rather than a
+    #    join. Unpriced rows are dropped immediately afterwards: they can carry
+    #    no features worth having, but their *absence* has to be visible to the
+    #    windows that span them.
     features = add_timeseries_features(labeled, volume)
+    if "is_tradable" in features.columns:
+        before_untradable = len(features)
+        features = features[features["is_tradable"]]
+        dropped = before_untradable - len(features)
+        if dropped:
+            print(f"  Dropped {dropped:,} unpriced row(s) after feature "
+                  f"computation (kept through it so windows span the real "
+                  f"calendar)")
 
     # 2. Point-in-time membership filter.
     if stints is not None:

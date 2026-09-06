@@ -455,6 +455,14 @@ def parse_args() -> argparse.Namespace:
         help="long-short only: refuse to build a book thinner than this.",
     )
     p.add_argument(
+        "--signal-lag", type=int, default=1, dest="signal_lag",
+        help="Sessions between the signal and the fill. 1 (default) matches "
+             "the backtest, which ranks on one session and fills at the next: "
+             "scoring and filling on the same bar uses the very data the score "
+             "was computed from. Set 0 only if you are executing intraday "
+             "against quotes the score did not see.",
+    )
+    p.add_argument(
         "--rf-rate", type=float, default=None, dest="rf_rate",
         help="long-short only: annual rate credited on cash, matching "
              "backtest-sp500. Defaults to the same 4.5%% the simulation uses, "
@@ -737,9 +745,26 @@ def main() -> None:
             )
             panel = panel[~panel["ticker"].isin(unrankable)]
 
-    # Score
+    # Score.
+    #
+    # The signal session is deliberately not the fill session. The backtest
+    # ranks on date[i] and fills at date[i+1]'s price, because trading on the
+    # signal-day close would use the very bar the score was computed from.
+    # Live was scoring and filling on the same bar, which is that look-ahead
+    # rather than a licence the live path has and the simulation does not.
+    sessions = pd.DatetimeIndex(sorted(panel["date"].unique()))
+    lag = max(0, int(args.signal_lag))
+    if lag >= len(sessions):
+        sys.exit(f"--signal-lag {lag} needs at least {lag + 1} scored "
+                 f"sessions; the panel has {len(sessions)}.")
+    signal_date = sessions[-1 - lag]
+    fill_session = pd.DatetimeIndex(adj_close.index).max() if len(adj_close) else None
     print("Scoring universe...")
-    scored = score_universe(model, panel, feature_cols)
+    if lag:
+        print(f"  Signal session {signal_date.date()}, filling at "
+              f"{fill_session.date() if fill_session is not None else 'latest'} "
+              f"prices ({lag} session lag, matching the backtest)")
+    scored = score_universe(model, panel, feature_cols, score_date=signal_date)
     label = score_label(model)
     print(f"  Scored {len(scored)} tickers. Top-5:")
     for _, row in scored.head(5).iterrows():
@@ -776,13 +801,18 @@ def main() -> None:
     # dict for both is what let a holding sell at a price that did not exist:
     # valid_quote() never saw the missing quote, because ffill had already
     # replaced it upstream.
-    latest_prices = dict(zip(scored["ticker"], scored["adj_close"]))
-    marks = dict(latest_prices)
+    # Both dictionaries come from the fill session's download, not from the
+    # scored panel: the scores are a session older by design, so their
+    # adj_close is not the price anything executes at.
+    latest_prices: dict[str, float] = {}
+    marks: dict[str, float] = {}
     ages: dict[str, int] = {}
     quote_dates: dict[str, pd.Timestamp] = {}
     if len(adj_close):
         session_px = execution_quotes(adj_close)
         marked_px = valuation_marks(adj_close)
+        latest_prices.update(session_px)
+        marks.update(marked_px)
         ages = quote_ages(adj_close)
         quote_dates = last_quote_dates(adj_close)
         for t in held:
