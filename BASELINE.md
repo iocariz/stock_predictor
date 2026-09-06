@@ -502,6 +502,11 @@ depend on which artifact it was shown on. They are *not* this baseline's
 performance; those are [in the results table](#results), which is pinned and
 verified. Replay has not been re-run against the current artifact.
 
+That artifact is **no longer retained**, so these three rows cannot be
+re-derived locally. The mechanism they demonstrate is covered by
+`tests/test_replay.py` and by the snapshot-integrity gate, which is what makes
+the figures safe to keep as a record rather than as a checkable claim.
+
 Replay reproduces the *run*, not merely itself. A comparison between two
 measurements from one snapshot is now a comparison of the change, not of two
 draws — which is what makes any of the numbers below worth arguing about.
