@@ -455,6 +455,13 @@ def parse_args() -> argparse.Namespace:
         help="long-short only: refuse to build a book thinner than this.",
     )
     p.add_argument(
+        "--rf-rate", type=float, default=None, dest="rf_rate",
+        help="long-short only: annual rate credited on cash, matching "
+             "backtest-sp500. Defaults to the same 4.5%% the simulation uses, "
+             "so the live book is not poorer than its own backtest by the "
+             "financing leg alone.",
+    )
+    p.add_argument(
         # Named to match backtest-sp500. The two CLIs share one flag set via
         # run_pipeline.sh's strategy_flags, and a name that exists on only one
         # of them makes the other exit on "unrecognized arguments".
@@ -823,6 +830,9 @@ def main() -> None:
             trading_dates=trading_dates,
             min_names_per_side=args.min_names_per_side,
             short_borrow_annual=args.short_borrow_annual,
+            # Cash earns what the simulation credits it; charging borrow
+            # without crediting interest makes live poorer than its backtest.
+            risk_free_rate=(args.rf_rate if args.rf_rate is not None else 0.045),
             commission_per_share=args.commission_per_share,
             commission_per_order=args.commission_per_order,
             # A tripped kill switch unwinds the book instead of re-entering it.

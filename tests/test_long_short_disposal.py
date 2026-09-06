@@ -146,6 +146,10 @@ def test_a_short_position_can_also_be_disposed_of() -> None:
         panel, _cfg(delisting_policy=DelistingPolicy(fallback="write_off",
                                                      grace_sessions=5)),
         execution_prices=_exec(panel))
+    # A short settles under "cover_at_mark", not "write_off": erasing the
+    # liability at zero would be the maximum profit, not a conservative
+    # estimate. Counted here through the total so the intent survives the
+    # source name.
     assert res.metrics["exits_deferred"] + res.metrics.get(
-        "disposals_written_off", 0) > 0
+        "disposals_total", 0) > 0
     assert pytest.approx(res.daily_nav.iloc[-1], rel=1) == res.daily_nav.iloc[-1]

@@ -1325,6 +1325,12 @@ def run_rank_hold_backtest(
     # specs.md:249 -- delistings appear in the diagnostics, by source.
     metrics["disposals_by_evidence"] = float(disposals.get("evidence", 0))
     metrics["disposals_written_off"] = float(disposals.get("write_off", 0))
+    # A short with no settlement evidence covers at its last observed mark
+    # rather than at zero, so it is reported under its own source: writing a
+    # liability off at zero would be a profit, not a conservative estimate.
+    metrics["disposals_covered_at_mark"] = float(
+        disposals.get("cover_at_mark", 0))
+    metrics["disposals_total"] = float(sum(disposals.values()))
     metrics["disposal_proceeds"] = float(proceeds_cash)
     metrics["n_open_positions"] = float(len(open_pos))
     # A NAV nobody can reconcile is a NAV nobody can check. Positions still

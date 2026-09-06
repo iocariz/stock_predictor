@@ -343,6 +343,8 @@ def run_long_short_backtest(
                                 t, day, evidence=proceeds_evidence,
                                 sessions_unpriced=gap,
                                 policy=config.delisting_policy,
+                                direction=1 if held > 0 else -1,
+                                mark=float(prices.get(t, 0.0) or 0.0),
                             )
                             if disposal is None:
                                 deferred_exits += 1
@@ -396,6 +398,12 @@ def run_long_short_backtest(
     metrics["exits_deferred"] = float(deferred_exits)
     metrics["disposals_by_evidence"] = float(disposals.get("evidence", 0))
     metrics["disposals_written_off"] = float(disposals.get("write_off", 0))
+    # A short with no settlement evidence covers at its last observed mark
+    # rather than at zero, so it is reported under its own source: writing a
+    # liability off at zero would be a profit, not a conservative estimate.
+    metrics["disposals_covered_at_mark"] = float(
+        disposals.get("cover_at_mark", 0))
+    metrics["disposals_total"] = float(sum(disposals.values()))
     metrics["disposal_proceeds"] = float(proceeds_cash)
     metrics["effective_borrow_rate"] = (
         borrowed_rate_sum / borrowed_notional if borrowed_notional > 0
