@@ -65,14 +65,25 @@ def test_unlabelled_rows_carry_no_target() -> None:
     assert tail["target_5pct"].isna().all()
 
 
-def test_untradable_rows_are_excluded_entirely() -> None:
+def test_untradable_rows_are_carried_but_flagged() -> None:
+    """An unpriced session stays on the frame, marked, until features exist.
+
+    "No price, no row" still holds for anything that reaches the scored panel —
+    but it is enforced *after* the rolling windows are computed rather than
+    before. Dropping these rows here compacted the session grid, so a window
+    spanning a gap silently covered more calendar than its name claimed: across
+    one missing session `ret_1d` read as a 1-day return while actually covering
+    two. ``build_feature_panel`` drops them once the windows have seen the gap.
+    """
     px = _prices()
     px.loc[DATES[20:], "ALSO"] = np.nan
     panel = build_labeled_panel(px, None, horizon=10, threshold=0.05,
         terminal_fill="assume_delisted")
     also = panel[panel.ticker == "ALSO"]
-    assert also["date"].max() == DATES[19], "no price, no row"
-    assert also["is_tradable"].all()
+    assert also["date"].max() == DATES[-1], "the session grid was compacted"
+    assert also.loc[also["date"] <= DATES[19], "is_tradable"].all()
+    assert not also.loc[also["date"] >= DATES[20], "is_tradable"].any(), (
+        "an unpriced session is not tradable")
 
 
 def test_a_delisted_name_keeps_a_label_through_its_final_quarter() -> None:
