@@ -13,12 +13,13 @@ pinned window:
 * **Neither long-only engine shows alpha distinguishable from zero**, and
   neither is stable enough to quote from a single run. Cohort alpha changes
   sign between draws; rank-hold's CAGR carries a ±10.7-point band.
-* **No engine shows alpha that clears |t| = 2 reliably.** Long-short is the
-  best of the three (+7.09% ± 1.50%, t +2.10) and has by far the smallest
-  drawdown, but only one of four draws clears the line, and pre-committed
-  evaluations reach only +1.04 to +1.95. It is a positive tilt, not an edge.
-* **Any comparison must clear the spread to mean anything**: ±3.3 points of
-  CAGR on long-short, ±7.5 on cohort, ±10.7 on rank-hold. Use
+* **No engine's alpha clears |t| = 2, in any draw.** Long-short reaches
+  +5.90% ± 0.61% at t = +1.54 and is the best-controlled book by a distance —
+  beta 0.222, a drawdown a third of the others' — but it is no longer
+  statistically distinguishable from them. Pre-committed evaluations reach
+  +1.55 and +1.18. Positive tilt, no edge.
+* **Any comparison must clear the spread to mean anything**: ±1.4 points of
+  CAGR on long-short, ±3.7 on cohort, ±6.8 on rank-hold. Use
   `--replay-snapshot` for code comparisons; a fresh rebuild has a price.
 
 ---
@@ -27,8 +28,8 @@ pinned window:
 
 | | |
 |---|---|
-| commit | `b8ab695c173d` (clean tree) |
-| run id | `20260904T051107Z_1a6a5664` |
+| commit | `91635b0b4448` (clean tree) |
+| run id | `20260906T103531Z_1e935e12` |
 | built by | `./scripts/rebuild_baseline.sh` |
 | verified by | `uv run python scripts/verify_baseline.py artifacts/baseline` |
 
@@ -48,24 +49,24 @@ Input snapshot hashes (`artifacts/baseline/snapshot/manifest.json`):
 
 | snapshot | sha256 (16) | rows |
 |---|---|---|
-| `equity_prices_long` | `325b0a4c27b5ec79` | 3,492,792 |
-| `execution_prices` | `325b0a4c27b5ec79` | 3,492,792 |
-| `features_clean` | `66ea526ef5bf3147` | 1,940,969 |
-| `labeled` | `f1e2281fd9dcbb13` | 2,770,323 |
-| `macro` | `9e16de179cc5ad22` | 4,228 |
-| `sector_map` | `408da130fa1f0985` | 503 |
-| `stints` | `27dbf956b96a35ae` | 1,247 |
-| `benchmark` | `09e5960f468c526b` | 4,190 |
+| `equity_prices_long` | `2a95c682575f175b` | 3,492,792 |
+| `execution_prices` | `2a95c682575f175b` | 3,492,792 |
+| `features_clean` | `d2a612c67ffc657e` | 1,937,884 |
+| `labeled` | `21fe2bb3d749c6e3` | 3,492,792 |
+| `macro` | `7196119df94c96af` | 4,228 |
+| `sector_map` | `1eed8462eeea73d7` | 503 |
+| `stints` | `bc11e6d48d9671c1` | 1,247 |
+| `benchmark` | `0aeb727c4a9a2be7` | 4,190 |
 
 Output hashes (`manifest["outputs"]`, checked on every verification, both
 **recorded at write time** by the run that produced them):
 
 | output | sha256 (16) |
 |---|---|
-| `wf_scored` | `2494cf089ec17042` |
-| `execution_prices` | `f593a935eb2dc413` |
+| `wf_scored` | `f4ccf279d6e9bbdf` |
+| `execution_prices` | `e267b2851323202a` |
 
-Scored panel: 952,329 rows, 1,924 sessions, 643 tickers.
+Scored panel: 951,577 rows, 1,924 sessions, 642 tickers.
 Execution panel: 4,188 sessions × 834 tickers.
 
 ---
@@ -85,8 +86,8 @@ the survivorship residual elsewhere.
 | output integrity | `wf_scored.parquet` and `execution_prices.parquet` recomputed against recorded hashes |
 | execution derivation | the wide panel reproduced exactly from the hashed long snapshot: 4,188 sessions × 764 priced tickers |
 | ticker renames | 15 checked for successor coverage; **0 of 15 testable for concurrent trading** — canonicalisation removes the predecessor's own symbol from the panel, so the one real falsifier cannot run. Coverage shows a successor prices the predecessor's membership; it cannot show they are the same issuer, and each entry's recorded note remains the warrant |
-| point-in-time integrity | 0 of 952,329 scored rows outside index membership, on the half-open `[start_date, end_date)` convention production filters with; labels stop exactly at the last labelable session; execution covers every scored row; scored and execution prices agree on 952,329/952,329 cells |
-| survivorship | 272 of 347 departed names carry prices **during their membership** (**78.4%**, the measured ceiling); departed names are scored on **99.9%** of the sessions they were members (118,721/118,896) |
+| point-in-time integrity | 0 of 951,577 scored rows outside index membership, on the half-open `[start_date, end_date)` convention production filters with; labels stop exactly at the last labelable session; execution covers every scored row; scored and execution prices agree on 951,577/951,577 cells |
+| survivorship | 271 of 347 departed names carry prices **during their membership** (**78.1%**, the measured ceiling); departed names are scored on **99.9%** of the sessions they were members (117,973/118,147) |
 | recorded benchmark | SPY, 1,924 sessions, from the snapshot — so beta, alpha and the HAC t are checkable offline |
 | pinned metrics | every published CAGR, Sharpe, drawdown, beta, alpha and HAC t recomputed against `expected_metrics.json` |
 | accounting (cohort) | NAV reconciles with the trade ledger to `3.37e-16`; cash + holdings = NAV on all 1,924 sessions (residual `0.00e+00`) |
@@ -144,10 +145,10 @@ issuer's* prices under a departed member's name:
 | Q | Qwest, left the index 2011-04 | from 2025-10-27 (14.6 years later) |
 | SNDK | SanDisk, acquired 2016 | from 2025-02-13 (a re-IPO, new entity) |
 
-**50 of 347 departed names are like this** in this panel — priced only outside
+**51 of 347 departed names are like this** in this panel — priced only outside
 the window they were ever members. They were being counted as survivorship
 recoveries, which is why coverage was once reported as 91.4% when the truth is
-**78.4%**. The count moves between downloads (46, 49 and 50 across rebuilds of
+**78.1%**. The count moves between downloads (46 to 51 across rebuilds of
 the same window) because symbols keep being reassigned; it is recorded per run
 in `manifest["recycled_symbols"]` rather than assumed constant.
 
@@ -191,9 +192,9 @@ verification fails if any of them moves.
 <!-- pinned-metrics:start -->
 | engine | CAGR | Sharpe | max drawdown | beta | alpha/yr | HAC t |
 |---|---|---|---|---|---|---|
-| long-short | 15.59% | 0.94 | -14.74% | +0.24 | +7.43% | +2.05 |
-| cohort | 24.07% | 0.79 | -45.94% | +1.21 | +5.00% | +0.89 |
-| rank-hold | 35.94% | 0.95 | -51.90% | +1.40 | +13.92% | +1.78 |
+| long-short | 14.63% | 0.88 | -14.27% | +0.22 | +6.76% | +1.75 |
+| cohort | 24.72% | 0.82 | -46.61% | +1.16 | +6.02% | +1.00 |
+| rank-hold | 23.25% | 0.69 | -58.63% | +1.36 | +4.52% | +0.64 |
 <!-- pinned-metrics:end -->
 
 SPY over the same window: **17.55%** CAGR, beta 1.00 by construction.
@@ -204,8 +205,8 @@ SPY over the same window: **17.55%** CAGR, beta 1.00 by construction.
 so the live book never charges less than the simulation it was validated
 against. The difference is inside the ±1.50% draw-to-draw spread on alpha, so it
 changes nothing that is claimed here. The sensitivity curve below predates the
-disposal fixes and overstates every row by roughly 1.7 points of alpha; its
-shape — that borrow is not what decides this strategy — is unaffected.
+disposal and grid fixes and overstates every row by roughly 3 points of alpha;
+its shape — that borrow is not what decides this strategy — is unaffected.
 
 The short book is *cheaper* than the universe (0.90% against 1.22%, a 0.74×
 concentration) because the model ranks volatility positively and parks the
@@ -222,39 +223,69 @@ Generated by `scripts/pin_baseline_metrics.py`, not typed, and compared against
 **Read none of those numbers on their own.** They are one draw. The table below
 is the one to quote from.
 
-### Retraction: the long-short alpha does not clear |t| = 2
+### Retraction: no engine clears |t| = 2, and the spread was overstated
 
-Every revision of this document since the rebaseline has said that the
-long-short book *"survives its own noise — all four draws clear |t| = 2."*
-**That is withdrawn.** It was an artifact of two defects in how the engine
-settled positions it could not price.
+Every revision of this document since the rebaseline said the long-short book
+*"survives its own noise — all four draws clear |t| = 2."* **That is withdrawn.**
+It was an artifact of four defects, and correcting them moved the result twice.
 
-| | published | corrected |
-|---|---|---|
-| alpha, four draws | +8.99% ± 1.47% | **+7.09% ± 1.50%** |
-| HAC t | +2.61 | **+2.10** |
-| t range | +2.44 … +2.94 | **+1.87 … +2.51** |
-| draws clearing t = 2 | 4 of 4 | **1 of 4** |
+| | published | after disposal fixes | after grid fix |
+|---|---|---|---|
+| long-short alpha | +8.99% ± 1.47% | +7.09% ± 1.50% | **+5.90% ± 0.61%** |
+| HAC t | +2.61 | +2.10 | **+1.54** |
+| draws clearing t = 2 | 4 of 4 | 1 of 4 | **0 of 4** |
 
-Two defects, found on the same day:
+Four defects, in the order they were found:
 
-* **The unpriced-gap counter measured from the wrong origin.** `cummax()` skips
-  NaN without filling it, so the "sessions since this name last printed" frame
-  was NaN on exactly the rows the disposal branch reads, and the gap always came
-  out as *sessions since the start of the backtest*. A holding that missed one
-  session had its grace period already exhausted. Worth about 0.25 points of
-  alpha.
+* **The unpriced-gap counter measured from the wrong origin.** A holding that
+  missed one session had its grace period already exhausted and was written off.
 * **A written-off short was free money.** Settling at zero writes a long's claim
-  off in full, which is the conservative reading of an unexplained silence.
-  Applied to a *short* the same number erases a liability for nothing — the
-  maximum possible profit. Sixteen dark shorts on this artifact were booked that
-  way. A short with no settlement evidence now covers at its last observed mark.
-  Worth about **1.7 points of alpha**, and it is what moved the conclusion.
+  off in full — the conservative reading. Applied to a *short* it erases a
+  liability for nothing, the maximum possible profit. Sixteen dark shorts on the
+  previous artifact were booked that way. Worth ~1.7 points of alpha.
+* **The signal and the fill were the same bar.** The backtest ranks on one
+  session and fills at the next, precisely so a score cannot trade on the bar it
+  was computed from. The live path did both at once.
+* **A missing session was closed up before the rolling windows ran.** Features
+  were computed on a compacted grid, so `ret_1d` across a one-session gap read
+  as a 1-day return while covering two.
 
-The ordering between engines is unchanged and the long-only engines are
-untouched — their disposal counts were 0 and 1, and their pinned metrics did not
-drift by a digit. What changed is that the one result this document treated as
-established is now merely the best of three, none of which is significant.
+### The spread was itself inflated
+
+Fixing the grid did something the other corrections did not: it made the
+pipeline **markedly more reproducible**.
+
+| engine | 2 sd on CAGR, before | after | |
+|---|---|---|---|
+| long-short | ±3.32% | **±1.44%** | 2.3× tighter |
+| cohort | ±7.48% | **±3.73%** | 2.0× tighter |
+| rank-hold | ±10.69% | **±6.81%** | 1.6× tighter |
+
+Much of what this document attributed to vendor float noise was gaps being
+closed up differently between downloads. The panels really do differ by about
+`2e-6`, but the compaction amplified that into several points of CAGR. The
+noise floor is real and it was roughly twice as wide as it needed to be.
+
+That also settles an attribution made while the fixes were landing. Rank-hold
+fell 12.7 points between artifacts, which sat outside its *old* ±10.69% band.
+Against the corrected distribution (22.79% ± 3.41%) the previous 35.94% sits
+**3.9 standard deviations out**, so the fall is attributable to the fixes rather
+than to the draw — but that could not be said with confidence until the band was
+re-measured on the corrected code.
+
+### What changed shape
+
+* **Long-short no longer clears the line in any draw**: +1.37, +1.47, +1.58,
+  +1.75. It is still the best-controlled book — beta 0.222 ± 0.010 and a
+  drawdown a third of either long-only engine's — and its alpha is no longer
+  distinguishable from the others'.
+* **Cohort alpha stopped changing sign.** It was +5.00%, +2.93%, −1.68%, −0.83%
+  on the old code; it is now +4.34% … +8.05%, consistently positive at t = +1.03.
+  Still not significant, but no longer sign-unstable.
+* **Rank-hold collapsed**, from +11.82% alpha to +3.97% at t = +0.51.
+
+The three engines are now much closer to each other than this document has ever
+shown them, and none of them is significant.
 
 ### The spread, measured
 
@@ -265,9 +296,9 @@ lands somewhere else.
 
 | engine | CAGR (n=4) | Sharpe | alpha/yr | HAC t | range of t |
 |---|---|---|---|---|---|
-| long-short | 15.03% ± 1.66% | 0.91 ± 0.12 | +7.09% ± 1.50% | +2.10 ± 0.28 | +1.87 … +2.51 |
-| cohort | 19.72% ± 3.74% | 0.66 ± 0.11 | +1.36% ± 3.15% | +0.23 ± 0.55 | −0.29 … +0.89 |
-| rank-hold | 32.95% ± 5.35% | 0.88 ± 0.11 | +11.82% ± 3.99% | +1.41 ± 0.43 | +0.80 … +1.78 |
+| long-short | 13.65% ± 0.72% | 0.80 ± 0.06 | +5.90% ± 0.61% | +1.54 ± 0.16 | +1.37 … +1.75 |
+| cohort | 25.17% ± 1.86% | 0.82 ± 0.04 | +6.33% ± 1.56% | +1.03 ± 0.20 | +0.78 … +1.25 |
+| rank-hold | 22.79% ± 3.41% | 0.67 ± 0.07 | +3.97% ± 2.91% | +0.51 ± 0.33 | +0.12 … +0.88 |
 
 `uv run python scripts/baseline_spread.py artifacts/baseline artifacts/baseline_v3 artifacts/baseline_v4 artifacts/baseline_v5`
 
@@ -275,7 +306,7 @@ lands somewhere else.
 
 | engine | band |
 |---|---|
-| long-short | ±3.32% |
+| long-short | **±1.44%** |
 | cohort | **±7.48%** |
 | rank-hold | **±10.69%** |
 
@@ -285,11 +316,11 @@ measured price.
 
 ### Only one engine's result survives its own noise
 
-**Long-short.** *One* of the four draws clears |t| = 2 — +1.87, +1.99, +2.05,
-+2.51 — with a mean of +2.10 sitting barely above the line. It remains the best
-of the three engines by a wide margin (against +0.23 and +1.41), on the smallest
-drawdown by a factor of three and a beta that barely moves (0.223 ± 0.010). What
-it no longer is, is significant in every draw. Four independent downloads agree on the statistic the
+**Long-short.** *No* draw clears |t| = 2 — +1.37, +1.47, +1.58, +1.75, mean
++1.54. It is still the best-controlled book: beta 0.222 ± 0.010, a drawdown a
+third of either long-only engine's, and by far the tightest CAGR band (±0.72%
+against ±1.86% and ±3.41%). What it is not, and this document said it was, is
+significant. Four independent downloads agree on the statistic the
 conclusion rests on. That does *not* make it an edge; see the locked holdout
 below, which it still fails.
 
@@ -329,19 +360,26 @@ draw cannot carry a conclusion:
 
 | artifact | split | committed configuration | holdout alpha | HAC t | rank |
 |---|---|---|---|---|---|
-| current | 2023-01-01 | decile 0.05, 1.0x, **21d** | +5.87% | **+1.04** | 13 / 18 |
-| current | 2022-01-01 | decile 0.10, 1.0x, 63d | +4.17% | **+1.45** | 8 / 18 |
-| `baseline_v1` | 2023-01-01 | decile 0.20, 1.0x, 63d | +6.04% | +1.95 | 9 / 18 |
-| `baseline_v1` | 2022-01-01 | decile 0.20, 1.0x, 63d | +5.20% | +1.87 | 5 / 18 |
+| current | 2023-01-01 | decile 0.10, 1.0x, 63d | +6.08% | **+1.55** | 3 / 18 |
+| current | 2022-01-01 | decile 0.10, 1.0x, 63d | +3.89% | **+1.18** | 5 / 18 |
+| superseded | 2023-01-01 | decile 0.05, 1.0x, 21d | +5.87% | +1.04 | 13 / 18 |
+| superseded | 2022-01-01 | decile 0.10, 1.0x, 63d | +4.17% | +1.45 | 8 / 18 |
 
-The two `baseline_v1` rows were measured before the disposal fixes and are kept
-only to show the procedure behaved the same way on a different artifact; their
-values are inflated by the same defects.
+The two superseded rows predate the grid fix and are kept only to show the
+procedure behaves the same way across artifacts.
 
-**The full-period t does not survive, on either artifact, and the margin is no
-longer close.** On corrected artifacts a pre-committed configuration reaches
-**+1.04** and **+1.45**, against a full-period figure of +2.05. The earlier
-+1.66/+2.12 pair was measured with the disposal defects and is superseded.
+Two things improved here even as the level fell. The procedure now commits to
+the **same configuration at both splits** — decile 0.10, 1.0x, 63d — where it
+previously picked a different winner each time, and the committed configuration
+ranks 3rd and 5th of 18 rather than mid-pack. The selection is more stable on
+the corrected panel. It is selecting more consistently among options that are
+all indistinguishable from zero.
+
+**The full-period t does not survive, and neither figure was ever close to 2.**
+On the promoted artifact a pre-committed configuration reaches **+1.55** and
+**+1.18**, against a full-period figure of +1.75. With the full period itself now
+below the line, the holdout is no longer the binding constraint — the book does
+not clear conventional significance even before pre-registration is applied.
 
 **The search carries no information.** The committed configuration lands
 mid-pack every time — 13th, 7th, 9th and 5th of 18. Choosing on the first
@@ -355,11 +393,11 @@ than suspected.
 
 * **Rebalance frequency orders the grid monotonically**, always the same way.
 
-  | rebalance | current, 2023 | current, 2022 | v1, 2023 | v1, 2022 |
+  | rebalance | current, 2023 | current, 2022 | superseded, 2023 | superseded, 2022 |
   |---|---|---|---|---|
-  | 21d | −0.39 … +1.04 | −0.19 … +1.45 | +0.31 … +0.96 | −0.15 … +0.55 |
-  | 63d | +1.39 … +1.92 | +1.35 … +2.20 | +1.89 … +2.74 | +1.81 … +2.15 |
-  | 126d | +1.56 … +2.48 | +0.57 … +1.66 | +1.59 … +2.94 | +0.90 … +1.05 |
+  | 21d | +0.40 … +1.23 | +0.24 … +1.29 | −0.39 … +1.04 | −0.19 … +1.45 |
+  | 63d | +0.90 … +2.12 | +0.69 … +1.54 | +1.39 … +1.92 | +1.35 … +2.20 |
+  | 126d | +0.92 … +1.48 | +0.32 … +0.50 | +1.56 … +2.48 | +0.57 … +1.66 |
 
   21-day is weakest in all four; longer holds are stronger. This is the most
   durable thing in the whole document — the only claim here that has survived
@@ -384,16 +422,16 @@ above +2 at both splits, against +1.92 and +1.02 before. That is the same
 draw-to-draw variation seen everywhere else in this document, and it cuts both
 ways: it is not evidence the book improved.
 
-So the defensible claim is a **positive tilt that lives at longer holding
-periods and tighter deciles, that does not clear pre-registration, and that no
-longer clears |t| = 2 in three draws of four** — not an edge.
+So the defensible claim is a **positive tilt that lives at 63-day holding
+periods and tighter deciles, and that does not reach |t| = 2 in any draw or on
+any split** — not an edge.
 
 **This does not make it a strategy.** Three things stand against reading the
 full-period figure as settled, and the holdout above confirms the first two:
 
 1. **Multiplicity — demonstrated, not suspected.** Pre-committed evaluations
-   reach +1.04 and +1.45 on corrected artifacts, and the selection procedure
-   commits to three different configurations across four runs. The full-period figure is the
+   reach +1.55 and +1.18 against a full-period +1.75, so the full period itself
+   is now below the line and multiplicity is no longer the binding constraint. The full-period figure is the
    best of a correlated search, quoted as though it were a test.
 2. **Draw dependence — also demonstrated.** Every number here moves when the
    data is re-downloaded from the same window; see [the spread](#the-spread-measured).
@@ -408,14 +446,13 @@ recorded benchmark rather than a fresh download:
 
 | engine | beta | alpha/yr (this draw) | HAC t | alpha across 4 draws |
 |---|---|---|---|---|
-| cohort | **+1.21** | +5.00% | **+0.89** | +1.36% ± 3.15%, sign unstable |
-| rank-hold | **+1.40** | +13.92% | **+1.78** | +11.82% ± 3.99%, t +0.80…+1.78 |
+| cohort | **+1.16** | +6.02% | **+1.00** | +6.33% ± 1.56%, t +0.78…+1.25 |
+| rank-hold | **+1.36** | +4.52% | **+0.64** | +3.97% ± 2.91%, t +0.12…+0.88 |
 
-**Neither engine shows evidence of skill**, and neither can be quoted from a
-single draw. Cohort alpha is centred near zero and changes sign between
-rebuilds; rank-hold's spans +5.87% to +14.33% and never clears t = 2. Both
-carry beta well above 1 (1.21 and 1.40), so most of what they beat the index by
-is leverage, not selection.
+**Neither engine shows evidence of skill.** Cohort alpha is +6.33% ± 1.56% at
+t = +1.03 — consistently positive now, and still not significant; rank-hold's is
++3.97% ± 2.91% at t = +0.51. Both carry beta well above 1 (1.16 and 1.36), so
+most of what they beat the index by is leverage, not selection.
 
 Three corrections were previously recorded here as having moved these figures:
 ticker renames taking cohort alpha from +1.00% to −2.47%, the cohort expiry
