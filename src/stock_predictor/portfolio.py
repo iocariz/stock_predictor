@@ -793,13 +793,15 @@ def generate_orders_long_short(
             # exposure. Defer, then dispose under the stated policy.
             if held is None:
                 continue
-            unpriced = held.sessions_unpriced + 1
+            # Already incremented when marks were refreshed above; adding one
+            # again here would end the grace period a session early.
+            unpriced = held.sessions_unpriced
             settled = disposal_value(
                 ticker, as_of, evidence=proceeds_by_ticker,
                 sessions_unpriced=unpriced, policy=policy,
             )
             if settled is None:
-                positions[ticker] = replace(held, sessions_unpriced=unpriced)
+                positions[ticker] = held
                 deferred.append(ticker)
                 continue
             per_share, source = settled

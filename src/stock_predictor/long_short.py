@@ -189,8 +189,15 @@ def run_long_short_backtest(
     proceeds_evidence = load_proceeds(delisting_proceeds)
     # Sessions since each name last printed, so the grace period is counted in
     # sessions rather than in rebalances -- which are 63 apart here.
+    #
+    # ffill, not cummax alone: cummax skips NaN but does not fill it, so the
+    # frame was NaN on exactly the rows where a quote is missing -- the only
+    # rows the disposal branch ever reads. The NaN test below always fired and
+    # the gap always came out as "sessions since the start of the backtest",
+    # so a name that printed for a year and missed one session had any grace
+    # period already exhausted and was written off to zero on the spot.
     _pos = np.arange(len(actual), dtype=float)
-    _last_priced = actual.mul(_pos, axis=0).where(actual).cummax()
+    _last_priced = actual.mul(_pos, axis=0).where(actual).cummax().ffill()
 
     # The hedge is a synthetic short in the benchmark, priced alongside the
     # stocks so it pays the same slippage, borrow and financing as any other
