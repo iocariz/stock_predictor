@@ -158,3 +158,84 @@ def test_a_refit_records_its_own_window_not_the_default_flag() -> None:
     assert meta["train_end"] == "2025-09-02"
     assert meta["test_start"] is None
     assert meta["fitted_through"] == "2025-09-02"
+
+
+# ---------------------------------------------------------------------------
+# The manifest a refit writes
+# ---------------------------------------------------------------------------
+
+
+def test_the_manifest_survives_a_refits_absent_test_set() -> None:
+    """A refit returns ``(train, None)`` by design, and the run manifest asked
+    it for ``len(test)``.
+
+    The model and its metadata were written first, so a refit produced a usable
+    artifact and then died with ``TypeError: object of type 'NoneType' has no
+    len()`` before recording the manifest — no run id, no input hashes, no
+    provenance for the thing about to be deployed, and a non-zero exit. The
+    monthly retrain runs with ``REFIT=1``, so it hit this every time.
+    """
+    import inspect
+
+    from stock_predictor import cli
+
+    src = inspect.getsource(cli.main)
+    block = src[src.index('manifest["results"]'):]
+    line = next(ln for ln in block.splitlines() if '"test_rows"' in ln)
+    assert "len(test)" not in line or "if test is not None" in line, (
+        f"the manifest still calls len() on a refit's absent test set: {line.strip()}")
+
+
+def test_a_refit_records_that_it_had_no_test_set() -> None:
+    """``None`` rather than ``0``: a refit has no test period, which is not the
+    same claim as a test period that happened to be empty. The codebase draws
+    that distinction everywhere else it matters."""
+    import inspect
+
+    from stock_predictor import cli
+
+    src = inspect.getsource(cli.main)
+    block = src[src.index('manifest["results"]'):]
+    line = next(ln for ln in block.splitlines() if '"test_rows"' in ln)
+    assert "None" in line, f"a refit should record test_rows as None: {line.strip()}"
+
+
+# ---------------------------------------------------------------------------
+# Deploying what a refit actually produced
+# ---------------------------------------------------------------------------
+
+
+def test_deploy_checks_freshness_against_a_panel_the_run_wrote() -> None:
+    """A refit skips the walk-forward, so it writes no scored panel.
+
+    ``deploy_model()`` passed ``--panel "$WF_SCORES"`` unconditionally, so the
+    freshness check read a scores file left behind by some *other* run. In
+    practice that meant refusing a candidate trained through 2026-06-05 because
+    a panel from eighteen days earlier was 11 sessions behind — and it could
+    equally have *passed* a stale candidate whose leftover panel happened to be
+    recent. A validation that reads a file the run did not produce is not
+    validating the run.
+
+    The execution panel is written by every mode, refit included, so it is the
+    one the check can rely on.
+    """
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1]
+           / "scripts" / "run_pipeline.sh").read_text()
+    block = src[src.index("deploy_model()"):]
+    block = block[:block.index("\n}")]
+    assert "EXECUTION_PRICES" in block, (
+        "deploy still validates freshness against a panel a refit never writes")
+
+
+def test_the_refit_path_names_the_panel_it_uses() -> None:
+    """Whichever file the check reads, the operator has to be able to see which
+    one it was — a silent fallback is how this went unnoticed."""
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1]
+           / "scripts" / "run_pipeline.sh").read_text()
+    block = src[src.index("deploy_model()"):]
+    block = block[:block.index("\n}")]
+    assert "echo" in block or "--panel" in block
