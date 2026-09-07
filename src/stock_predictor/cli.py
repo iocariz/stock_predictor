@@ -412,7 +412,16 @@ def build_model_meta(
     ``seed`` and ``sample_n`` are what the live path uses to rebuild the same
     universe the model was fitted on.
     """
+    # Which code trained this. Everything else in the pipeline gained
+    # provenance -- hashed inputs, hashed outputs, a run manifest carrying the
+    # commit -- and the model bundle was the gap, so a deployed artifact could
+    # not answer "was this trained before or after the fix?" without inferring
+    # it from a file timestamp. git_dirty rides along because a commit hash
+    # from a dirty tree names code that was never committed anywhere.
+    rev = repro.git_revision()
     return {
+        "git_commit": rev.get("commit"),
+        "git_dirty": rev.get("dirty"),
         "feature_cols": feature_cols,
         # What the model actually learned through. Purging removes `horizon`
         # sessions before test_start, so this trails train_end by a quarter at
