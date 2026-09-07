@@ -897,7 +897,13 @@ def main() -> None:
         manifest["status"] = "completed"
         manifest["results"] = {
             "train_rows": int(len(train)),
-            "test_rows": int(len(test)),
+            # None, not 0: a refit has no test period, which is a different
+            # claim from a test period that happened to be empty. Calling len()
+            # on it crashed the run *after* the model was written, so a refit
+            # produced a usable artifact with no provenance record and a
+            # non-zero exit -- and the monthly retrain runs with REFIT=1.
+            "test_rows": int(len(test)) if test is not None else None,
+            "refit": test is None,
             "features_clean_rows": int(len(features_clean)),
             "pr_auc": pr_auc,
             "roc_auc": roc_auc,

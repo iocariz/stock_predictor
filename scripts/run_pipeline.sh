@@ -173,10 +173,21 @@ train_full() {
 }
 
 deploy_model() {
+  # The freshness check needs a panel *this* run wrote. A refit skips the
+  # walk-forward, so WF_SCORES is whatever an earlier run left on disk: the
+  # first refit-then-deploy refused a candidate trained through 2026-06-05
+  # because a scores file from eighteen days earlier was 11 sessions behind,
+  # and it could as easily have passed a stale candidate whose leftover panel
+  # happened to be recent. The execution panel is written by every mode.
+  local panel="$WF_SCORES"
+  if [[ ! -f "$panel" || "$EXECUTION_PRICES" -nt "$panel" ]]; then
+    panel="$EXECUTION_PRICES"
+  fi
+  echo "Freshness panel: $panel" >&2
   ${DRY_RUN:+echo} uv run python scripts/deploy_model.py \
     "$CANDIDATE" "$MODEL" \
     --expected-horizon "$HORIZON" \
-    --panel "$WF_SCORES" \
+    --panel "$panel" \
     "$@"
 }
 
