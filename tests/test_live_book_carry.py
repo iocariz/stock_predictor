@@ -318,3 +318,57 @@ def test_an_existing_short_position_still_marks_as_a_liability() -> None:
     )
     assert portfolio_value(st, _prices()) == pytest.approx(100_000.0)
     assert portfolio_value(st, _prices(T19=130.0)) == pytest.approx(97_000.0)
+
+
+# ---------------------------------------------------------------------------
+# The clocks advance on sessions, not on calendar days
+# ---------------------------------------------------------------------------
+
+
+def test_the_accrual_clock_stops_at_the_last_observed_session() -> None:
+    """Found by running the live path twice on a day with no new data.
+
+    ``as_of`` is ``date.today()``, a calendar date. Both clocks — carry and the
+    rebalance counter — measure elapsed *trading sessions*, and both were being
+    stamped with that calendar date. On a run made after the close but before
+    the next session appears in the download, the clock jumped ahead of the
+    data: it recorded 2026-09-08 while the panel ended 2026-09-04.
+
+    The sessions in between are then never charged, because the next window
+    starts strictly after the recorded date. Two sessions of borrow and
+    interest vanished, and would vanish again on every weekend or holiday run.
+    """
+    sessions = pd.DatetimeIndex(DATES)
+    ahead = str((sessions[-1] + pd.Timedelta(days=3)).date())   # past the panel
+    _, st = _run(init_state(), _picks(), _prices(), ahead)
+    assert pd.Timestamp(st.last_accrual_date) <= sessions[-1], (
+        f"accrual clock at {st.last_accrual_date}, past the last session "
+        f"{sessions[-1].date()}")
+    assert pd.Timestamp(st.last_signal_date) <= sessions[-1], (
+        "the rebalance clock has the same skew")
+
+
+def test_no_carry_accrues_when_no_session_has_passed() -> None:
+    """Running twice on the same data must not charge twice — and must not
+    silently advance the clock past sessions it did not charge."""
+    sessions = pd.DatetimeIndex(DATES)
+    after = str((sessions[-1] + pd.Timedelta(days=1)).date())
+    _, first = _run(init_state(), _picks(), _prices(), after,
+                    short_borrow_annual=0.10, risk_free_rate=0.045)
+    _, second = _run(first, _picks(), _prices(), after,
+                     short_borrow_annual=0.10, risk_free_rate=0.045)
+    assert second.cash == pytest.approx(first.cash, abs=1e-9)
+
+
+def test_sessions_skipped_by_a_late_run_are_still_charged() -> None:
+    """The consequence, stated directly: a run made after several sessions have
+    passed charges all of them, not just the last."""
+    sessions = pd.DatetimeIndex(DATES)
+    _, opened = _run(init_state(), _picks(), _prices(), str(sessions[0].date()),
+                     short_borrow_annual=0.10)
+    _, caught_up = _run(opened, _picks(), _prices(), str(sessions[10].date()),
+                        short_borrow_annual=0.10)
+    short_notional = -sum(p.shares * 100.0 for p in opened.positions
+                          if p.shares < 0)
+    assert (opened.cash - caught_up.cash) == pytest.approx(
+        short_notional * 0.10 / 252 * 10, rel=0.02)
