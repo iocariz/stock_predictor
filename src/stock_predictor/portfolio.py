@@ -732,15 +732,30 @@ def generate_orders_long_short(
     )
     cash = float(state.cash)
 
+    # Every date this function records is a *trading session*, so none of them
+    # may be stamped with a calendar date: the two clocks below, and the
+    # entry_date of each leg it opens. as_of is date.today(): a run made after
+    # the close, or on a weekend, is a date the panel does not contain.
+    # Recording it advanced the clock past sessions that had not been charged,
+    # and the next window starts strictly after the recorded date -- so those
+    # sessions were skipped permanently. Observed live: the clock read
+    # 2026-09-08 while the panel ended 2026-09-04, silently discarding two
+    # sessions of carry.
+    _sessions = pd.DatetimeIndex(pd.to_datetime(trading_dates)).sort_values()
+    _seen = _sessions[_sessions <= pd.Timestamp(as_of)]
+    priced_through = str(_seen.max().date()) if len(_seen) else as_of
+
     # Borrow accrues on every session the short leg was open, whether or not
     # today is a rebalance. Charging it only when the book turns over would
     # make a long holding period look free.
-    elapsed = _sessions_between(trading_dates, state.last_signal_date, as_of)
+    elapsed = _sessions_between(
+        trading_dates, state.last_signal_date, priced_through)
     # Carry is charged for sessions not yet charged, not for sessions since the
     # last rebalance. Measuring it from last_signal_date bills 1+2+...+n over an
     # n-session hold: a 63-session cycle paid 2,016 session-days of borrow
     # instead of 63, which cost ~20 points of NAV against the backtest.
-    since_accrual = _sessions_between(trading_dates, state.last_accrual_date, as_of)
+    since_accrual = _sessions_between(
+        trading_dates, state.last_accrual_date, priced_through)
     if 0 < since_accrual < 10**9:
         if short_borrow_annual > 0:
             short_notional = sum(
@@ -764,7 +779,7 @@ def generate_orders_long_short(
         for p in state.positions
     )
     quiet = replace(state, cash=cash, positions=marked,
-                    last_accrual_date=as_of,
+                    last_accrual_date=priced_through,
                     updated_at=datetime.now(timezone.utc).isoformat())
     # The peak has to move with NAV or the kill switch measures drawdown from
     # the opening balance forever: a book that ran to 130,000 and back to
@@ -860,10 +875,16 @@ def generate_orders_long_short(
             reason=_long_short_reason(have, want),
         ))
         if want:
+            # The fill happened at priced_through's close, so that is the date
+            # it is stamped with. as_of is date.today(), which on a weekend or
+            # a holiday is a date no session exists for -- the live book
+            # recorded every leg as opened on Labor Day 2026-09-07. A resized
+            # leg keeps its original entry_date: the position was not reopened.
             positions[ticker] = Position(
                 ticker=ticker, shares=want,
                 entry_price=fill if have == 0 else (held.entry_price if held else fill),
-                entry_date=as_of if have == 0 else (held.entry_date if held else as_of),
+                entry_date=(priced_through if have == 0
+                            else (held.entry_date if held else priced_through)),
                 expiry_date=OPEN_ENDED_EXPIRY, cohort_id=LONG_SHORT_COHORT,
                 last_price=px,
             )
@@ -872,7 +893,7 @@ def generate_orders_long_short(
         quiet,
         cash=cash,
         positions=tuple(positions[t] for t in sorted(positions)),
-        last_signal_date=as_of,
+        last_signal_date=priced_through,
         updated_at=datetime.now(timezone.utc).isoformat(),
     )
     return tuple(orders), new_state
