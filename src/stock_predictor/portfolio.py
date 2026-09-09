@@ -732,13 +732,15 @@ def generate_orders_long_short(
     )
     cash = float(state.cash)
 
-    # Both clocks below count *trading sessions*, so neither may be stamped
-    # with a calendar date. as_of is date.today(): a run made after the close,
-    # or on a weekend, is a date the panel does not contain. Recording it
-    # advanced the clock past sessions that had not been charged, and the next
-    # window starts strictly after the recorded date -- so those sessions were
-    # skipped permanently. Observed live: the clock read 2026-09-08 while the
-    # panel ended 2026-09-04, silently discarding two sessions of carry.
+    # Every date this function records is a *trading session*, so none of them
+    # may be stamped with a calendar date: the two clocks below, and the
+    # entry_date of each leg it opens. as_of is date.today(): a run made after
+    # the close, or on a weekend, is a date the panel does not contain.
+    # Recording it advanced the clock past sessions that had not been charged,
+    # and the next window starts strictly after the recorded date -- so those
+    # sessions were skipped permanently. Observed live: the clock read
+    # 2026-09-08 while the panel ended 2026-09-04, silently discarding two
+    # sessions of carry.
     _sessions = pd.DatetimeIndex(pd.to_datetime(trading_dates)).sort_values()
     _seen = _sessions[_sessions <= pd.Timestamp(as_of)]
     priced_through = str(_seen.max().date()) if len(_seen) else as_of
@@ -873,10 +875,16 @@ def generate_orders_long_short(
             reason=_long_short_reason(have, want),
         ))
         if want:
+            # The fill happened at priced_through's close, so that is the date
+            # it is stamped with. as_of is date.today(), which on a weekend or
+            # a holiday is a date no session exists for -- the live book
+            # recorded every leg as opened on Labor Day 2026-09-07. A resized
+            # leg keeps its original entry_date: the position was not reopened.
             positions[ticker] = Position(
                 ticker=ticker, shares=want,
                 entry_price=fill if have == 0 else (held.entry_price if held else fill),
-                entry_date=as_of if have == 0 else (held.entry_date if held else as_of),
+                entry_date=(priced_through if have == 0
+                            else (held.entry_date if held else priced_through)),
                 expiry_date=OPEN_ENDED_EXPIRY, cohort_id=LONG_SHORT_COHORT,
                 last_price=px,
             )

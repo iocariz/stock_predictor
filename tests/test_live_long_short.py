@@ -379,3 +379,25 @@ def test_an_unexitable_position_is_disposed_not_carried_forever() -> None:
     _, st = _run(st, _picks(), dark, str(DATES[21].date()),
                  delisting_policy=policy, force=True)
     assert all(p.ticker != gone for p in st.positions), "never disposed"
+
+
+def test_entry_date_is_a_session_not_the_calendar_date() -> None:
+    """The third clock. ``as_of`` is ``date.today()``, so a run made after the
+    close, on a weekend, or on a holiday carries a date the panel does not
+    contain. The two clocks that drive carry and the rebalance window were
+    moved onto ``priced_through``; ``entry_date`` was left stamping ``as_of``,
+    and the live book recorded all 94 legs as opened on 2026-09-07 -- Labor
+    Day, a date the NYSE calendar has no session for."""
+    saturday = "2024-01-06"
+    assert pd.Timestamp(saturday).to_numpy() not in SESSIONS, "pick a non-session"
+    _, st = _run(init_state(), _picks(), _prices(), saturday)
+    assert st.positions, "no book opened"
+    stamped = {p.entry_date for p in st.positions}
+    assert stamped == {"2024-01-05"}, (
+        f"entry_date stamped off-session: {stamped}")
+
+
+def test_an_off_session_entry_date_agrees_with_the_signal_clock() -> None:
+    """Both stamps describe the same fill, so they may not disagree."""
+    _, st = _run(init_state(), _picks(), _prices(), "2024-01-06")
+    assert {p.entry_date for p in st.positions} == {st.last_signal_date}
