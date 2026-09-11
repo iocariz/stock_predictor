@@ -33,3 +33,6 @@ Thumbs.db
 
 # Stray output from `nohup ... &` runs
 nohup.out
+
+# Pipeline run logs (refit/evaluate/backtest/predict cron)
+logs/
