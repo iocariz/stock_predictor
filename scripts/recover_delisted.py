@@ -56,8 +56,26 @@ def _manifest(cache_dir: Path) -> dict:
         return {}
 
 
-def outstanding(names: list[str], cache_dir: Path) -> tuple[list[str], int, int]:
-    """(still to fetch, already recovered, known-absent at the vendor)."""
+def outstanding(
+    names: list[str], cache_dir: Path, start: str | None = None,
+) -> tuple[list[str], int, int]:
+    """(still to fetch, already recovered, unusable at the vendor).
+
+    *start* is the window being asked for. It decides the one ambiguous case: a
+    cached file with fewer than MIN_ROWS rows. If the manifest says that file
+    already answers a request reaching back to *start*, the thinness is the
+    vendor's answer and no number of passes will improve it. If the cached
+    request began later, the file is short because the question was narrow, and
+    the wider window still has to be fetched.
+
+    Treating every thin file as retryable is what stopped this script
+    terminating: a ticker the vendor serves with 1-19 prints is written with
+    ``empty: False``, so the provider counts it recovered and serves it from
+    cache, while this function hands it back for another pass. BK and DF sat at
+    5 rows and WRK at 1, and each pass reported "recovered 3" and "3 still
+    outstanding" in the same breath. ``--passes 6 --wait 3600`` would have slept
+    six hours to re-answer three names it already had.
+    """
     man = _manifest(cache_dir)
     todo, have, absent = [], 0, 0
     for t in names:
@@ -69,14 +87,20 @@ def outstanding(names: list[str], cache_dir: Path) -> tuple[list[str], int, int]
             absent += 1
             continue
         cached = cache_dir / f"{t}.parquet"
+        rows = None
         if cached.exists():
             try:
-                if len(pd.read_parquet(cached)) >= MIN_ROWS:
-                    have += 1
-                    continue
+                rows = len(pd.read_parquet(cached))
             except Exception:  # noqa: BLE001 - an unreadable cache file is a refetch
-                pass
-        todo.append(t)
+                rows = None
+        if rows is None:
+            todo.append(t)
+        elif rows >= MIN_ROWS:
+            have += 1
+        elif start is not None and str(entry.get("start", "9999")) > str(start):
+            todo.append(t)   # short because the request was, not the vendor
+        else:
+            absent += 1
     return todo, have, absent
 
 
@@ -100,7 +124,7 @@ def main() -> None:
     print(f"{len(names)} companies left the index between {args.start} and {end}")
 
     for i in range(1, args.passes + 1):
-        todo, have, absent = outstanding(names, args.cache_dir)
+        todo, have, absent = outstanding(names, args.cache_dir, args.start)
         print(f"\npass {i}/{args.passes}: {have} cached, {absent} absent at vendor, "
               f"{len(todo)} to fetch")
         if not todo:
@@ -110,14 +134,14 @@ def main() -> None:
         got = provider.fetch_missing(todo, args.start, end)
         print(f"  recovered {len(got)} this pass")
         if i < args.passes:
-            still, _, _ = outstanding(names, args.cache_dir)
+            still, _, _ = outstanding(names, args.cache_dir, args.start)
             if not still:
                 print("Nothing left to fetch.")
                 break
             print(f"  waiting {args.wait}s for the quota window…")
             time.sleep(args.wait)
 
-    todo, have, absent = outstanding(names, args.cache_dir)
+    todo, have, absent = outstanding(names, args.cache_dir, args.start)
     total = len(names)
     print(f"\n{have}/{total} recovered ({have / total:.1%}), "
           f"{absent} unavailable at the vendor, {len(todo)} still outstanding")
