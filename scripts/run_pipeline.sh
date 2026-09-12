@@ -24,6 +24,13 @@ cd "$ROOT"
 # on names it could not buy.
 : "${TRAIN_PROVIDER:=hybrid}"
 : "${PREDICT_PROVIDER:=yfinance}"
+# Tickers per vendor request. Empty means the provider's own default (100 for
+# yfinance). Yahoo throttles large batches, and a throttled download is the
+# one failure the scheduled run actually hits: the first night the cron fired
+# it got 73 of 470 current members and the coverage guard stopped it. The
+# error names lowering this as the remedy, which was unreachable from the
+# automation until it had a variable.
+: "${PREDICT_BATCH_SIZE:=}"
 : "${SAMPLE_N:=10000}"
 # The label horizon. HOLDING_DAYS derives from it below so the exit rule and
 # the thing the model was trained to predict cannot drift apart: trading a
@@ -228,6 +235,9 @@ predict_daily() {
   # vanished rather than errored. read -r in a while loop is portable.
   flags=()
   while IFS= read -r _line; do flags+=("$_line"); done < <(strategy_flags)
+  # Unset must mean "the provider decides", not a number hardcoded here.
+  local -a batch=()
+  [[ -n "$PREDICT_BATCH_SIZE" ]] && batch=(--batch-size "$PREDICT_BATCH_SIZE")
   ${DRY_RUN:+echo} uv run predict-sp500 \
     --model "$MODEL" \
     --state "$STATE" \
@@ -235,6 +245,7 @@ predict_daily() {
     --provider "$PREDICT_PROVIDER" \
     --hold-mode "$HOLD_MODE" \
     --max-drawdown "$MAX_DD" \
+    ${batch[@]+"${batch[@]}"} \
     ${flags[@]+"${flags[@]}"} \
     ${confirm_flag[@]+"${confirm_flag[@]}"}
 }
