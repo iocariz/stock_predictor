@@ -71,6 +71,7 @@ def check_download_coverage(
     *,
     min_coverage: float = DEFAULT_MIN_COVERAGE,
     active: set[str] | None = None,
+    recycled: list[str] | None = None,
     label: str = "price download",
 ) -> float:
     """Validate that a wide price frame actually covers the requested tickers.
@@ -92,6 +93,17 @@ def check_download_coverage(
     Pass *active* (see :func:`stock_predictor.pit.current_members`) to apply
     *min_coverage* to current members only and report the departed gap
     separately. Without it, *min_coverage* applies to the whole request.
+
+    Pass *recycled* -- the symbols :func:`drop_recycled_prices` removed -- to
+    keep a third case out of the survivorship number. Those columns were
+    deliberately deleted because the exchange reassigned the symbol and the
+    panel had picked up a different issuer's prices under a departed member's
+    name. By the time this runs they are indistinguishable from names the
+    vendor never served, and counting them as a vendor gap gets the conclusion
+    backwards: removing them makes the panel more honest, not less. Measured
+    on the real S&P panel, 44 of 65 absent departed members were recycled
+    symbols the cache holds good data for, and only 21 were genuinely
+    unavailable -- so the unqualified message overstated the gap threefold.
 
     Returns overall coverage. Raises :class:`DownloadCoverageError` when the
     gated cohort falls short.
@@ -135,14 +147,28 @@ def check_download_coverage(
         + (f", {gated_coverage:.1%} of {gated_label}" if active else "")
     )
     if active:
+        dropped = set(recycled or ())
         departed_missing = [t for t in missing if t not in active]
-        if departed_missing:
-            n_departed = len([t for t in want if t not in active])
+        n_departed = len([t for t in want if t not in active])
+        # Split by cause: the two call for opposite responses. A vendor gap
+        # wants a refetch; a reused symbol must never be refetched, because it
+        # would return the same wrong company.
+        recycled_missing = [t for t in departed_missing if t in dropped]
+        vendor_missing = [t for t in departed_missing if t not in dropped]
+        if recycled_missing:
             print(
-                f"  Survivorship gap: {len(departed_missing)}/{n_departed} departed "
+                f"  Reused symbols removed: {len(recycled_missing)}/{n_departed} "
+                f"departed index members are absent because the exchange "
+                f"reassigned their symbol and the prices belonged to another "
+                f"issuer. Deliberate, and not a survivorship gap. "
+                f"Removed: {_preview(recycled_missing, 5)}"
+            )
+        if vendor_missing:
+            print(
+                f"  Survivorship gap: {len(vendor_missing)}/{n_departed} departed "
                 f"index members are unavailable from this vendor and are absent "
                 f"from the panel, which flatters results. "
-                f"Missing: {_preview(departed_missing, 5)}"
+                f"Missing: {_preview(vendor_missing, 5)}"
             )
     elif missing:
         print(f"  Warning: missing {len(missing)}: {_preview(missing)}")

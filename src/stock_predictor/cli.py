@@ -588,6 +588,11 @@ def main() -> None:
         sample, adj_close,
         min_coverage=args.min_coverage,
         active=current_members(stints),
+        # Without this the columns just dropped above are reported as a vendor
+        # gap, which reverses their meaning: they were removed because the
+        # prices were another issuer's, so removing them made the panel more
+        # honest rather than more flattering.
+        recycled=recycled,
         label="equity download",
     )
     if manifest is not None:
