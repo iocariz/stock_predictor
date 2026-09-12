@@ -166,3 +166,79 @@ def test_active_set_that_is_empty_falls_back_to_flat_threshold() -> None:
     req = _alphabet_universe(100)
     with pytest.raises(DownloadCoverageError):
         check_download_coverage(req, _wide(req[:40]), min_coverage=0.9, active=set())
+
+
+# ---------------------------------------------------------------------------
+# Deliberate removals are not vendor gaps
+# ---------------------------------------------------------------------------
+
+
+def test_recycled_symbols_are_not_counted_as_a_vendor_gap(capsys) -> None:
+    """A dropped reused symbol is a cleaning decision, not missing data.
+
+    Once a member is acquired its symbol can be reassigned, so the panel picks
+    up a different issuer's prices under a departed member's name -- Qwest's Q
+    priced from 2025, Anadarko's APC from 2026. ``drop_recycled_prices``
+    removes those blocks *before* this check runs, so they arrive here looking
+    exactly like names the vendor never served.
+
+    Measured on the real panel: 65 departed members absent, of which 44 were
+    recycled symbols the cache holds good data for and only 21 were genuinely
+    unavailable. The message attributed all 65 to the vendor and called the
+    result flattered, when for those 44 the removal made it *more* honest.
+    """
+    current = _alphabet_universe(80)
+    departed = [f"OLD{i:03d}" for i in range(20)]
+    recycled = departed[:12]
+    check_download_coverage(
+        sorted(current + departed), _wide(current), min_coverage=0.98,
+        active=set(current), recycled=recycled,
+    )
+    out = capsys.readouterr().out
+    assert "8/20" in out, f"vendor gap not reported net of recycled names: {out}"
+    assert "12" in out, "the recycled count is not reported at all"
+
+
+def test_recycled_symbols_are_reported_as_their_own_line(capsys) -> None:
+    """Reported, not silently netted off: a reader has to be able to see both
+    causes, because they call for opposite responses. A vendor gap wants a
+    refetch; a recycled symbol must never be refetched -- it would return the
+    same wrong company."""
+    current = _alphabet_universe(80)
+    departed = [f"OLD{i:03d}" for i in range(20)]
+    check_download_coverage(
+        sorted(current + departed), _wide(current), min_coverage=0.98,
+        active=set(current), recycled=departed[:12],
+    )
+    out = capsys.readouterr().out.lower()
+    assert "reused" in out or "recycled" in out
+
+
+def test_an_all_recycled_gap_is_not_called_survivorship(capsys) -> None:
+    """If every absent name was deliberately removed there is no vendor gap,
+    and saying results are flattered by survivorship would be false."""
+    current = _alphabet_universe(80)
+    departed = [f"OLD{i:03d}" for i in range(20)]
+    check_download_coverage(
+        sorted(current + departed), _wide(current), min_coverage=0.98,
+        active=set(current), recycled=departed,
+    )
+    out = capsys.readouterr().out.lower()
+    # Not a bare word check: the reused-symbols line names survivorship in
+    # order to deny it ("not a survivorship gap"). What must be absent is the
+    # claim itself.
+    assert "survivorship gap:" not in out, (
+        f"claimed a survivorship gap with no vendor gap: {out}")
+    assert "flatters results" not in out
+
+
+def test_recycled_defaults_to_nothing(capsys) -> None:
+    """Callers that do not drop recycled symbols keep the old reading."""
+    current = _alphabet_universe(80)
+    departed = [f"OLD{i:03d}" for i in range(20)]
+    check_download_coverage(
+        sorted(current + departed), _wide(current), min_coverage=0.98,
+        active=set(current),
+    )
+    out = capsys.readouterr().out
+    assert "20/20" in out
