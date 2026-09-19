@@ -143,3 +143,62 @@ echo "Portfolio updated"
     assert res.returncode == 0, res.stderr
     seen = [int(ln.split("=")[1]) for ln in args.read_text().split() if "=" in ln]
     assert seen[1] < seen[0], f"batch size not lowered on retry: {seen}"
+
+
+# ---------------------------------------------------------------------------
+# Idle sleep
+# ---------------------------------------------------------------------------
+
+
+def test_the_run_holds_off_idle_sleep(tmp_path: Path) -> None:
+    """The failure nine scheduled attempts actually had.
+
+    This Mac suspends after ~45 seconds idle and wakes for ~3. A 470-ticker
+    download cannot complete through that: connections drop and the result
+    looks exactly like a vendor that served a fraction of the universe. Every
+    scheduled attempt across 2026-09-16..19 came back 15-26% complete, at three
+    batch sizes and two times of day, while every run started by hand -- with
+    someone at the keyboard keeping the machine awake -- returned 470/470.
+    Batch size and hour were both read as causes and both were wrong; the
+    confound was the operator's presence.
+
+    caffeinate re-parents the command rather than wrapping it, so process
+    ancestry cannot be asserted on portably. What is checked here is the
+    decision the wrapper records; that it holds a real PreventUserIdleSystem
+    assertion was verified out-of-band with `pmset -g assertions`.
+    """
+    log = tmp_path / "out.log"
+    stub = tmp_path / "run_pipeline.sh"
+    stub.write_text('#!/bin/bash\necho "Portfolio updated"\n')
+    stub.chmod(0o755)
+    res = subprocess.run(
+        ["bash", str(CRON)],
+        capture_output=True, text=True,
+        env={**os.environ, "PIPELINE_CMD": str(stub), "RETRY_WAIT": "0",
+             "LOG_FILE": str(log)},
+    )
+    assert res.returncode == 0, res.stderr
+    text = log.read_text()
+    if shutil.which("caffeinate"):
+        assert "caffeinate -i holding off idle sleep" in text, text
+    else:
+        assert "no caffeinate" in text, text
+
+
+def test_a_missing_caffeinate_does_not_break_the_run(tmp_path: Path) -> None:
+    """caffeinate is macOS-only. On a machine without it the run must still
+    happen -- degraded, not dead. CI is Linux."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    stub = tmp_path / "run_pipeline.sh"
+    stub.write_text('#!/bin/bash\necho "Portfolio updated"\n')
+    stub.chmod(0o755)
+    res = subprocess.run(
+        ["bash", str(CRON)],
+        capture_output=True, text=True,
+        # A PATH with no caffeinate on it, but keep the basics the script needs.
+        env={**os.environ, "PIPELINE_CMD": str(stub), "RETRY_WAIT": "0",
+             "LOG_FILE": str(tmp_path / "out.log"),
+             "PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+    assert res.returncode == 0, f"no caffeinate broke the run: {res.stderr}"

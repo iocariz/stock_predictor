@@ -43,13 +43,39 @@ TRANSIENT='DownloadCoverageError|Too Many Requests|rate.?limit|Connection|Timeou
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
 
+# Hold off idle sleep for the duration of the download.
+#
+# This machine suspends after ~45s idle and wakes for ~3s. A 470-ticker
+# download cannot finish through that -- connections drop and the result looks
+# exactly like a vendor that served a fraction of the universe. Every scheduled
+# attempt over 2026-09-16..19 returned 15-26% of current members, at three
+# batch sizes and two times of day; every run started by hand returned 470/470.
+# The difference was never the batch or the hour, both of which were read as
+# causes and were wrong. It was that a person at the keyboard kept the machine
+# awake.
+#
+# -i holds off idle sleep only. A lid close or an explicit sleep still wins,
+# which is correct: this should not keep a laptop awake in a bag.
+#
+# macOS-only, so it is optional. Without it the run still happens, just exposed
+# to the suspend it cannot survive -- degraded, not dead. CI is Linux.
+CAFFEINATE=()
+if command -v caffeinate >/dev/null 2>&1; then
+  CAFFEINATE=(caffeinate -i)
+fi
+
 attempt=0
 for size in $BATCH_SIZES; do
   attempt=$((attempt + 1))
   [[ $attempt -gt $MAX_ATTEMPTS ]] && break
 
-  log "attempt $attempt/$MAX_ATTEMPTS (batch size $size)"
-  out="$(PREDICT_BATCH_SIZE="$size" "$PIPELINE_CMD" predict --confirm 2>&1)"
+  if [[ ${#CAFFEINATE[@]} -gt 0 ]]; then
+    log "attempt $attempt/$MAX_ATTEMPTS (batch size $size, caffeinate -i holding off idle sleep)"
+  else
+    log "attempt $attempt/$MAX_ATTEMPTS (batch size $size, no caffeinate: idle sleep may truncate the download)"
+  fi
+  out="$(PREDICT_BATCH_SIZE="$size" ${CAFFEINATE[@]+"${CAFFEINATE[@]}"} \
+        "$PIPELINE_CMD" predict --confirm 2>&1)"
   rc=$?
   echo "$out" >> "$LOG_FILE"
 
