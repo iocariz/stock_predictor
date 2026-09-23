@@ -143,3 +143,87 @@ echo "Portfolio updated"
     assert res.returncode == 0, res.stderr
     seen = [int(ln.split("=")[1]) for ln in args.read_text().split() if "=" in ln]
     assert seen[1] < seen[0], f"batch size not lowered on retry: {seen}"
+
+
+# ---------------------------------------------------------------------------
+# Idle sleep
+# ---------------------------------------------------------------------------
+
+
+def test_the_whole_run_is_held_awake_not_just_the_download(tmp_path: Path) -> None:
+    """Three wrong causes preceded this one; the fourth is read off the power
+    log rather than inferred from correlation.
+
+    launchd wakes a sleeping Mac into *DarkWake*, which carries a 45-second
+    "wake linger" budget. When it expires the system sleeps again:
+
+      06:51:09  DarkWake        <- launchd woke the machine to run the job
+      06:51:54  powerd TimedOut InternalPreventSleep
+                "com.apple.powermanagement.acwakelinger" 00:00:45
+                Summary- [System: PrevIdle] Using AC
+      07:09:20  attempt 1 fails -> 113/470
+
+    caffeinate -i asserts PreventUserIdleSystemSleep, which stops sleep caused
+    by the *idle timeout*. This is not an idle timeout, so PrevIdle was held
+    and the machine slept through it. -s is the assertion that prevents system
+    sleep outright, and is valid on AC.
+
+    The first attempt also wrapped only the download, leaving the backoff
+    exposed: a 300s wait stretched to 40 minutes because the machine suspended
+    inside it. So the assertion has to cover the whole script, which is what
+    re-exec gives -- not one subprocess of it.
+    """
+    log = tmp_path / "out.log"
+    stub = tmp_path / "run_pipeline.sh"
+    stub.write_text('#!/bin/bash\necho "Portfolio updated"\n')
+    stub.chmod(0o755)
+    res = subprocess.run(
+        ["bash", str(CRON)],
+        capture_output=True, text=True,
+        env={**os.environ, "PIPELINE_CMD": str(stub), "RETRY_WAIT": "0",
+             "LOG_FILE": str(log)},
+    )
+    assert res.returncode == 0, res.stderr
+    text = log.read_text()
+    if shutil.which("caffeinate"):
+        assert "caffeinate -s" in text, text
+        assert "PrevIdle" not in text, "still describing the idle-only assertion"
+    else:
+        assert "no caffeinate" in text, text
+
+
+def test_the_reexec_does_not_loop(tmp_path: Path) -> None:
+    """Re-exec guards on an env var. If the guard fails the script calls itself
+    forever, which on a scheduled job is far worse than the bug it fixes."""
+    log = tmp_path / "out.log"
+    stub = tmp_path / "run_pipeline.sh"
+    stub.write_text('#!/bin/bash\necho "Portfolio updated"\n')
+    stub.chmod(0o755)
+    res = subprocess.run(
+        ["bash", str(CRON)],
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "PIPELINE_CMD": str(stub), "RETRY_WAIT": "0",
+             "LOG_FILE": str(log)},
+    )
+    assert res.returncode == 0
+    # Exactly one run's worth of attempt lines, not one per re-exec.
+    assert log.read_text().count("attempt 1/") == 1, log.read_text()
+
+
+def test_a_missing_caffeinate_does_not_break_the_run(tmp_path: Path) -> None:
+    """caffeinate is macOS-only. On a machine without it the run must still
+    happen -- degraded, not dead. CI is Linux."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    stub = tmp_path / "run_pipeline.sh"
+    stub.write_text('#!/bin/bash\necho "Portfolio updated"\n')
+    stub.chmod(0o755)
+    res = subprocess.run(
+        ["bash", str(CRON)],
+        capture_output=True, text=True,
+        # A PATH with no caffeinate on it, but keep the basics the script needs.
+        env={**os.environ, "PIPELINE_CMD": str(stub), "RETRY_WAIT": "0",
+             "LOG_FILE": str(tmp_path / "out.log"),
+             "PATH": f"{fake_bin}:/usr/bin:/bin"},
+    )
+    assert res.returncode == 0, f"no caffeinate broke the run: {res.stderr}"

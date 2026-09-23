@@ -43,12 +43,47 @@ TRANSIENT='DownloadCoverageError|Too Many Requests|rate.?limit|Connection|Timeou
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
 
+# Keep the system awake for the whole run, not just the download.
+#
+# launchd wakes a sleeping Mac into *DarkWake*, a maintenance window with a
+# 45-second budget. When it expires the machine sleeps again mid-download, and
+# a 470-ticker request comes back a fraction complete -- indistinguishable from
+# a throttled vendor, which is why this read as throttling at three batch sizes
+# and two times of day before the power log named it:
+#
+#   06:51:09  DarkWake        <- launchd woke the machine to run the job
+#   06:51:54  powerd TimedOut InternalPreventSleep
+#             "com.apple.powermanagement.acwakelinger" 00:00:45
+#             Summary- [System: PrevIdle] Using AC
+#   07:09:20  attempt 1 fails -> 113/470
+#
+# The first attempt at this used `caffeinate -i`, which asserts
+# PreventUserIdleSystemSleep: it stops sleep caused by the *idle timeout*. The
+# line above is not an idle timeout, so PrevIdle was held and the machine slept
+# through it regardless. -s prevents system sleep outright and is valid on AC,
+# which is what a scheduled overnight job runs on.
+#
+# It also wrapped only the pipeline call, leaving the backoff exposed: a 300s
+# wait stretched to 40 minutes because the machine suspended inside it. So the
+# assertion covers the whole script via re-exec, not one subprocess of it.
+#
+# macOS-only, so it stays optional -- without it the run still happens and the
+# log says so. CI is Linux. The env guard is what stops the re-exec recursing.
+if [[ -z "${PREDICT_CRON_CAFFEINATED:-}" ]] && command -v caffeinate >/dev/null 2>&1; then
+  export PREDICT_CRON_CAFFEINATED=1
+  exec caffeinate -s "$0" "$@"
+fi
+
 attempt=0
 for size in $BATCH_SIZES; do
   attempt=$((attempt + 1))
   [[ $attempt -gt $MAX_ATTEMPTS ]] && break
 
-  log "attempt $attempt/$MAX_ATTEMPTS (batch size $size)"
+  if [[ -n "${PREDICT_CRON_CAFFEINATED:-}" ]]; then
+    log "attempt $attempt/$MAX_ATTEMPTS (batch size $size, under caffeinate -s)"
+  else
+    log "attempt $attempt/$MAX_ATTEMPTS (batch size $size, no caffeinate: a suspend may truncate the download)"
+  fi
   out="$(PREDICT_BATCH_SIZE="$size" "$PIPELINE_CMD" predict --confirm 2>&1)"
   rc=$?
   echo "$out" >> "$LOG_FILE"
