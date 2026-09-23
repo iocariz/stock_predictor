@@ -150,22 +150,28 @@ echo "Portfolio updated"
 # ---------------------------------------------------------------------------
 
 
-def test_the_run_holds_off_idle_sleep(tmp_path: Path) -> None:
-    """The failure nine scheduled attempts actually had.
+def test_the_whole_run_is_held_awake_not_just_the_download(tmp_path: Path) -> None:
+    """Three wrong causes preceded this one; the fourth is read off the power
+    log rather than inferred from correlation.
 
-    This Mac suspends after ~45 seconds idle and wakes for ~3. A 470-ticker
-    download cannot complete through that: connections drop and the result
-    looks exactly like a vendor that served a fraction of the universe. Every
-    scheduled attempt across 2026-09-16..19 came back 15-26% complete, at three
-    batch sizes and two times of day, while every run started by hand -- with
-    someone at the keyboard keeping the machine awake -- returned 470/470.
-    Batch size and hour were both read as causes and both were wrong; the
-    confound was the operator's presence.
+    launchd wakes a sleeping Mac into *DarkWake*, which carries a 45-second
+    "wake linger" budget. When it expires the system sleeps again:
 
-    caffeinate re-parents the command rather than wrapping it, so process
-    ancestry cannot be asserted on portably. What is checked here is the
-    decision the wrapper records; that it holds a real PreventUserIdleSystem
-    assertion was verified out-of-band with `pmset -g assertions`.
+      06:51:09  DarkWake        <- launchd woke the machine to run the job
+      06:51:54  powerd TimedOut InternalPreventSleep
+                "com.apple.powermanagement.acwakelinger" 00:00:45
+                Summary- [System: PrevIdle] Using AC
+      07:09:20  attempt 1 fails -> 113/470
+
+    caffeinate -i asserts PreventUserIdleSystemSleep, which stops sleep caused
+    by the *idle timeout*. This is not an idle timeout, so PrevIdle was held
+    and the machine slept through it. -s is the assertion that prevents system
+    sleep outright, and is valid on AC.
+
+    The first attempt also wrapped only the download, leaving the backoff
+    exposed: a 300s wait stretched to 40 minutes because the machine suspended
+    inside it. So the assertion has to cover the whole script, which is what
+    re-exec gives -- not one subprocess of it.
     """
     log = tmp_path / "out.log"
     stub = tmp_path / "run_pipeline.sh"
@@ -180,9 +186,28 @@ def test_the_run_holds_off_idle_sleep(tmp_path: Path) -> None:
     assert res.returncode == 0, res.stderr
     text = log.read_text()
     if shutil.which("caffeinate"):
-        assert "caffeinate -i holding off idle sleep" in text, text
+        assert "caffeinate -s" in text, text
+        assert "PrevIdle" not in text, "still describing the idle-only assertion"
     else:
         assert "no caffeinate" in text, text
+
+
+def test_the_reexec_does_not_loop(tmp_path: Path) -> None:
+    """Re-exec guards on an env var. If the guard fails the script calls itself
+    forever, which on a scheduled job is far worse than the bug it fixes."""
+    log = tmp_path / "out.log"
+    stub = tmp_path / "run_pipeline.sh"
+    stub.write_text('#!/bin/bash\necho "Portfolio updated"\n')
+    stub.chmod(0o755)
+    res = subprocess.run(
+        ["bash", str(CRON)],
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "PIPELINE_CMD": str(stub), "RETRY_WAIT": "0",
+             "LOG_FILE": str(log)},
+    )
+    assert res.returncode == 0
+    # Exactly one run's worth of attempt lines, not one per re-exec.
+    assert log.read_text().count("attempt 1/") == 1, log.read_text()
 
 
 def test_a_missing_caffeinate_does_not_break_the_run(tmp_path: Path) -> None:

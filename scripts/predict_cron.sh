@@ -43,25 +43,35 @@ TRANSIENT='DownloadCoverageError|Too Many Requests|rate.?limit|Connection|Timeou
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
 
-# Hold off idle sleep for the duration of the download.
+# Keep the system awake for the whole run, not just the download.
 #
-# This machine suspends after ~45s idle and wakes for ~3s. A 470-ticker
-# download cannot finish through that -- connections drop and the result looks
-# exactly like a vendor that served a fraction of the universe. Every scheduled
-# attempt over 2026-09-16..19 returned 15-26% of current members, at three
-# batch sizes and two times of day; every run started by hand returned 470/470.
-# The difference was never the batch or the hour, both of which were read as
-# causes and were wrong. It was that a person at the keyboard kept the machine
-# awake.
+# launchd wakes a sleeping Mac into *DarkWake*, a maintenance window with a
+# 45-second budget. When it expires the machine sleeps again mid-download, and
+# a 470-ticker request comes back a fraction complete -- indistinguishable from
+# a throttled vendor, which is why this read as throttling at three batch sizes
+# and two times of day before the power log named it:
 #
-# -i holds off idle sleep only. A lid close or an explicit sleep still wins,
-# which is correct: this should not keep a laptop awake in a bag.
+#   06:51:09  DarkWake        <- launchd woke the machine to run the job
+#   06:51:54  powerd TimedOut InternalPreventSleep
+#             "com.apple.powermanagement.acwakelinger" 00:00:45
+#             Summary- [System: PrevIdle] Using AC
+#   07:09:20  attempt 1 fails -> 113/470
 #
-# macOS-only, so it is optional. Without it the run still happens, just exposed
-# to the suspend it cannot survive -- degraded, not dead. CI is Linux.
-CAFFEINATE=()
-if command -v caffeinate >/dev/null 2>&1; then
-  CAFFEINATE=(caffeinate -i)
+# The first attempt at this used `caffeinate -i`, which asserts
+# PreventUserIdleSystemSleep: it stops sleep caused by the *idle timeout*. The
+# line above is not an idle timeout, so PrevIdle was held and the machine slept
+# through it regardless. -s prevents system sleep outright and is valid on AC,
+# which is what a scheduled overnight job runs on.
+#
+# It also wrapped only the pipeline call, leaving the backoff exposed: a 300s
+# wait stretched to 40 minutes because the machine suspended inside it. So the
+# assertion covers the whole script via re-exec, not one subprocess of it.
+#
+# macOS-only, so it stays optional -- without it the run still happens and the
+# log says so. CI is Linux. The env guard is what stops the re-exec recursing.
+if [[ -z "${PREDICT_CRON_CAFFEINATED:-}" ]] && command -v caffeinate >/dev/null 2>&1; then
+  export PREDICT_CRON_CAFFEINATED=1
+  exec caffeinate -s "$0" "$@"
 fi
 
 attempt=0
@@ -69,13 +79,12 @@ for size in $BATCH_SIZES; do
   attempt=$((attempt + 1))
   [[ $attempt -gt $MAX_ATTEMPTS ]] && break
 
-  if [[ ${#CAFFEINATE[@]} -gt 0 ]]; then
-    log "attempt $attempt/$MAX_ATTEMPTS (batch size $size, caffeinate -i holding off idle sleep)"
+  if [[ -n "${PREDICT_CRON_CAFFEINATED:-}" ]]; then
+    log "attempt $attempt/$MAX_ATTEMPTS (batch size $size, under caffeinate -s)"
   else
-    log "attempt $attempt/$MAX_ATTEMPTS (batch size $size, no caffeinate: idle sleep may truncate the download)"
+    log "attempt $attempt/$MAX_ATTEMPTS (batch size $size, no caffeinate: a suspend may truncate the download)"
   fi
-  out="$(PREDICT_BATCH_SIZE="$size" ${CAFFEINATE[@]+"${CAFFEINATE[@]}"} \
-        "$PIPELINE_CMD" predict --confirm 2>&1)"
+  out="$(PREDICT_BATCH_SIZE="$size" "$PIPELINE_CMD" predict --confirm 2>&1)"
   rc=$?
   echo "$out" >> "$LOG_FILE"
 
