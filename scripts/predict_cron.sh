@@ -8,11 +8,14 @@
 #
 # The guard was right to stop -- a partial download silently changes the traded
 # universe and every cross-sectional feature computed from it -- but the run was
-# then simply lost until someone read the log. Yahoo throttles large batches.
+# then simply lost until someone read the log.
 #
-# So: retry, and lower the batch size each time, which is the remedy the error
-# message itself names. Retrying an identical request against a vendor that is
-# throttling is a slower way to get the same answer.
+# The partial download was read as vendor throttling for two weeks. It was not:
+# launchd runs jobs with 256 file descriptors and yfinance needs far more, so
+# most connections failed and the frame came back a quarter full. See the
+# ulimit block below for the experiment that settled it. The batch ladder below
+# is a leftover from that misreading and is kept only because a genuinely
+# throttled vendor is still possible; it has never been what fixed a run.
 #
 # Only *transient* failures are retried. A missing model or a bad flag will
 # return the same error on the third attempt, so it fails once and says so.
@@ -43,6 +46,30 @@ TRANSIENT='DownloadCoverageError|Too Many Requests|rate.?limit|Connection|Timeou
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
 
+# Raise the file-descriptor limit before anything opens a socket.
+#
+# This is the cause of every failed scheduled run. launchd starts jobs with
+# `maxfiles 256`; an interactive shell here has 1048576. yfinance opens many
+# concurrent connections to fetch 470 tickers, and under 256 descriptors most
+# of them fail. The partial frame is indistinguishable from a throttled
+# vendor, which is why it was misread four times -- as batch size, as time of
+# day, as idle sleep, and as DarkWake. Every manual run succeeded for one
+# reason: a shell's limit is four orders of magnitude higher.
+#
+# Proven by controlled experiment, not inference. Same shell, same minute,
+# same network, only ulimit changed:
+#
+#   ulimit -n 1048576  ->  470/470  (100.0%)
+#   ulimit -n 256      ->  115/470  ( 24.5%)
+#
+# and a launchd kickstart at 08:24 returned 97/470 four minutes after a manual
+# run returned 470/470.
+#
+# Best effort: a hard limit below the target must degrade rather than abort.
+# The run is still worth attempting, and the coverage guard rejects a short
+# download regardless.
+ulimit -n 8192 2>/dev/null || ulimit -n unlimited 2>/dev/null || true
+
 # Keep the system awake for the whole run, not just the download.
 #
 # launchd wakes a sleeping Mac into *DarkWake*, a maintenance window with a
@@ -69,6 +96,7 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
 #
 # macOS-only, so it stays optional -- without it the run still happens and the
 # log says so. CI is Linux. The env guard is what stops the re-exec recursing.
+
 if [[ -z "${PREDICT_CRON_CAFFEINATED:-}" ]] && command -v caffeinate >/dev/null 2>&1; then
   export PREDICT_CRON_CAFFEINATED=1
   exec caffeinate -s "$0" "$@"

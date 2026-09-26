@@ -227,3 +227,62 @@ def test_a_missing_caffeinate_does_not_break_the_run(tmp_path: Path) -> None:
              "PATH": f"{fake_bin}:/usr/bin:/bin"},
     )
     assert res.returncode == 0, f"no caffeinate broke the run: {res.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# File descriptors
+# ---------------------------------------------------------------------------
+
+
+def test_the_run_raises_the_file_descriptor_limit(tmp_path: Path) -> None:
+    """The actual cause of every failed scheduled run.
+
+    launchd starts jobs with `maxfiles 256`; an interactive shell here has
+    1048576. yfinance opens many concurrent connections to fetch 470 tickers,
+    and under 256 descriptors most of them fail. The partial frame that comes
+    back is indistinguishable from a throttled vendor, which is why this was
+    misdiagnosed four times -- as batch size, as time of day, as idle sleep,
+    and as DarkWake. Every manual run succeeded because a shell's limit is
+    four orders of magnitude higher.
+
+    Proven by controlled experiment rather than inference: same shell, same
+    minute, same network, only `ulimit -n` changed.
+
+        ulimit -n 1048576  ->  470/470  (100.0%)
+        ulimit -n 256      ->  115/470  ( 24.5%)
+
+    and launchd kickstart at 08:24 returned 97/470 four minutes after a manual
+    run returned 470/470.
+    """
+    seen = tmp_path / "fds"
+    stub = tmp_path / "run_pipeline.sh"
+    stub.write_text(f'#!/bin/bash\nulimit -n > {seen}\necho "Portfolio updated"\n')
+    stub.chmod(0o755)
+    # Start from launchd's soft limit, not the test runner's. Inheriting a
+    # shell's 1048576 would make this pass without the fix.
+    res = subprocess.run(
+        ["bash", "-c", f"ulimit -Sn 256; exec bash {CRON}"],
+        capture_output=True, text=True,
+        env={**os.environ, "PIPELINE_CMD": str(stub), "RETRY_WAIT": "0",
+             "LOG_FILE": str(tmp_path / "out.log")},
+    )
+    assert res.returncode == 0, res.stderr
+    got = seen.read_text().strip()
+    assert got == "unlimited" or int(got) >= 4096, (
+        f"download ran with only {got} file descriptors; 256 (the launchd "
+        "default) truncates the universe to ~25%")
+
+
+def test_an_unraisable_limit_does_not_kill_the_run(tmp_path: Path) -> None:
+    """A hard limit below the target must degrade, not abort. The run is still
+    worth attempting, and the guard will reject a short download anyway."""
+    stub = tmp_path / "run_pipeline.sh"
+    stub.write_text('#!/bin/bash\necho "Portfolio updated"\n')
+    stub.chmod(0o755)
+    res = subprocess.run(
+        ["bash", "-c", f"ulimit -Hn 128 2>/dev/null; exec bash {CRON}"],
+        capture_output=True, text=True,
+        env={**os.environ, "PIPELINE_CMD": str(stub), "RETRY_WAIT": "0",
+             "LOG_FILE": str(tmp_path / "out.log")},
+    )
+    assert res.returncode == 0, f"a low hard limit aborted the run: {res.stderr}"
