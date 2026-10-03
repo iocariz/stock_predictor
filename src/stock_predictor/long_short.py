@@ -89,6 +89,30 @@ class LongShortConfig:
     sizing, and needs one liquid instrument instead of heavier single-name
     shorts. ``None`` or 0 disables it, and the default is disabled: an
     unhedged book is a defensible choice, an unstated one is not."""
+    sector_neutral: bool = False
+    """Balance long and short names inside each sector, not just overall.
+
+    Dollar-neutral is not sector-neutral. Taking the top and bottom decile of
+    one global ranking nets to zero in total and to nothing underneath. On the
+    live book of 2026-10-02 the sum of absolute net sector exposure was **92%
+    of gross**, dominated by Information Technology at +31.6% and Financials
+    at -23.6% -- a long-Tech short-Financials trade wearing a stock-selection
+    label. It follows from the model ranking volatility positively: high-vol
+    tech sorts long, rate-sensitive financials and REITs sort short.
+
+    This matters because the alpha t-stat divides by *residual* risk. Beta is
+    already controlled for in CAPM alpha, which is why ``hedge_beta`` moved
+    total vol (11.2% -> 5.5%) while leaving residual risk slightly worse
+    (7.1% -> 7.6%): all cost, no significance. Sector tilt is uncompensated
+    residual risk and sits in the denominator the t-stat actually uses.
+
+    A sector too thin to field both sides is skipped rather than half-traded;
+    trading one side of it would reintroduce the exposure this removes. The
+    capital it would have taken is spread over the sectors that did trade, so
+    gross still matches ``long_weight``/``short_weight``.
+
+    Requires a ``sector`` column on the scored panel. Default off: every
+    recorded result in this project was produced without it."""
     reject_stale_fills: bool = True
     """Refuse to trade a name with no quote on the rebalance session.
 
@@ -160,14 +184,60 @@ def target_book(
     n_side = int(len(ranked) * config.decile)
     if n_side < config.min_names_per_side:
         return {}
-    longs = ranked.head(n_side)["ticker"].tolist()
-    shorts = ranked.tail(n_side)["ticker"].tolist()
+    if config.sector_neutral:
+        longs, shorts = _sector_balanced_sides(ranked, config, n_side)
+    else:
+        longs = ranked.head(n_side)["ticker"].tolist()
+        shorts = ranked.tail(n_side)["ticker"].tolist()
+    if not longs or not shorts:
+        return {}
     long_each = config.long_weight * capital / len(longs)
     short_each = config.short_weight * capital / len(shorts)
     book = {t: long_each for t in longs}
     for t in shorts:
         book[t] = book.get(t, 0.0) - short_each
     return book
+
+
+def _sector_balanced_sides(
+    ranked: pd.DataFrame, config: LongShortConfig, n_side: int,
+) -> tuple[list[str], list[str]]:
+    """Equal long and short counts inside every sector.
+
+    Each sector contributes the same number of names to both sides, so it nets
+    to zero and the book does too. Within a sector the ranking still decides
+    which names go where -- neutrality is not a licence to stop reading the
+    signal.
+
+    Per-sector depth is proportional to the sector's share of the universe, so
+    a small sector is not given the same weight as a large one. A sector that
+    cannot field at least one name per side is skipped: trading one side of it
+    would put back the exposure this is removing. The remaining sectors are
+    sized off the names actually selected, so skipping does not quietly leave
+    the book under its configured gross.
+    """
+    if "sector" not in ranked.columns:
+        raise ValueError(
+            "sector_neutral needs a 'sector' column on the scored panel; "
+            "building a concentrated book instead would be the silent failure "
+            "this setting exists to prevent"
+        )
+    longs: list[str] = []
+    shorts: list[str] = []
+    total = len(ranked)
+    # Sorted for determinism: the same panel must produce the same book.
+    for sector, grp in sorted(ranked.groupby("sector", observed=True),
+                              key=lambda kv: str(kv[0])):
+        # Proportional depth, at least one per side, and never more than the
+        # sector can supply without the two sides overlapping.
+        want = max(1, round(n_side * len(grp) / total))
+        k = min(want, len(grp) // 2)
+        if k < 1:
+            continue
+        ordered = grp.sort_values("prob", ascending=False)["ticker"].tolist()
+        longs.extend(ordered[:k])
+        shorts.extend(ordered[-k:])
+    return longs, shorts
 
 
 def run_long_short_backtest(
