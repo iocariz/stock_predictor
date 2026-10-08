@@ -47,6 +47,21 @@ cannot: a ticker that IPO'd in 2015 legitimately has no 2010 rows, and
 comparing against requested dates alone would refetch it forever."""
 
 DEFAULT_END_TOLERANCE_DAYS = 7
+
+DEAD_TICKER_GAP_DAYS = 30
+"""A cached frame whose own last print is this far inside its fetched window
+belongs to a company that stopped trading, and no refetch will extend it.
+
+The end tolerance above asks whether the cached end is close enough to the
+requested end. That is the right question for a live ticker and a meaningless
+one for a dead company: AABA last printed 2019-11-06 and ACS 2011-02-14, and
+asking Tiingo for 2026 data will not change either. Moving the requested end
+by 22 days marked 283 of 324 cached names stale, the run tried to refetch all
+of them, hit the quota after 50, and completed on 657 of 837 tickers -- a
+survivorship gap of 150/334 where the previous run had 65/334. That gap
+flatters results, so the degraded panel reported alpha +8.7% (t 2.37) against
+the complete panel's +2.2% (t 0.31), and the difference was nearly read as a
+finding about the strategy rather than about the download."""
 """How far behind the requested end a cached file may sit and still be used.
 
 Requests default to "today", so comparing the end date exactly expired every
@@ -191,6 +206,15 @@ class HybridProvider:
                 return False
             if cached_end >= wanted_end:
                 return True
+            # A company that stopped printing inside the fetched window has no
+            # more data to serve, so the requested end is irrelevant to it.
+            # Checked against the frame's own last date rather than the
+            # manifest, because the manifest records what was *asked for*.
+            if not df.empty and "date" in df.columns:
+                own_last = pd.to_datetime(df["date"], errors="coerce").max()
+                if (pd.notna(own_last)
+                        and (cached_end - own_last).days > DEAD_TICKER_GAP_DAYS):
+                    return True
             return (wanted_end - cached_end).days <= self.end_tolerance_days
         # Legacy file written before the manifest existed. Its own dates are a
         # conservative lower bound on what was requested, so a sub-range of the

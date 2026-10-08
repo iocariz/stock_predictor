@@ -234,3 +234,89 @@ def test_placeholder_columns_do_not_duplicate_recovered_tickers(tmp_path) -> Non
     assert not adj.columns.duplicated().any()
     assert not vol.columns.duplicated().any()
     assert adj["DEAD"].notna().sum() == 6, "Tiingo data must win over the placeholder"
+
+
+# ---------------------------------------------------------------------------
+# A dead company's history does not go stale
+# ---------------------------------------------------------------------------
+
+
+def _seed_cache(cache_dir, ticker: str, last: str, cached_end: str,
+                start: str = "2010-01-01") -> None:
+    """A cached ticker whose own data stops at *last*, fetched for *cached_end*."""
+    import json
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    dates = pd.bdate_range("2010-01-04", last)
+    pd.DataFrame({
+        "date": dates,
+        "open": 10.0, "high": 10.0, "low": 10.0,
+        "close": 10.0, "adj_close": 10.0, "volume": 100,
+    }).to_parquet(cache_dir / f"{ticker}.parquet", index=False)
+    (cache_dir / "_manifest.json").write_text(json.dumps({ticker: {
+        "start": start, "end": cached_end, "empty": False,
+        "schema": 1, "fetched": "2026-09-07T00:00:00+00:00",
+    }}))
+
+
+def test_a_delisted_ticker_is_not_refetched_when_the_calendar_moves(tmp_path) -> None:
+    """The defect that corrupted a 7.7-year walk-forward.
+
+    ``end_tolerance_days`` is 7: a cached entry answers a request whose end is
+    within a week of the cached end. That is right for a live ticker and
+    meaningless for a dead one. AABA last printed 2019-11-06 and ACS 2011-02-14;
+    no refetch will ever extend them, yet asking for a 22-day-later end marked
+    283 of 324 cached names stale. The run tried to refetch them all, hit the
+    Tiingo quota after 50, and carried on with 657 of 837 tickers -- a
+    survivorship gap of 150/334 against the 65/334 of the run before it.
+
+    The gap flatters results, so the degraded panel reported alpha +8.7%
+    (t 2.37) where the complete one reported +2.2% (t 0.31), and the
+    difference was read as a finding about the strategy.
+    """
+    yf = _FakeYF([])
+    _seed_cache(tmp_path / "c", "AABA", last="2019-11-06",
+                cached_end="2026-09-11")
+    p = HybridProvider(tiingo_api_key="k", cache_dir=tmp_path / "c")
+    with patch.object(p, "_yf", yf), \
+         patch.object(p, "_fetch_one", side_effect=AssertionError("refetched")):
+        got = p.fetch_missing(["AABA"], "2010-01-01", "2026-10-03")
+    assert "AABA" in got, "a dead ticker's cached history was not served"
+
+
+def test_a_live_ticker_is_still_refetched_when_the_end_moves(tmp_path) -> None:
+    """The tolerance must keep working for names that still trade, or the
+    cache starts serving stale prices for the book it marks."""
+    _seed_cache(tmp_path / "c", "AAPL", last="2026-09-10",
+                cached_end="2026-09-11")
+    p = HybridProvider(tiingo_api_key="k", cache_dir=tmp_path / "c")
+    calls: list[str] = []
+
+    def _fetch(t, start, end):
+        calls.append(t)
+        return pd.DataFrame({"date": pd.bdate_range("2010-01-04", "2026-10-02"),
+                             "adj_close": 1.0})
+
+    with patch.object(p, "_yf", _FakeYF([])), \
+         patch.object(p, "_fetch_one", side_effect=_fetch):
+        p.fetch_missing(["AAPL"], "2010-01-01", "2026-10-03")
+    assert calls == ["AAPL"], "a live ticker was served from a stale cache"
+
+
+def test_a_dead_ticker_is_still_refetched_for_earlier_history(tmp_path) -> None:
+    """Dead is not a licence to ignore the start date. A cache fetched from
+    2015 cannot answer a request reaching back to 2010."""
+    _seed_cache(tmp_path / "c", "AABA", last="2019-11-06",
+                cached_end="2026-09-11", start="2015-01-01")
+    p = HybridProvider(tiingo_api_key="k", cache_dir=tmp_path / "c")
+    calls: list[str] = []
+
+    def _fetch(t, start, end):
+        calls.append(t)
+        return pd.DataFrame({"date": pd.bdate_range("2010-01-04", "2019-11-06"),
+                             "adj_close": 1.0})
+
+    with patch.object(p, "_yf", _FakeYF([])), \
+         patch.object(p, "_fetch_one", side_effect=_fetch):
+        p.fetch_missing(["AABA"], "2010-01-01", "2026-10-03")
+    assert calls == ["AABA"], "missing early history was served from cache"
