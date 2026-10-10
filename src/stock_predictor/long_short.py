@@ -62,6 +62,24 @@ class LongShortConfig:
     Setting both to 1.0 reproduces the raw decile spread at 2.0x gross."""
     rebalance_every: int = 63
     """Sessions between full reconstitutions; match the label horizon."""
+    rebalance_offset: int = 0
+    """Sessions to delay the first rebalance by, in [0, rebalance_every).
+
+    The grid is anchored at the panel's first session, so ``rebalance_every``
+    at 63 picks one of 63 possible schedules and the other 62 go unmeasured.
+    The README says to "always sweep rebalance-schedule offsets"; this is what
+    makes that possible.
+
+    It is not a tuning knob. Sweeping it measures how much of a result is the
+    schedule rather than the signal. The gap showed up as two runs disagreeing
+    on the same window: the 2025-2026 slice of a 2019-anchored panel took 8
+    rebalances and reported alpha +12.9%, a 2025-anchored run took 7 and
+    reported +2.2%. Same engine and universe, different anchor dates, so they
+    were trading different books -- and the difference was nearly attributed to
+    survivorship.
+
+    Default 0, which is the schedule every recorded result in this project was
+    produced on."""
     slippage_bps: float = 5.0
     commission_per_share: float = 0.0
     commission_per_order: float = 0.0
@@ -116,6 +134,13 @@ class LongShortConfig:
             raise ValueError("long_weight and short_weight must be >= 0")
         if self.rebalance_every < 1:
             raise ValueError("rebalance_every must be >= 1")
+        if not 0 <= self.rebalance_offset < self.rebalance_every:
+            # A full-period offset is the next schedule, not a new one, so
+            # accepting it would double-count a row in a sweep.
+            raise ValueError(
+                f"rebalance_offset must be in [0, {self.rebalance_every}), "
+                f"got {self.rebalance_offset}"
+            )
         if self.short_borrow_annual < 0:
             raise ValueError("short_borrow_annual must be >= 0")
         if self.min_names_per_side < 1:
@@ -237,7 +262,9 @@ def run_long_short_backtest(
     # Signal sessions; the fill lands on the *next* session, matching the
     # long-only engines. Trading on the signal-day close would use the very
     # bar the score was computed from.
-    signal_idx = set(range(0, n_days - 1, config.rebalance_every))
+    signal_idx = set(
+        range(config.rebalance_offset, n_days - 1, config.rebalance_every)
+    )
     rf_daily = daily_risk_free(config.risk_free_rate)
     borrow_daily = config.short_borrow_annual / TRADING_DAYS
 
