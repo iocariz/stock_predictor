@@ -1475,6 +1475,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     ls.add_argument("--per-name-borrow", action="store_true",
                     dest="per_name_borrow",
                     help="Charge borrow per position instead of one flat rate")
+    ls.add_argument("--sector-neutral", action="store_true",
+                    dest="sector_neutral",
+                    help="Balance long and short names inside each sector. "
+                         "Dollar-neutral is not sector-neutral: the live book "
+                         "carried 92%% of gross as net sector exposure, +31.6%% "
+                         "Tech against -23.6%% Financials. Needs a 'sector' "
+                         "column on the scored panel")
     ls.add_argument("--hedge-beta", type=float, default=None, dest="hedge_beta",
                     help="Short this much benchmark exposure as an overlay. "
                          "Dollar-neutral is not market-neutral: this book "
@@ -1745,6 +1752,7 @@ def main() -> None:
             commission_per_order=args.commission_per_order,
             short_borrow_annual=args.short_borrow_annual,
             per_name_borrow=args.per_name_borrow,
+            sector_neutral=args.sector_neutral,
             hedge_beta=args.hedge_beta,
             reject_stale_fills=not args.allow_stale_fills,
             risk_free_rate=args.rf_rate if args.rf_rate is not None else 0.045,
