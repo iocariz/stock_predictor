@@ -320,3 +320,104 @@ def test_a_dead_ticker_is_still_refetched_for_earlier_history(tmp_path) -> None:
          patch.object(p, "_fetch_one", side_effect=_fetch):
         p.fetch_missing(["AABA"], "2010-01-01", "2026-10-03")
     assert calls == ["AABA"], "missing early history was served from cache"
+
+
+# ---------------------------------------------------------------------------
+# A failure to ask is not a vendor answer
+# ---------------------------------------------------------------------------
+
+
+def _manifest(cache_dir) -> dict:
+    import json
+    from pathlib import Path
+
+    f = Path(cache_dir) / "_manifest.json"
+    return json.loads(f.read_text()) if f.exists() else {}
+
+
+def test_a_network_error_is_not_cached_as_absent(tmp_path) -> None:
+    """The defect that quietly biases a panel toward survivors.
+
+    ``_fetch_one`` returns an empty frame on *any* failure, and the caller
+    records ``empty: bool(df.empty)``. So a read timeout becomes "the vendor
+    has no data for this ticker" and sticks for ``empty_ttl_days``.
+
+    Measured during a cache warming run: six names timed out and were all
+    written as absent. Five returned full history on a clean refetch -- GHC,
+    PBI and TFX with 4217 rows each. Five of 334 departed members were about
+    to be dropped from a survivorship audit because of transient socket
+    errors, in the direction that flatters results.
+    """
+    p = _provider([], tmp_path)
+    with patch.object(p, "_get_session") as sess:
+        sess.return_value.get.side_effect = OSError("read timed out")
+        p.fetch_missing(["GHC"], "2010-01-01", "2026-10-31")
+    entry = _manifest(tmp_path).get("GHC")
+    assert not (entry or {}).get("empty"), (
+        "a transient network failure was recorded as a vendor absence")
+
+
+def test_a_server_error_is_not_cached_as_absent(tmp_path) -> None:
+    """A 500 means the vendor failed to answer, not that it has nothing."""
+    p = _provider([], tmp_path)
+    resp = type("R", (), {"status_code": 500, "json": lambda self: []})()
+    with patch.object(p, "_get_session") as sess:
+        sess.return_value.get.return_value = resp
+        p.fetch_missing(["PBI"], "2010-01-01", "2026-10-31")
+    entry = _manifest(tmp_path).get("PBI")
+    assert not (entry or {}).get("empty"), "a 5xx was recorded as a vendor absence"
+
+
+def test_an_auth_failure_is_not_cached_as_absent(tmp_path) -> None:
+    """A bad key would otherwise mark the entire universe absent in one pass,
+    and the TTL would keep it that way for a week."""
+    p = _provider([], tmp_path)
+    resp = type("R", (), {"status_code": 401, "json": lambda self: []})()
+    with patch.object(p, "_get_session") as sess:
+        sess.return_value.get.return_value = resp
+        p.fetch_missing(["AAA", "BBB"], "2010-01-01", "2026-10-31")
+    man = _manifest(tmp_path)
+    assert not any((man.get(t) or {}).get("empty") for t in ("AAA", "BBB")), (
+        "an auth failure marked tickers as absent at the vendor")
+
+
+def test_a_404_is_cached_as_absent(tmp_path) -> None:
+    """The genuine case must still be recorded, or every pass re-asks for
+    symbols the vendor really does not carry and never converges."""
+    p = _provider([], tmp_path)
+    resp = type("R", (), {"status_code": 404, "json": lambda self: []})()
+    with patch.object(p, "_get_session") as sess:
+        sess.return_value.get.return_value = resp
+        p.fetch_missing(["NOSUCH"], "2010-01-01", "2026-10-31")
+    assert _manifest(tmp_path)["NOSUCH"]["empty"] is True
+
+
+def test_an_empty_200_is_cached_as_absent(tmp_path) -> None:
+    """The vendor answering "I have no rows for this" is an answer."""
+    p = _provider([], tmp_path)
+    resp = type("R", (), {"status_code": 200, "json": lambda self: []})()
+    with patch.object(p, "_get_session") as sess:
+        sess.return_value.get.return_value = resp
+        p.fetch_missing(["MNK"], "2010-01-01", "2026-10-31")
+    assert _manifest(tmp_path)["MNK"]["empty"] is True
+
+
+def test_a_failed_ticker_is_retried_on_the_next_pass(tmp_path) -> None:
+    """Not caching the failure is only half of it: the next pass has to try
+    again, which is what makes a resumable warming loop converge."""
+    p = _provider([], tmp_path)
+    with patch.object(p, "_get_session") as sess:
+        sess.return_value.get.side_effect = OSError("read timed out")
+        p.fetch_missing(["GHC"], "2010-01-01", "2026-10-31")
+    calls = []
+
+    def _ok(url, params=None, timeout=None):
+        calls.append(url)
+        return type("R", (), {"status_code": 200,
+                              "json": lambda self: _tiingo_rows(30)})()
+
+    with patch.object(p, "_get_session") as sess:
+        sess.return_value.get.side_effect = _ok
+        got = p.fetch_missing(["GHC"], "2010-01-01", "2026-10-31")
+    assert calls, "the failed ticker was not retried"
+    assert "GHC" in got and len(got["GHC"]) == 30

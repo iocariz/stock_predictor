@@ -136,7 +136,7 @@ class HybridProvider:
                 )
             except Exception as exc:  # noqa: BLE001 - one symbol must not kill the run
                 print(f"    Tiingo {ticker}: {type(exc).__name__}: {exc}")
-                return pd.DataFrame()
+                raise TiingoUnavailable(ticker) from exc
             if resp.status_code == 200:
                 rows = resp.json()
                 if not rows:
@@ -155,8 +155,15 @@ class HybridProvider:
                     time.sleep(wait)
                     continue
                 raise TiingoRateLimited(ticker)
-            return pd.DataFrame()
-        return pd.DataFrame()
+            if resp.status_code == 404:
+                # The vendor does not carry this symbol. An answer, so it is
+                # cached and not re-asked inside the TTL.
+                return pd.DataFrame()
+            # 5xx, 401, 400: the request failed. Recording absence here would
+            # mark the whole universe absent on one bad key.
+            print(f"    Tiingo {ticker}: HTTP {resp.status_code}")
+            raise TiingoUnavailable(ticker)
+        raise TiingoUnavailable(ticker)
 
     # -- cache bookkeeping -------------------------------------------------
 
@@ -232,6 +239,7 @@ class HybridProvider:
         end_key = str(end) if end else datetime.now(timezone.utc).strftime("%Y-%m-%d")
         manifest = self._read_manifest()
         out: dict[str, pd.DataFrame] = {}
+        unavailable: list[str] = []
         fetched = 0
         for i, t in enumerate(sorted(set(tickers)), 1):
             cached = self.cache_dir / f"{t}.parquet"
@@ -243,6 +251,11 @@ class HybridProvider:
                     continue
             try:
                 df = self._fetch_one(t, start, end)
+            except TiingoUnavailable:
+                # Left out of the cache and the manifest entirely, so the next
+                # pass asks again rather than inheriting a false absence.
+                unavailable.append(t)
+                continue
             except TiingoRateLimited:
                 print(f"  Tiingo daily/hourly limit reached after {fetched} new "
                       f"tickers ({i - 1}/{len(set(tickers))} considered). "
@@ -265,6 +278,13 @@ class HybridProvider:
         if fetched:
             print(f"  Tiingo: fetched {fetched} new tickers, "
                   f"{len(out)} of {len(set(tickers))} recovered")
+        if unavailable:
+            # Said out loud: these are not absences, and a run that treats
+            # them as such reports a smaller survivorship gap than it has.
+            print(f"  Tiingo could not be asked for {len(unavailable)} ticker(s); "
+                  f"left uncached for the next pass: "
+                  f"{', '.join(sorted(unavailable)[:8])}"
+                  + (" …" if len(unavailable) > 8 else ""))
         return out
 
     # -- Provider protocol -------------------------------------------------
@@ -311,6 +331,25 @@ class HybridProvider:
 
     def download_benchmark(self, ticker: str, start: str, end: str) -> pd.Series:
         return self._yf.download_benchmark(ticker, start, end)
+
+
+class TiingoUnavailable(RuntimeError):
+    """The vendor could not be asked -- not an answer about the ticker.
+
+    ``_fetch_one`` used to return an empty frame for every failure, and the
+    caller recorded ``empty: bool(df.empty)``, so a read timeout became "the
+    vendor has no data for this ticker" and stuck for ``empty_ttl_days``.
+
+    Measured during a cache warming run: six names timed out and were all
+    written as absent; five returned full history on a clean refetch, GHC, PBI
+    and TFX with 4217 rows each. Five of 334 departed members were about to be
+    dropped from a survivorship audit because of transient socket errors --
+    and in the direction that flatters results, since the names a vendor drops
+    are disproportionately the failures.
+
+    An absence is only recorded for an answer: HTTP 200 with no rows, or a 404.
+    Everything else raises this and is left uncached, so the next pass retries.
+    """
 
 
 class TiingoRateLimited(RuntimeError):
