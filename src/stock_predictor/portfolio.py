@@ -49,6 +49,20 @@ class Position:
     Without it a holding that stops being quoted — delisted, halted, or simply
     dropped by the data vendor — falls back to its entry price and can never
     register a loss, so the kill-switch cannot see it."""
+    entry_ref_price: float = 0.0
+    """The close the fill was priced from, before slippage.
+
+    The vendor back-adjusts a name's history for dividends and spin-offs after
+    it was bought; this is what that history is compared against to notice
+    (see :mod:`stock_predictor.corporate_actions`). 0 in files written before
+    it existed, which the comparison adopts on first sight."""
+    entry_ref_date: str = ""
+    """The session ``entry_ref_price`` closed on (ISO).
+
+    Not entry_date: the cohort and rank engines stamp entry_date as the next
+    session while pricing the fill from the last one, so reading the history
+    at entry_date compares the reference against the wrong day's close and
+    settles a day's return as a distribution. "" in older files."""
 
 
 @dataclass(frozen=True)
@@ -429,6 +443,7 @@ def generate_orders(
                 commission_per_order=commission_per_order,
             )
             entry_iso = entry.strftime("%Y-%m-%d")
+            fill_session = _fill_session(trading_dates, as_of)
             lots = size_targets(targets, cap_per_cohort, costs, whole_shares=True)
             # Derived from the decision, so a re-run of an unchanged signal
             # names the same cohort the same way. holding_days is part of the
@@ -447,6 +462,7 @@ def generate_orders(
                     ticker=lot.ticker, shares=shares, entry_price=lot.fill_price,
                     entry_date=entry_iso, expiry_date=expiry_iso,
                     cohort_id=cohort_id, last_price=float(lot.price),
+                    entry_ref_price=float(lot.price), entry_ref_date=fill_session,
                 ))
                 cash_used += lot.cost
 
@@ -594,6 +610,7 @@ def generate_orders_rank_hold(
         entry = next_trading_day(as_of, cal)
         if entry is not None:
             entry_iso = entry.strftime("%Y-%m-%d")
+            fill_session = _fill_session(trading_dates, as_of)
             cash_available = state.cash + cash_from_sells
             # Entry selection shares the backtest's rules: the cross-section
             # floor, the score floor and the rank offset all apply live too.
@@ -630,6 +647,7 @@ def generate_orders_rank_hold(
                     ticker=lot.ticker, shares=shares, entry_price=lot.fill_price,
                     entry_date=entry_iso, expiry_date=OPEN_ENDED_EXPIRY,
                     cohort_id=cohort_id, last_price=float(lot.price),
+                    entry_ref_price=float(lot.price), entry_ref_date=fill_session,
                 ))
                 cash_used += lot.cost
 
@@ -664,6 +682,15 @@ LONG_SHORT_COHORT = "long-short"
 """One book, not a sequence of baskets. Every position carries this id so the
 cohort machinery can tell them apart from a fixed-hold basket, and so
 :func:`active_cohort_ids` never counts them as competing for a slot."""
+
+
+def _fill_session(trading_dates, as_of: str) -> str:
+    """The session a fill is priced from: the last downloaded one at or before
+    *as_of*. Quotes come from the panel's final row, which is that session --
+    not the next one, which entry_date names in the cohort and rank engines."""
+    ts = pd.DatetimeIndex(trading_dates if trading_dates is not None else [])
+    ts = ts[ts <= pd.Timestamp(as_of)]
+    return str(ts.max().date()) if len(ts) else as_of
 
 
 def _sessions_between(trading_dates, start: str, end: str) -> int:
@@ -938,6 +965,10 @@ def generate_orders_long_short(
                             else (held.entry_date if held else priced_through)),
                 expiry_date=OPEN_ENDED_EXPIRY, cohort_id=LONG_SHORT_COHORT,
                 last_price=px,
+                entry_ref_price=(px if have == 0
+                                 else (held.entry_ref_price if held else px)),
+                entry_ref_date=(priced_through if have == 0
+                                else (held.entry_ref_date if held else priced_through)),
             )
 
     new_state = replace(

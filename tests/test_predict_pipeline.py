@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import pickle
+from dataclasses import replace
 from unittest.mock import patch
 
 import numpy as np
@@ -514,3 +515,57 @@ def test_the_unquoted_position_is_retained(rig) -> None:
     state_path = _run_gapped(rig, "--confirm")
     after = load_state(state_path)
     assert GAPPED in [p.ticker for p in after.positions], "you still own it"
+
+
+# ---------------------------------------------------------------------------
+# A held name's history is back-adjusted after it was bought
+# ---------------------------------------------------------------------------
+
+SPUN = "T11"
+
+
+class _SpinOffProvider(_FakeProvider):
+    """One held name served as a vendor serves it after a 2% dividend: the
+    whole history on the post-event scale."""
+
+    def download_equity_ohlcv(self, tickers, start, end):
+        adj, vol = super().download_equity_ohlcv(tickers, start, end)
+        if SPUN in adj.columns:
+            adj[SPUN] = 98.0
+        return adj, vol
+
+
+def test_the_daily_run_settles_a_distribution_before_it_marks(rig, capsys) -> None:
+    """The live CTVA short booked its Vylor distribution as +$911 because the
+    entry price stayed on the pre-spin scale. Wired into main(), an adjusted
+    leg is settled before marking, and the settled book is the one saved."""
+    model_path, state_path = rig
+    state = load_state(state_path)
+    held = Position(
+        ticker=SPUN, shares=10, entry_price=100.0, entry_ref_price=100.0,
+        entry_ref_date=str(DATES[-40].date()),
+        entry_date=str(DATES[-40].date()), expiry_date=str(DATES[-1].date() + pd.Timedelta(days=90)),
+        cohort_id="seed", last_price=100.0,
+    )
+    save_state(replace(state, positions=(held,)), state_path)
+    before = load_state(state_path).cash
+
+    argv = ["predict-sp500", "--model", str(model_path), "--state", str(state_path),
+            "--sample-n", str(N_TICKERS), "--skip-earnings", "--no-macro-merge",
+            "--min-coverage", "0", "--top-n", "5", "--confirm",
+            "--min-cross-section", "9999"]
+    with (
+        patch("sys.argv", argv),
+        patch.object(P, "get_provider", return_value=_SpinOffProvider()),
+        patch.object(P, "load_sp500_stints", return_value=_stints()),
+        patch("stock_predictor.training.download_sector_map", return_value=_sectors()),
+    ):
+        P.main()
+
+    after = load_state(state_path)
+    leg = next(p for p in after.positions if p.ticker == SPUN)
+    assert leg.entry_price == pytest.approx(98.0)
+    assert leg.entry_ref_price == pytest.approx(98.0)
+    assert after.cash == pytest.approx(before + 10 * 100.0 * 0.02), (
+        "the long's dividend was not credited")
+    assert "dividend" in capsys.readouterr().err
