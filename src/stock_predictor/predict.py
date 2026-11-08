@@ -15,6 +15,10 @@ from pathlib import Path
 
 import pandas as pd
 
+from stock_predictor.corporate_actions import (
+    describe_adjustments,
+    rebase_to_adjusted_history,
+)
 from stock_predictor.data_provider import DataProvider, get_provider
 from stock_predictor.execution_calendar import trading_dates_from_index
 from stock_predictor.freshness import FreshnessPolicy, check_freshness, describe
@@ -790,6 +794,16 @@ def main() -> None:
                 "or pass --allow-stale to proceed anyway."
             )
         print("  --allow-stale: proceeding anyway.", file=sys.stderr)
+
+    # Before anything is marked: the vendor may have back-adjusted a held
+    # name's history since it was bought, which puts today's print and the
+    # stored entry price on different scales. Unsettled, a spin-off reads as
+    # P&L in NAV and the kill switch -- the CTVA short booked its Vylor
+    # distribution as +$911.
+    state, adjustments = rebase_to_adjusted_history(state, adj_close)
+    if adjustments:
+        print("History adjusted since entry; settled in cash:", file=sys.stderr)
+        print(describe_adjustments(adjustments), file=sys.stderr)
 
     # Quotes come from the raw download, not the scored panel. The panel is
     # point-in-time filtered, so a departed holding has no row in it and would
