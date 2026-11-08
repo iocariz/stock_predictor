@@ -18,11 +18,13 @@ event, and only two kinds can be settled:
 
 * **distribution** (dividend, spin-off): paid in cash, as the backtest's
   total-return panel assumes. ``cash += shares * entry_price * (1 - f)`` -- a
-  long receives it, a short pays it -- and the leg's prices are scaled by
-  ``f``. The cash is the distribution scaled to the entry price rather than
+  long receives it, a short pays it -- and the entry and reference prices are
+  scaled by ``f``. ``last_price`` is taken from the history, which is already
+  on the new scale. The cash is the distribution scaled to the entry price rather than
   the pre-event close, which the history no longer contains; on a name that
   has drifted since entry the two differ by that drift.
-* **split**: no cash. Shares scale by ``1 / f`` and prices by ``f``.
+* **split**: no cash. Shares scale by ``1 / f``, entry and reference prices
+  by ``f``, and ``last_price`` comes from the history as above.
 
 The two are not distinguishable from the factor alone -- a 2:1 split and a
 spin-off worth half the parent both read 0.5 -- and settling one as the other
@@ -114,6 +116,7 @@ def _settle_distribution(
     factor: float,
     close: float,
     session: pd.Timestamp,
+    latest: float,
 ) -> tuple[Position, Adjustment]:
     cash = position.shares * position.entry_price * (1.0 - factor)
     settled = replace(
@@ -121,7 +124,7 @@ def _settle_distribution(
         entry_price=position.entry_price * factor,
         entry_ref_price=close,
         entry_ref_date=str(session.date()),
-        last_price=position.last_price * factor,
+        last_price=latest,
     )
     note = Adjustment(
         position.ticker, session, factor, DISTRIBUTION, cash, position.shares, position.shares
@@ -134,6 +137,7 @@ def _settle_split(
     factor: float,
     close: float,
     session: pd.Timestamp,
+    latest: float,
 ) -> tuple[Position, Adjustment]:
     exact = position.shares / factor
     shares = round(exact)
@@ -149,7 +153,7 @@ def _settle_split(
         entry_price=position.entry_price * factor,
         entry_ref_price=close,
         entry_ref_date=str(session.date()),
-        last_price=position.last_price * factor,
+        last_price=latest,
     )
     note = Adjustment(position.ticker, session, factor, SPLIT, 0.0, position.shares, shares)
     return settled, note
@@ -175,13 +179,18 @@ def _rebase(
     if gap <= ADJUSTMENT_TOLERANCE:
         return position, None
 
+    # last_price is refreshed from every print, so after the event it is
+    # already on the new scale and scaling it by f again is wrong (CTVA's
+    # $11.90 became $1.79). The history's own latest value is on the right
+    # scale whether or not the leg printed since.
+    latest = float(adj_close[position.ticker].dropna().iloc[-1])
     kind = confirmed.get(position.ticker)
     if kind is None and not legacy and gap < CORPORATE_ACTION_THRESHOLD:
         kind = DISTRIBUTION
     if kind == DISTRIBUTION:
-        return _settle_distribution(position, factor, close, session)
+        return _settle_distribution(position, factor, close, session, latest)
     if kind == SPLIT:
-        return _settle_split(position, factor, close, session)
+        return _settle_split(position, factor, close, session, latest)
     return position, Adjustment(position.ticker, session, factor, None)
 
 

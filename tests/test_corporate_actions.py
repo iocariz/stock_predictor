@@ -152,11 +152,19 @@ def test_the_rescale_keeps_slippage_on_the_entry_price() -> None:
     assert p.entry_price / p.entry_ref_price == pytest.approx(87.86 / 87.82)
 
 
-def test_an_unquoted_leg_has_its_last_price_rescaled_too() -> None:
-    """A stale name is marked from last_price. Rescaling the entry but not the
-    mark would move the error rather than remove it."""
+def test_an_unquoted_leg_has_its_last_price_put_on_the_new_scale() -> None:
+    """A stale name is marked from last_price. A pre-event last_price left on
+    the old scale would move the error rather than remove it."""
     new, _ = _settle_ctva(_state(_position(last=87.50)))
-    assert new.positions[0].last_price == pytest.approx(87.50 * 11.90 / 87.82)
+    assert new.positions[0].last_price == pytest.approx(11.90)
+
+
+def test_a_last_price_already_on_the_new_scale_is_not_scaled_again() -> None:
+    """The live CTVA leg: every run since the spin refreshed last_price from a
+    post-spin print. Scaling it by f again turned $11.90 into $1.79, which an
+    unquoted session would have marked the short at."""
+    new, _ = _settle_ctva(_state(_position(last=11.90)))
+    assert new.positions[0].last_price == pytest.approx(11.90)
 
 
 def test_settling_twice_is_the_same_as_once() -> None:
