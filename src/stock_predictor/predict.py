@@ -20,6 +20,11 @@ from stock_predictor.corporate_actions import (
     rebase_to_adjusted_history,
 )
 from stock_predictor.data_provider import DataProvider, get_provider
+from stock_predictor.delisting import (
+    DEFAULT_GRACE_SESSIONS,
+    DelistingPolicy,
+    load_proceeds,
+)
 from stock_predictor.execution_calendar import trading_dates_from_index
 from stock_predictor.freshness import FreshnessPolicy, check_freshness, describe
 from stock_predictor.pit import (
@@ -484,6 +489,31 @@ def parse_args() -> argparse.Namespace:
              "backtest-sp500 and LongShortConfig, so the live book never "
              "charges less than the simulation it was validated against.",
     )
+    # Named and defaulted as on backtest-sp500. Without them the live book
+    # could not be told what a delisted name paid: a short in a cash takeover
+    # (WBD, $31.0167, 2026-10-06) sat dark through 63 sessions of grace and
+    # was then covered at its last print.
+    p.add_argument(
+        "--delisting-proceeds", type=Path, default=None,
+        dest="delisting_proceeds",
+        help="long-short only: Parquet/CSV of (ticker, date, proceeds) giving "
+             "explicit disposal evidence -- a cash acquisition price, or zero "
+             "for a bankruptcy. Used in preference to any fallback, point-in-"
+             "time: a row dated after the run is ignored until it is not.",
+    )
+    p.add_argument(
+        "--delisting-fallback", choices=["write_off", "hold"], default=None,
+        dest="delisting_fallback",
+        help="long-short only: what to do with a holding still unpriceable "
+             "after the grace period (default: write_off, which covers a short "
+             "at its last print rather than at zero).",
+    )
+    p.add_argument(
+        "--delisting-grace-sessions", type=int, default=None,
+        dest="delisting_grace_sessions",
+        help="long-short only: sessions of silence tolerated before the "
+             "fallback applies (default: 63).",
+    )
     p.add_argument(
         "--exit-rank",
         type=int,
@@ -601,8 +631,45 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _delisting_inputs(args: argparse.Namespace) -> tuple[DelistingPolicy, pd.DataFrame | None]:
+    """The disposal policy and evidence, validated before anything downloads.
+
+    Only the long-short engine disposes of a dark name; the long-only engines
+    hold it. Accepting these flags there would have them silently do nothing,
+    which is how --no-benchmark once went unnoticed, so they are refused."""
+    given = [flag for flag, value in (
+        ("--delisting-proceeds", args.delisting_proceeds),
+        ("--delisting-fallback", args.delisting_fallback),
+        ("--delisting-grace-sessions", args.delisting_grace_sessions),
+    ) if value is not None]
+    if given and args.hold_mode != "long-short":
+        sys.exit(f"{', '.join(given)}: only the long-short engine disposes of "
+                 f"delisted names; --hold-mode {args.hold_mode} would ignore it.")
+    try:
+        policy = DelistingPolicy(
+            fallback=args.delisting_fallback or "write_off",
+            grace_sessions=(args.delisting_grace_sessions
+                            if args.delisting_grace_sessions is not None
+                            else DEFAULT_GRACE_SESSIONS),
+        )
+    except ValueError as exc:
+        sys.exit(f"Bad delisting policy: {exc}")
+    path = args.delisting_proceeds
+    if path is None:
+        return policy, None
+    try:
+        frame = (pd.read_parquet(path) if path.suffix.lower() == ".parquet"
+                 else pd.read_csv(path))
+        evidence = load_proceeds(frame)
+    except (OSError, ValueError) as exc:
+        sys.exit(f"--delisting-proceeds {path}: {exc}")
+    print(f"Delisting evidence from {path} ({len(evidence)} name(s))")
+    return policy, frame
+
+
 def main() -> None:
     args = parse_args()
+    delisting_policy, delisting_proceeds = _delisting_inputs(args)
     provider = get_provider(args.provider, batch_size=args.batch_size)
 
     # Load or init state
@@ -882,6 +949,8 @@ def main() -> None:
             # A tripped kill switch unwinds the book instead of re-entering it.
             allow_new=not halted,
             force=args.force_rebalance,
+            delisting_policy=delisting_policy,
+            delisting_proceeds=delisting_proceeds,
         )
     elif args.hold_mode == "rank":
         # Rank exits need the FULL ranking, not just the top of the list.

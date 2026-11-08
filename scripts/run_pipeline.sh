@@ -114,6 +114,12 @@ cd "$ROOT"
 : "${TS_CV_SPLITS:=5}"
 : "${EARNINGS_WORKERS:=8}"
 : "${EXTRA_TRAIN_ARGS:=}"
+# What delisted names actually paid -- a cash takeover's price, zero for a
+# bankruptcy -- so the live long-short book settles them at that price instead
+# of waiting out the grace period and covering at the last print. Passed to
+# predict only: handing it to backtest too would quietly change any recorded
+# backtest whose window contains one of these names. Empty disables it.
+: "${DELISTING_PROCEEDS:=data/delisting_proceeds.csv}"
 
 # Selection rules, emitted one per line so both consumers read the same list.
 # The flags below exist on backtest-sp500 and predict-sp500 alike; see
@@ -238,6 +244,13 @@ predict_daily() {
   # Unset must mean "the provider decides", not a number hardcoded here.
   local -a batch=()
   [[ -n "$PREDICT_BATCH_SIZE" ]] && batch=(--batch-size "$PREDICT_BATCH_SIZE")
+  local -a evidence=()
+  if [[ "$HOLD_MODE" == "long-short" && -n "$DELISTING_PROCEEDS" ]]; then
+    # A configured file that is missing is an error, not "no evidence": a
+    # mistyped path would otherwise disable the feature without a word.
+    [[ -f "$DELISTING_PROCEEDS" ]] || { echo "DELISTING_PROCEEDS not found: $DELISTING_PROCEEDS" >&2; return 1; }
+    evidence=(--delisting-proceeds "$DELISTING_PROCEEDS")
+  fi
   ${DRY_RUN:+echo} uv run predict-sp500 \
     --model "$MODEL" \
     --state "$STATE" \
@@ -246,6 +259,7 @@ predict_daily() {
     --hold-mode "$HOLD_MODE" \
     --max-drawdown "$MAX_DD" \
     ${batch[@]+"${batch[@]}"} \
+    ${evidence[@]+"${evidence[@]}"} \
     ${flags[@]+"${flags[@]}"} \
     ${confirm_flag[@]+"${confirm_flag[@]}"}
 }
