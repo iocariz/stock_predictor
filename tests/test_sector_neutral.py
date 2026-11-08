@@ -50,8 +50,7 @@ def _scored(spec: dict[str, int], *, with_sector: bool = True) -> pd.DataFrame:
     rows, score = [], 1000.0
     for sector, n in spec.items():
         for i in range(n):
-            rows.append({"ticker": f"{sector[:3].upper()}{i:03d}",
-                         "prob": score, "sector": sector})
+            rows.append({"ticker": f"{sector[:3].upper()}{i:03d}", "prob": score, "sector": sector})
             score -= 1.0
     df = pd.DataFrame(rows)
     return df if with_sector else df.drop(columns=["sector"])
@@ -66,8 +65,9 @@ def _by_sector(book: dict[str, float], scored: pd.DataFrame) -> dict[str, float]
 
 
 def _cfg(**kw) -> LongShortConfig:
-    base = dict(decile=0.2, long_weight=0.5, short_weight=0.5,
-                min_names_per_side=2, sector_neutral=True)
+    base = dict(
+        decile=0.2, long_weight=0.5, short_weight=0.5, min_names_per_side=2, sector_neutral=True
+    )
     base.update(kw)
     return LongShortConfig(**base)
 
@@ -124,8 +124,7 @@ def test_within_a_sector_the_best_go_long_and_the_worst_short() -> None:
     longs = sorted(t for t, v in tech.items() if v > 0)
     shorts = sorted(t for t, v in tech.items() if v < 0)
     assert longs and shorts
-    assert max(longs) < min(shorts), (
-        f"not ranked within sector: long {longs}, short {shorts}")
+    assert max(longs) < min(shorts), f"not ranked within sector: long {longs}, short {shorts}"
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +139,8 @@ def test_a_sector_too_thin_for_both_sides_is_skipped() -> None:
     scored = _scored({"Tech": 10, "Health": 10, "Utilities": 1})
     book = target_book(scored, _cfg(), CAPITAL)
     assert not [t for t in book if t.startswith("UTI")], (
-        "a one-name sector was traded on one side only")
+        "a one-name sector was traded on one side only"
+    )
 
 
 def test_skipping_a_thin_sector_does_not_shrink_gross() -> None:
@@ -177,6 +177,5 @@ def test_the_default_is_unchanged_behaviour() -> None:
     recorded result stays reproducible."""
     assert LongShortConfig().sector_neutral is False
     scored = _scored({"Tech": 10, "Health": 10}, with_sector=False)
-    book = target_book(scored, LongShortConfig(decile=0.2,
-                                               min_names_per_side=2), CAPITAL)
+    book = target_book(scored, LongShortConfig(decile=0.2, min_names_per_side=2), CAPITAL)
     assert book, "the old path stopped working"
