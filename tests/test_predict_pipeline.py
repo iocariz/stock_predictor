@@ -569,3 +569,108 @@ def test_the_daily_run_settles_a_distribution_before_it_marks(rig, capsys) -> No
     assert after.cash == pytest.approx(before + 10 * 100.0 * 0.02), (
         "the long's dividend was not credited")
     assert "dividend" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# A cash takeover, settled at its price rather than after a quarter of silence
+# ---------------------------------------------------------------------------
+
+
+def _rig_dark_short(rig, tmp_path, *, evidence_date: str | None):
+    """A long-short book short a name that has gone dark, plus an evidence
+    file saying what it was bought out for."""
+    model_path, state_path = rig
+    state = load_state(state_path)
+    last = str(DATES[-1].date())
+    dark = Position(
+        ticker=GAPPED, shares=-10, entry_price=28.0, entry_date=str(DATES[-40].date()),
+        expiry_date="9999-12-31", cohort_id="long-short", last_price=30.95,
+        sessions_unpriced=2,
+    )
+    # Signalled last session and accrued through it: nothing is due, so the
+    # only cash movement is the disposal.
+    save_state(replace(state, positions=(dark,), last_signal_date=last,
+                       last_accrual_date=last), state_path)
+    evidence = tmp_path / "proceeds.csv"
+    rows = "ticker,date,proceeds\n"
+    if evidence_date is not None:
+        rows += f"{GAPPED},{evidence_date},31.01666668\n"
+    evidence.write_text(rows)
+    return model_path, state_path, evidence
+
+
+def _run_long_short(model_path, state_path, *extra: str) -> None:
+    argv = ["predict-sp500", "--model", str(model_path), "--state", str(state_path),
+            "--sample-n", str(N_TICKERS), "--skip-earnings", "--no-macro-merge",
+            "--min-coverage", "0", "--hold-mode", "long-short", "--confirm", *extra]
+    with (
+        patch("sys.argv", argv),
+        patch.object(P, "get_provider", return_value=_GappingProvider()),
+        patch.object(P, "load_sp500_stints", return_value=_stints()),
+        patch("stock_predictor.training.download_sector_map", return_value=_sectors()),
+    ):
+        P.main()
+
+
+def test_a_bought_out_short_is_covered_at_the_deal_price(rig, tmp_path) -> None:
+    """WBD went dark on a $31.0167 cash takeover. Without evidence the live
+    book waited out 63 sessions of grace and then covered at its last print;
+    the backtest could already be told the price, the live path could not."""
+    model_path, state_path, evidence = _rig_dark_short(
+        rig, tmp_path, evidence_date=str(DATES[-3].date()))
+    before = load_state(state_path).cash
+
+    _run_long_short(model_path, state_path, "--delisting-proceeds", str(evidence))
+
+    after = load_state(state_path)
+    assert GAPPED not in [p.ticker for p in after.positions], "still short a delisted name"
+    assert after.cash == pytest.approx(before - 10 * 31.01666668, abs=0.01)
+
+
+def test_without_evidence_the_dark_short_waits_out_its_grace(rig, tmp_path) -> None:
+    model_path, state_path, evidence = _rig_dark_short(rig, tmp_path, evidence_date=None)
+    _run_long_short(model_path, state_path, "--delisting-proceeds", str(evidence))
+    assert GAPPED in [p.ticker for p in load_state(state_path).positions]
+
+
+def test_evidence_dated_after_the_run_is_not_used_yet(rig, tmp_path) -> None:
+    """Point in time: a takeover that has not closed has not paid."""
+    future = str((DATES[-1] + pd.Timedelta(days=30)).date())
+    model_path, state_path, evidence = _rig_dark_short(rig, tmp_path, evidence_date=future)
+    _run_long_short(model_path, state_path, "--delisting-proceeds", str(evidence))
+    assert GAPPED in [p.ticker for p in load_state(state_path).positions]
+
+
+def test_the_grace_period_is_configurable(rig, tmp_path) -> None:
+    """--delisting-grace-sessions 1: two dark sessions exceed it, so with no
+    evidence the short is covered at its last print rather than at zero."""
+    model_path, state_path, evidence = _rig_dark_short(rig, tmp_path, evidence_date=None)
+    before = load_state(state_path).cash
+    _run_long_short(model_path, state_path, "--delisting-grace-sessions", "1")
+    after = load_state(state_path)
+    assert GAPPED not in [p.ticker for p in after.positions]
+    assert after.cash == pytest.approx(before - 10 * 30.95, abs=0.01)
+
+
+@pytest.mark.parametrize("mode", ["fixed", "rank"])
+def test_the_long_only_engines_refuse_evidence_they_would_ignore(rig, tmp_path, mode) -> None:
+    """Neither long-only engine disposes of a dark name, so the flag would
+    have done nothing. A flag that silently does nothing is how
+    --no-benchmark went unnoticed on the long-short path."""
+    model_path, state_path = rig
+    evidence = tmp_path / "proceeds.csv"
+    evidence.write_text("ticker,date,proceeds\n")
+    argv = ["predict-sp500", "--model", str(model_path), "--state", str(state_path),
+            "--sample-n", str(N_TICKERS), "--skip-earnings", "--no-macro-merge",
+            "--min-coverage", "0", "--hold-mode", mode,
+            "--delisting-proceeds", str(evidence)]
+    with patch("sys.argv", argv), pytest.raises(SystemExit, match="long-short"):
+        P.main()
+
+
+def test_a_malformed_evidence_file_stops_the_run(rig, tmp_path) -> None:
+    model_path, state_path, _ = _rig_dark_short(rig, tmp_path, evidence_date=None)
+    bad = tmp_path / "bad.csv"
+    bad.write_text("ticker,price\nT07,31\n")
+    with pytest.raises(SystemExit, match="proceeds"):
+        _run_long_short(model_path, state_path, "--delisting-proceeds", str(bad))

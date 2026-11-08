@@ -188,8 +188,33 @@ def test_the_long_short_flags_have_one_name_across_both_clis() -> None:
     was unrunnable through the pipeline it had just been wired into.
     """
     shared = ("--decile", "--long-weight", "--short-weight",
-              "--rebalance-every", "--min-names-per-side", "--short-borrow")
+              "--rebalance-every", "--min-names-per-side", "--short-borrow",
+              "--delisting-proceeds", "--delisting-fallback",
+              "--delisting-grace-sessions")
     predict, backtest = _accepted("predict-sp500"), _accepted("backtest-sp500")
     missing = [f for f in shared
                if f not in predict or f not in backtest]
     assert not missing, f"not on both CLIs: {missing}"
+
+
+def test_the_live_long_short_book_is_handed_the_delisting_evidence() -> None:
+    """WBD sat dark for a quarter because the live path could not be told it
+    had been bought out for cash. The committed evidence file now reaches the
+    long-short predict, and only it: the long-only engines refuse the flag."""
+    assert "--delisting-proceeds" in _pipeline_flags("long-short")
+    for mode in ("fixed", "rank"):
+        assert "--delisting-proceeds" not in _pipeline_flags(mode)
+
+
+def test_the_committed_evidence_file_loads() -> None:
+    from pathlib import Path
+
+    import pandas as pd
+
+    from stock_predictor.delisting import load_proceeds
+
+    path = Path(__file__).resolve().parents[1] / "data" / "delisting_proceeds.csv"
+    evidence = load_proceeds(pd.read_csv(path))
+    assert "WBD" in evidence
+    date, proceeds = evidence["WBD"]
+    assert str(date.date()) == "2026-10-06" and proceeds == pytest.approx(31.01666668)
