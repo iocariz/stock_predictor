@@ -787,20 +787,71 @@ def generate_orders_long_short(
     quiet = replace(quiet, high_watermark=max(
         float(state.high_watermark), portfolio_value(quiet, prices)))
 
+    proceeds_by_ticker = load_proceeds(delisting_proceeds)
+    policy = delisting_policy or DelistingPolicy()
+    deferred: list[str] = []
+    disposed: list[tuple[str, str]] = []
+
+    # Settle names whose grace has run out, on every session rather than only
+    # on a turnover. The sweep below used to sit after the `if not due` return,
+    # so disposal could only happen on a rebalance -- which quantises a
+    # grace period counted in *sessions* to 63-session boundaries. A name whose
+    # grace expired one session after a turnover waited another 63, giving an
+    # effective grace of up to 126 sessions.
+    #
+    # Live case: WBD stopped printing after 2026-10-05 and sat as an open short
+    # marked at a frozen 30.95. The next rebalance was ~38 sessions out, at
+    # which point its 41 unpriced sessions were still inside the 63-session
+    # grace, so it would have deferred again and waited for the turnover after
+    # that -- roughly five months holding a liability in a security that no
+    # longer trades.
+    #
+    # Same shape as the borrow clock above: a quantity measured in sessions has
+    # to be checked in sessions, not when the book happens to turn over.
+    settled_now: dict[str, Position] = {}
+    for p in marked:
+        if valid_quote(prices, p.ticker) is not None:
+            continue
+        settled = disposal_value(
+            p.ticker, as_of, evidence=proceeds_by_ticker,
+            sessions_unpriced=p.sessions_unpriced, policy=policy,
+            direction=1 if p.shares > 0 else -1,
+            mark=mark_price(p, prices),
+        )
+        if settled is None:
+            continue       # still inside grace: retained, not written off
+        per_share, source = settled
+        cash += p.shares * per_share
+        disposed.append((p.ticker, source))
+        settled_now[p.ticker] = p
+    if settled_now:
+        # Collected and never printed before, so the live book could write a
+        # name off in silence while moving real cash.
+        print(
+            f"  Disposed {len(settled_now)} unexitable position(s): "
+            + ", ".join(f"{t} ({src})" for t, src in sorted(disposed))
+        )
+        marked = tuple(p for p in marked if p.ticker not in settled_now)
+        quiet = replace(quiet, cash=cash, positions=marked)
+        quiet = replace(quiet, high_watermark=max(
+            float(state.high_watermark), portfolio_value(quiet, prices)))
+
     # A tripped kill switch is a risk event, not a scheduling one. Returning
     # here first meant a halted book kept its exposure until the next
     # rebalance -- up to 63 sessions of exactly what the switch exists to end.
     unwinding = not allow_new and any(p.shares for p in marked)
     due = force or unwinding or elapsed >= rebalance_every
     if not due:
-        return (), quiet
+        orders_now = tuple(
+            Order(action="SELL" if p.shares > 0 else "BUY", ticker=p.ticker,
+                  shares=abs(p.shares), price=mark_price(p, prices),
+                  cohort_id=LONG_SHORT_COHORT, reason="delisted_disposal")
+            for p in settled_now.values()
+        )
+        return orders_now, quiet
 
     nav = portfolio_value(quiet, prices)
     current = {p.ticker: p for p in marked}
-    proceeds_by_ticker = load_proceeds(delisting_proceeds)
-    policy = delisting_policy or DelistingPolicy()
-    deferred: list[str] = []
-    disposed: list[tuple[str, str]] = []
 
     target: dict[str, float] = {}
     if allow_new:

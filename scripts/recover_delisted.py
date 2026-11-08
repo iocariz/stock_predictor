@@ -32,6 +32,12 @@ from stock_predictor.data_provider import _load_dotenv
 from stock_predictor.pit import load_sp500_stints
 from stock_predictor.providers.hybrid_provider import DEFAULT_CACHE, HybridProvider
 
+START_DEFAULT = "2010-01-01"
+"""The window the training panel asks for, and so the window an all-clear is
+about. ``outstanding`` without a start used to answer about whatever was on
+disk, which is how it reported nothing outstanding for a panel missing 174
+names."""
+
 MIN_ROWS = 20
 """A handful of prints is not a recovered ticker."""
 
@@ -58,24 +64,35 @@ def _manifest(cache_dir: Path) -> dict:
 
 def outstanding(
     names: list[str], cache_dir: Path, start: str | None = None,
+    end: str | None = None,
 ) -> tuple[list[str], int, int]:
     """(still to fetch, already recovered, unusable at the vendor).
 
-    *start* is the window being asked for. It decides the one ambiguous case: a
-    cached file with fewer than MIN_ROWS rows. If the manifest says that file
-    already answers a request reaching back to *start*, the thinness is the
-    vendor's answer and no number of passes will improve it. If the cached
-    request began later, the file is short because the question was narrow, and
-    the wider window still has to be fetched.
+    *start* is the window being asked for, defaulting to this script's own
+    START. It is not optional in effect: an answer about "the cache" rather
+    than about a window is what produced a false all-clear on a survivorship
+    audit. This reported ``0 still outstanding`` while a 2010-2026 training
+    panel was missing 174 departed members, because the cache had been filled
+    for a narrower window and MIN_ROWS alone could not see that. The run that
+    followed completed on a degraded panel and reported inflated alpha.
 
-    Treating every thin file as retryable is what stopped this script
-    terminating: a ticker the vendor serves with 1-19 prints is written with
-    ``empty: False``, so the provider counts it recovered and serves it from
-    cache, while this function hands it back for another pass. BK and DF sat at
-    5 rows and WRK at 1, and each pass reported "recovered 3" and "3 still
-    outstanding" in the same breath. ``--passes 6 --wait 3600`` would have slept
-    six hours to re-answer three names it already had.
+    So the usability question is delegated to the provider -- the same
+    ``_cache_is_usable`` the training run will apply, for the same (start,
+    end) -- rather than reimplemented here. Two definitions of "recovered" is
+    how this script and the provider disagreed in the first place.
+
+    MIN_ROWS is still applied on top, for the one case the provider does not
+    cover: a ticker the vendor serves with 1-19 prints is cached ``empty:
+    False``, so the provider counts it usable while a panel cannot use it. BK
+    and DF sat at 5 rows and WRK at 1, and each pass reported "recovered 3"
+    and "3 still outstanding" in the same breath -- so those are counted
+    unavailable rather than handed back forever.
     """
+    from stock_predictor.providers.hybrid_provider import HybridProvider
+
+    start = start or START_DEFAULT
+    end = end or pd.Timestamp.today().normalize().strftime("%Y-%m-%d")
+    probe = HybridProvider(tiingo_api_key="probe", cache_dir=cache_dir)
     man = _manifest(cache_dir)
     todo, have, absent = [], 0, 0
     for t in names:
@@ -88,16 +105,24 @@ def outstanding(
             continue
         cached = cache_dir / f"{t}.parquet"
         rows = None
+        df = pd.DataFrame()
         if cached.exists():
             try:
-                rows = len(pd.read_parquet(cached))
+                df = pd.read_parquet(cached)
+                rows = len(df)
             except Exception:  # noqa: BLE001 - an unreadable cache file is a refetch
                 rows = None
+        # The provider's own verdict for the window the panel will request.
+        if rows is not None and not probe._cache_is_usable(
+            t, cached, df, str(start), str(end), man,
+        ):
+            todo.append(t)
+            continue
         if rows is None:
             todo.append(t)
         elif rows >= MIN_ROWS:
             have += 1
-        elif start is not None and str(entry.get("start", "9999")) > str(start):
+        elif str(entry.get("start", "9999")) > str(start):
             todo.append(t)   # short because the request was, not the vendor
         else:
             absent += 1
@@ -106,7 +131,7 @@ def outstanding(
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("--start", default="2010-01-01")
+    ap.add_argument("--start", default=START_DEFAULT)
     ap.add_argument("--end", default=None, help="defaults to today")
     ap.add_argument("--passes", type=int, default=1)
     ap.add_argument("--wait", type=int, default=3600,
@@ -124,7 +149,7 @@ def main() -> None:
     print(f"{len(names)} companies left the index between {args.start} and {end}")
 
     for i in range(1, args.passes + 1):
-        todo, have, absent = outstanding(names, args.cache_dir, args.start)
+        todo, have, absent = outstanding(names, args.cache_dir, args.start, end)
         print(f"\npass {i}/{args.passes}: {have} cached, {absent} absent at vendor, "
               f"{len(todo)} to fetch")
         if not todo:
@@ -134,14 +159,14 @@ def main() -> None:
         got = provider.fetch_missing(todo, args.start, end)
         print(f"  recovered {len(got)} this pass")
         if i < args.passes:
-            still, _, _ = outstanding(names, args.cache_dir, args.start)
+            still, _, _ = outstanding(names, args.cache_dir, args.start, end)
             if not still:
                 print("Nothing left to fetch.")
                 break
             print(f"  waiting {args.wait}s for the quota window…")
             time.sleep(args.wait)
 
-    todo, have, absent = outstanding(names, args.cache_dir, args.start)
+    todo, have, absent = outstanding(names, args.cache_dir, args.start, end)
     total = len(names)
     print(f"\n{have}/{total} recovered ({have / total:.1%}), "
           f"{absent} unavailable at the vendor, {len(todo)} still outstanding")

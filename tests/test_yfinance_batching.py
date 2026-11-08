@@ -238,3 +238,53 @@ def test_default_batch_size_is_bounded() -> None:
 def test_invalid_batch_size_rejected() -> None:
     with pytest.raises(ValueError):
         yp.YFinanceProvider(batch_size=0)
+
+
+# ---------------------------------------------------------------------------
+# A hanging symbol must not cost the run its wall clock
+# ---------------------------------------------------------------------------
+
+
+def test_the_download_passes_a_timeout() -> None:
+    """Two long walk-forwards died in the download phase on this.
+
+    yfinance does not refuse a dead symbol, it hangs. With no timeout passed,
+    curl's default applies and a single departed ticker blocks for a quarter of
+    an hour:
+
+      MNK   curl: (28) Connection timed out after 907928 milliseconds
+      MXIM  curl: (28) Connection timed out after 907940 milliseconds
+      BHGE  curl: (28) Operation timed out after 912977 milliseconds
+
+    The run asks Yahoo for all 837 tickers before Tiingo fills the ~191 it
+    drops, so these are names Tiingo already holds -- a quarter hour each spent
+    establishing something the cache could answer immediately.
+    """
+    seen: dict = {}
+
+    def _fake(tickers, **kw):
+        seen.update(kw)
+        batch = [tickers] if isinstance(tickers, str) else list(tickers)
+        return _multi(batch)
+
+    p = yp.YFinanceProvider(batch_size=10)
+    with patch("yfinance.download", side_effect=_fake):
+        p.download_equity_ohlcv(["AAA", "BBB"], "2024-01-02", "2024-01-10")
+    assert "timeout" in seen, "no timeout passed; curl's 15-minute default applies"
+    assert 0 < seen["timeout"] <= 120, (
+        f"timeout {seen['timeout']}s is not short enough to bound a hang")
+
+
+def test_the_timeout_is_configurable() -> None:
+    """A slow link is a reason to raise it, not to remove the bound."""
+    seen: dict = {}
+
+    def _fake(tickers, **kw):
+        seen.update(kw)
+        batch = [tickers] if isinstance(tickers, str) else list(tickers)
+        return _multi(batch)
+
+    p = yp.YFinanceProvider(batch_size=10, timeout_s=45)
+    with patch("yfinance.download", side_effect=_fake):
+        p.download_equity_ohlcv(["AAA"], "2024-01-02", "2024-01-10")
+    assert seen["timeout"] == 45

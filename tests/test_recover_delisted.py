@@ -79,3 +79,44 @@ def test_a_thin_cache_from_a_narrower_window_is_retried(tmp_path: Path) -> None:
     _cache(tmp_path, "NARROW", rows=5, start="2026-01-01")
     todo, _, _ = outstanding(["NARROW"], tmp_path, start="2010-01-01")
     assert todo == ["NARROW"]
+
+
+# ---------------------------------------------------------------------------
+# An all-clear has to mean the panel is served
+# ---------------------------------------------------------------------------
+
+
+def test_a_narrow_cache_entry_is_not_reported_as_recovered(tmp_path: Path) -> None:
+    """A false all-clear on a survivorship audit, which is the worst place for
+    one.
+
+    ``outstanding`` checked MIN_ROWS against its own file, while the provider
+    decides usability with ``_cache_is_usable`` for the actual (start, end)
+    request -- and rejects any entry whose cached *start* is later than the
+    window being asked for. So a cache filled for 2015-2026 answers "nothing
+    outstanding" while a 2010-2026 training run still needs all of it.
+
+    Measured: this script reported ``0 still outstanding`` while the training
+    panel was missing 174 departed members, and the run that followed
+    completed on a degraded panel and reported inflated alpha.
+    """
+    _cache(tmp_path, "ADT", rows=MIN_ROWS + 50, start="2015-01-01")
+    todo, have, _ = outstanding(["ADT"], tmp_path, start="2010-01-01")
+    assert todo == ["ADT"], (
+        "a cache entry too narrow for the requested window was called recovered")
+    assert have == 0
+
+
+def test_a_covering_entry_is_still_recovered(tmp_path: Path) -> None:
+    """The check must not become so strict that nothing ever counts."""
+    _cache(tmp_path, "ADT", rows=MIN_ROWS + 50, start="2010-01-01")
+    todo, have, _ = outstanding(["ADT"], tmp_path, start="2010-01-01")
+    assert (todo, have) == ([], 1)
+
+
+def test_the_window_defaults_to_the_scripts_own_start(tmp_path: Path) -> None:
+    """Called without a window the answer must still be about *a* window, not
+    about whatever happens to be on disk."""
+    _cache(tmp_path, "ADT", rows=MIN_ROWS + 50, start="2015-01-01")
+    todo, _, _ = outstanding(["ADT"], tmp_path)
+    assert todo == ["ADT"], "no window meant no check at all"

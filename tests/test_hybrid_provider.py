@@ -234,3 +234,190 @@ def test_placeholder_columns_do_not_duplicate_recovered_tickers(tmp_path) -> Non
     assert not adj.columns.duplicated().any()
     assert not vol.columns.duplicated().any()
     assert adj["DEAD"].notna().sum() == 6, "Tiingo data must win over the placeholder"
+
+
+# ---------------------------------------------------------------------------
+# A dead company's history does not go stale
+# ---------------------------------------------------------------------------
+
+
+def _seed_cache(cache_dir, ticker: str, last: str, cached_end: str,
+                start: str = "2010-01-01") -> None:
+    """A cached ticker whose own data stops at *last*, fetched for *cached_end*."""
+    import json
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    dates = pd.bdate_range("2010-01-04", last)
+    pd.DataFrame({
+        "date": dates,
+        "open": 10.0, "high": 10.0, "low": 10.0,
+        "close": 10.0, "adj_close": 10.0, "volume": 100,
+    }).to_parquet(cache_dir / f"{ticker}.parquet", index=False)
+    (cache_dir / "_manifest.json").write_text(json.dumps({ticker: {
+        "start": start, "end": cached_end, "empty": False,
+        "schema": 1, "fetched": "2026-09-07T00:00:00+00:00",
+    }}))
+
+
+def test_a_delisted_ticker_is_not_refetched_when_the_calendar_moves(tmp_path) -> None:
+    """The defect that corrupted a 7.7-year walk-forward.
+
+    ``end_tolerance_days`` is 7: a cached entry answers a request whose end is
+    within a week of the cached end. That is right for a live ticker and
+    meaningless for a dead one. AABA last printed 2019-11-06 and ACS 2011-02-14;
+    no refetch will ever extend them, yet asking for a 22-day-later end marked
+    283 of 324 cached names stale. The run tried to refetch them all, hit the
+    Tiingo quota after 50, and carried on with 657 of 837 tickers -- a
+    survivorship gap of 150/334 against the 65/334 of the run before it.
+
+    The gap flatters results, so the degraded panel reported alpha +8.7%
+    (t 2.37) where the complete one reported +2.2% (t 0.31), and the
+    difference was read as a finding about the strategy.
+    """
+    yf = _FakeYF([])
+    _seed_cache(tmp_path / "c", "AABA", last="2019-11-06",
+                cached_end="2026-09-11")
+    p = HybridProvider(tiingo_api_key="k", cache_dir=tmp_path / "c")
+    with patch.object(p, "_yf", yf), \
+         patch.object(p, "_fetch_one", side_effect=AssertionError("refetched")):
+        got = p.fetch_missing(["AABA"], "2010-01-01", "2026-10-03")
+    assert "AABA" in got, "a dead ticker's cached history was not served"
+
+
+def test_a_live_ticker_is_still_refetched_when_the_end_moves(tmp_path) -> None:
+    """The tolerance must keep working for names that still trade, or the
+    cache starts serving stale prices for the book it marks."""
+    _seed_cache(tmp_path / "c", "AAPL", last="2026-09-10",
+                cached_end="2026-09-11")
+    p = HybridProvider(tiingo_api_key="k", cache_dir=tmp_path / "c")
+    calls: list[str] = []
+
+    def _fetch(t, start, end):
+        calls.append(t)
+        return pd.DataFrame({"date": pd.bdate_range("2010-01-04", "2026-10-02"),
+                             "adj_close": 1.0})
+
+    with patch.object(p, "_yf", _FakeYF([])), \
+         patch.object(p, "_fetch_one", side_effect=_fetch):
+        p.fetch_missing(["AAPL"], "2010-01-01", "2026-10-03")
+    assert calls == ["AAPL"], "a live ticker was served from a stale cache"
+
+
+def test_a_dead_ticker_is_still_refetched_for_earlier_history(tmp_path) -> None:
+    """Dead is not a licence to ignore the start date. A cache fetched from
+    2015 cannot answer a request reaching back to 2010."""
+    _seed_cache(tmp_path / "c", "AABA", last="2019-11-06",
+                cached_end="2026-09-11", start="2015-01-01")
+    p = HybridProvider(tiingo_api_key="k", cache_dir=tmp_path / "c")
+    calls: list[str] = []
+
+    def _fetch(t, start, end):
+        calls.append(t)
+        return pd.DataFrame({"date": pd.bdate_range("2010-01-04", "2019-11-06"),
+                             "adj_close": 1.0})
+
+    with patch.object(p, "_yf", _FakeYF([])), \
+         patch.object(p, "_fetch_one", side_effect=_fetch):
+        p.fetch_missing(["AABA"], "2010-01-01", "2026-10-03")
+    assert calls == ["AABA"], "missing early history was served from cache"
+
+
+# ---------------------------------------------------------------------------
+# A failure to ask is not a vendor answer
+# ---------------------------------------------------------------------------
+
+
+def _manifest(cache_dir) -> dict:
+    import json
+    from pathlib import Path
+
+    f = Path(cache_dir) / "_manifest.json"
+    return json.loads(f.read_text()) if f.exists() else {}
+
+
+def test_a_network_error_is_not_cached_as_absent(tmp_path) -> None:
+    """The defect that quietly biases a panel toward survivors.
+
+    ``_fetch_one`` returns an empty frame on *any* failure, and the caller
+    records ``empty: bool(df.empty)``. So a read timeout becomes "the vendor
+    has no data for this ticker" and sticks for ``empty_ttl_days``.
+
+    Measured during a cache warming run: six names timed out and were all
+    written as absent. Five returned full history on a clean refetch -- GHC,
+    PBI and TFX with 4217 rows each. Five of 334 departed members were about
+    to be dropped from a survivorship audit because of transient socket
+    errors, in the direction that flatters results.
+    """
+    p = _provider([], tmp_path)
+    with patch.object(p, "_get_session") as sess:
+        sess.return_value.get.side_effect = OSError("read timed out")
+        p.fetch_missing(["GHC"], "2010-01-01", "2026-10-31")
+    entry = _manifest(tmp_path).get("GHC")
+    assert not (entry or {}).get("empty"), (
+        "a transient network failure was recorded as a vendor absence")
+
+
+def test_a_server_error_is_not_cached_as_absent(tmp_path) -> None:
+    """A 500 means the vendor failed to answer, not that it has nothing."""
+    p = _provider([], tmp_path)
+    resp = type("R", (), {"status_code": 500, "json": lambda self: []})()
+    with patch.object(p, "_get_session") as sess:
+        sess.return_value.get.return_value = resp
+        p.fetch_missing(["PBI"], "2010-01-01", "2026-10-31")
+    entry = _manifest(tmp_path).get("PBI")
+    assert not (entry or {}).get("empty"), "a 5xx was recorded as a vendor absence"
+
+
+def test_an_auth_failure_is_not_cached_as_absent(tmp_path) -> None:
+    """A bad key would otherwise mark the entire universe absent in one pass,
+    and the TTL would keep it that way for a week."""
+    p = _provider([], tmp_path)
+    resp = type("R", (), {"status_code": 401, "json": lambda self: []})()
+    with patch.object(p, "_get_session") as sess:
+        sess.return_value.get.return_value = resp
+        p.fetch_missing(["AAA", "BBB"], "2010-01-01", "2026-10-31")
+    man = _manifest(tmp_path)
+    assert not any((man.get(t) or {}).get("empty") for t in ("AAA", "BBB")), (
+        "an auth failure marked tickers as absent at the vendor")
+
+
+def test_a_404_is_cached_as_absent(tmp_path) -> None:
+    """The genuine case must still be recorded, or every pass re-asks for
+    symbols the vendor really does not carry and never converges."""
+    p = _provider([], tmp_path)
+    resp = type("R", (), {"status_code": 404, "json": lambda self: []})()
+    with patch.object(p, "_get_session") as sess:
+        sess.return_value.get.return_value = resp
+        p.fetch_missing(["NOSUCH"], "2010-01-01", "2026-10-31")
+    assert _manifest(tmp_path)["NOSUCH"]["empty"] is True
+
+
+def test_an_empty_200_is_cached_as_absent(tmp_path) -> None:
+    """The vendor answering "I have no rows for this" is an answer."""
+    p = _provider([], tmp_path)
+    resp = type("R", (), {"status_code": 200, "json": lambda self: []})()
+    with patch.object(p, "_get_session") as sess:
+        sess.return_value.get.return_value = resp
+        p.fetch_missing(["MNK"], "2010-01-01", "2026-10-31")
+    assert _manifest(tmp_path)["MNK"]["empty"] is True
+
+
+def test_a_failed_ticker_is_retried_on_the_next_pass(tmp_path) -> None:
+    """Not caching the failure is only half of it: the next pass has to try
+    again, which is what makes a resumable warming loop converge."""
+    p = _provider([], tmp_path)
+    with patch.object(p, "_get_session") as sess:
+        sess.return_value.get.side_effect = OSError("read timed out")
+        p.fetch_missing(["GHC"], "2010-01-01", "2026-10-31")
+    calls = []
+
+    def _ok(url, params=None, timeout=None):
+        calls.append(url)
+        return type("R", (), {"status_code": 200,
+                              "json": lambda self: _tiingo_rows(30)})()
+
+    with patch.object(p, "_get_session") as sess:
+        sess.return_value.get.side_effect = _ok
+        got = p.fetch_missing(["GHC"], "2010-01-01", "2026-10-31")
+    assert calls, "the failed ticker was not retried"
+    assert "GHC" in got and len(got["GHC"]) == 30

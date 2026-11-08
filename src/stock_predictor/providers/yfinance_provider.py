@@ -22,6 +22,25 @@ _BENCHMARK_BACKOFF_S = 2.0
 DEFAULT_BATCH_SIZE = 100
 DEFAULT_RETRY_BATCH_SIZE = 20
 DEFAULT_MAX_RETRIES = 3
+
+DEFAULT_TIMEOUT_S = 30
+"""Seconds allowed per download call.
+
+yfinance does not refuse a dead symbol, it hangs, and with no timeout passed
+curl's default applies -- a quarter of an hour per ticker:
+
+  MNK   curl: (28) Connection timed out after 907928 milliseconds
+  MXIM  curl: (28) Connection timed out after 907940 milliseconds
+  BHGE  curl: (28) Operation timed out after 912977 milliseconds
+
+Two long walk-forwards died in the download phase on exactly this. The hybrid
+provider asks Yahoo for the whole universe before Tiingo fills the ~191 names
+it drops, so the symbols that hang are ones the Tiingo cache already holds: a
+quarter hour each spent waiting for an answer that was already on disk.
+
+A batch that times out is retried in smaller chunks by the existing backoff,
+and whatever Yahoo never serves is recovered from Tiingo, so a bound here
+costs coverage nothing."""
 DEFAULT_BACKOFF_S = 2.0
 DEFAULT_PAUSE_S = 0.2
 
@@ -91,6 +110,7 @@ class YFinanceProvider:
         batch_size: int = DEFAULT_BATCH_SIZE,
         retry_batch_size: int = DEFAULT_RETRY_BATCH_SIZE,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        timeout_s: float = DEFAULT_TIMEOUT_S,
         backoff_s: float = DEFAULT_BACKOFF_S,
         pause_s: float = DEFAULT_PAUSE_S,
     ) -> None:
@@ -103,6 +123,7 @@ class YFinanceProvider:
         self.batch_size = batch_size
         self.retry_batch_size = retry_batch_size
         self.max_retries = max_retries
+        self.timeout_s = timeout_s
         self.backoff_s = backoff_s
         self.pause_s = pause_s
 
@@ -122,6 +143,7 @@ class YFinanceProvider:
                     threads=True,
                     auto_adjust=True,
                     progress=False,
+                    timeout=self.timeout_s,
                 )
                 close, volume = _split_fields(raw, batch)
                 if not close.empty:
@@ -204,6 +226,7 @@ class YFinanceProvider:
             threads=True,
             auto_adjust=False,
             progress=False,
+            timeout=self.timeout_s,
         )
         mw = _close_wide_macro(raw)
         mdf = mw.rename(
@@ -230,6 +253,7 @@ class YFinanceProvider:
                     end=end_ts.strftime("%Y-%m-%d"),
                     auto_adjust=True,
                     progress=False,
+                    timeout=self.timeout_s,
                 )
             except Exception as exc:  # noqa: BLE001 - retried below, then degraded
                 print(f"  Benchmark download error ({ticker}): {exc}")
