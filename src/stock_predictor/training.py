@@ -61,6 +61,21 @@ MACRO_FEATURE_COLS = ["vix", "vix_ret_5d", "tnx_yield", "yield_curve_spread", "v
 REGIME_FEATURE_COLS = ["market_ret_5d", "market_ret_21d"]
 RANK_FEATURE_COLS = ["ret_21d_rank", "vol_10d_rank", "volume_zscore_rank"]
 EARNINGS_FEATURE_COLS = ["days_since_last_earnings"]
+SECTOR_FEATURE_COLS = ["ret_5d_vs_sector", "ret_21d_vs_sector", "vol_vs_sector"]
+"""Sector-relative spreads. The raw ``sector`` label is deliberately absent.
+
+The sector map is today's constituent list, so ``sector`` is known for current
+index members and missing for every company that has since left -- on all of
+its historical rows. As a model input that is a survivorship flag: on the
+2010-2026 baseline it was the top feature by gain (14%), the flagged names
+returned -8.3% per 63 sessions against the rest in 2023-2026, and they filled
+30% of the short decile against a 12% base rate. A live run never sees it,
+because every live candidate is a current member.
+
+The column stays on the panel for the sector-neutral book and for reporting,
+and models trained before this change still find it there. It returns to this
+list only with a sector history that covers departed members.
+"""
 
 # GICS reclassification effective 2018-09-28: Communication Services was
 # carved from parts of IT, Consumer Discretionary, and the old Telecom sector.
@@ -171,13 +186,27 @@ def add_volume_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _peer_median(df: pd.DataFrame, col: str) -> pd.Series:
+    """Same-date median of *col* among sector peers, or the market's without one.
+
+    The sector map lists today's index members, so a company that has since
+    left has no sector on any of its historical rows. Grouping on a missing key
+    yields NaN, which made every spread below missing for exactly the names
+    that would later be removed -- a survivorship flag the model could read
+    years ahead. A name with no known sector is compared against the whole
+    cross-section instead: a coarser peer group, but one that says nothing
+    about the company's future.
+    """
+    sector = df.groupby(["date", "sector"], observed=True)[col].transform("median")
+    market = df.groupby("date")[col].transform("median")
+    return sector.where(df["sector"].notna(), market)
+
+
 def add_sector_relative_features(df: pd.DataFrame) -> pd.DataFrame:
     for window in [5, 21]:
         col = f"ret_{window}d"
-        sector_median = df.groupby(["date", "sector"])[col].transform("median")
-        df[f"{col}_vs_sector"] = df[col] - sector_median
-    sector_vol_median = df.groupby(["date", "sector"])["vol_10d"].transform("median")
-    df["vol_vs_sector"] = df["vol_10d"] - sector_vol_median
+        df[f"{col}_vs_sector"] = df[col] - _peer_median(df, col)
+    df["vol_vs_sector"] = df["vol_10d"] - _peer_median(df, "vol_10d")
     return df
 
 
@@ -1359,7 +1388,7 @@ def build_feature_panel(
         + VOLUME_FEATURE_COLS
         + REGIME_FEATURE_COLS
         + RANK_FEATURE_COLS
-        + ["ret_5d_vs_sector", "ret_21d_vs_sector", "vol_vs_sector", "sector"]
+        + SECTOR_FEATURE_COLS
         + MACRO_FEATURE_COLS
         + CALENDAR_FEATURE_COLS
         + earn_cols
