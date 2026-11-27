@@ -37,7 +37,10 @@ N = 60
 DARK = "T00"
 GOES_DARK = 45
 ACQUIRED = ("TSS", "VIAB", "AGN", "NBL", "CXO", "TIF", "FLIR", "VAR", "CERN",
-            "JNPR", "DISCK")
+            "JNPR", "DISCK",
+            # The rebuild with corrupt prints quarantined is a different draw of
+            # the model and held different names as they left the index.
+            "ALXN", "NLSN", "TWTR", "ANSS", "HES", "DAY", "HOLX")
 
 
 def _panel() -> pd.DataFrame:
