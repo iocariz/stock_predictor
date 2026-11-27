@@ -18,7 +18,7 @@ The short version, as of the 2026-11-10 baseline:
   is +4.00% at t = +1.29 on the schedule this project has always quoted, and
   that schedule is the **best of 21**: the median across rebalance offsets is
   CAGR 7.50%, alpha +0.01%, t = 0.00, with 10 of 21 offsets negative. Cohort is
-  −7.61% at t = −1.35; rank-hold +2.86% at t = +0.30.
+  −8.04% at t = −1.35; rank-hold +1.97% at t = +0.22.
 * **The long-short book's "positive tilt" is withdrawn.** The previous revision
   called it a positive tilt that did not reach |t| = 2. Centred on zero across
   schedules, it is not a tilt.
@@ -102,8 +102,8 @@ the survivorship residual elsewhere.
 | survivorship | 271 of 347 departed names carry prices **during their membership** (**78.1%**, the measured ceiling); departed names are scored on **99.9%** of the sessions they were members (117,973/118,147) |
 | recorded benchmark | SPY, 1,924 sessions, from the snapshot — so beta, alpha and the HAC t are checkable offline |
 | pinned metrics | every published CAGR, Sharpe, drawdown, beta, alpha and HAC t recomputed against `expected_metrics.json` |
-| accounting (cohort) | NAV reconciles with the trade ledger to `1.50e-16`; cash + holdings = NAV on all 1,924 sessions (residual `0.00e+00`) |
-| accounting (rank-hold) | reconciles to `7.94e-16`, with 15 open positions and +5,192.39 unrealized; per-session residual `0.00e+00` |
+| accounting (cohort) | NAV reconciles with the trade ledger exactly (`0.00e+00`); cash + holdings = NAV on all 1,924 sessions (residual `0.00e+00`) |
+| accounting (rank-hold) | reconciles to `2.81e-16`, with 15 open positions and +4,892.34 unrealized; per-session residual `0.00e+00` |
 | accounting (long-short) | cash + holdings = NAV on all 1,924 sessions (residual `0.00e+00`). No cohort ledger to close a terminal identity against, but `specs.md:414`'s per-session identity applies and is checked |
 | fills (all three engines) | zero stale fills; every refusal disposed under a stated policy |
 | deterministic backtest (all three) | identical NAV hashes on repeat |
@@ -206,8 +206,8 @@ verification fails if any of them moves.
 | engine | CAGR | Sharpe | max drawdown | beta | alpha/yr | HAC t |
 |---|---|---|---|---|---|---|
 | long-short | 10.99% | 0.56 | -19.11% | +0.20 | +4.00% | +1.29 |
-| cohort | 9.04% | 0.35 | -45.49% | +1.25 | -7.61% | -1.35 |
-| rank-hold | 21.43% | 0.63 | -64.38% | +1.44 | +2.86% | +0.30 |
+| cohort | 9.04% | 0.35 | -45.49% | +1.31 | -8.04% | -1.35 |
+| rank-hold | 20.49% | 0.61 | -64.38% | +1.44 | +1.97% | +0.22 |
 <!-- pinned-metrics:end -->
 
 SPY over the same window: **17.59%** CAGR, beta 1.00 by construction.
@@ -260,10 +260,15 @@ What it did, measured as a replay — same snapshot, same seed, one code change:
 |---|---|---|---|
 | long-short | CAGR / Sharpe / max DD | 13.41% / 0.77 / −14.14% | 10.99% / 0.56 / −19.11% |
 | | alpha/yr (HAC t) | +5.54% (+1.47) | +4.00% (+1.29) |
-| cohort | CAGR / Sharpe / max DD | 22.85% / 0.76 / −46.75% | 9.04% / 0.35 / −45.49% |
-| | alpha/yr (HAC t) | +4.34% (+0.78) | −7.61% (−1.35) |
-| rank-hold | CAGR / Sharpe / max DD | 19.18% / 0.58 / −56.70% | 21.43% / 0.63 / −64.38% |
-| | alpha/yr (HAC t) | +0.86% (+0.12) | +2.86% (+0.30) |
+| cohort | CAGR / Sharpe / max DD | 21.72% / 0.71 / −46.75% | 9.04% / 0.35 / −45.49% |
+| | alpha/yr (HAC t) | +2.81% (+0.47) | −8.04% (−1.35) |
+| rank-hold | CAGR / Sharpe / max DD | 19.51% / 0.59 / −56.70% | 20.49% / 0.61 / −64.38% |
+| | alpha/yr (HAC t) | +1.15% (+0.16) | +1.97% (+0.22) |
+
+Both columns are measured with the engines as they are now, including
+[the gap fix below](#a-missing-quote-was-a-write-off-in-the-long-only-engines);
+`baseline_v9`'s own pin predates it and reads cohort 22.85% / +4.34% and
+rank-hold 19.18% / +0.86%.
 
 The long-short and cohort falls are in the direction the mechanism predicts.
 Rank-hold rose, which it does not predict; its alpha was and is indistinguishable
@@ -274,6 +279,60 @@ engine. What is measured is that removing it leaves nothing significant.
 **What still carries the flag.** `--sector-neutral` balances the book inside
 each sector and skips names without one, so that book is drawn from survivors
 only. It is off by default and no figure here uses it.
+
+### A missing quote was a write-off in the long-only engines
+
+Two defects in the cohort and rank-hold engines, fixed at `547df75`. The pinned
+figures above include the fix; the long-short book never had either.
+
+**The gap was measured from the wrong origin.** The counter that says how long
+a holding has gone unquoted was NaN on exactly the sessions where a quote was
+missing, so the gap read as "sessions since the start of the backtest". Any
+grace period was already spent and a holding that missed a single session was
+written off at zero that day. The long-short engine had this fixed in September
+(*the unpriced-gap counter*, below); these two carried the same line without the
+`ffill`. With flat prices, one absent session took NAV from 100,000 to 66,667.
+
+**A stranded leg held a whole cohort slot.** Fixing the first exposed this. A
+leg whose exit defers is carried as its own single-ticker cohort until it
+settles, and the slot count treated that fragment as a full cohort. One $3,500
+position (NBL, November 2020) held one of the two slots; the next cohort took
+all the cash instead of half, the one after it opened on what was left —
+$0.00000000001 — and the book alternated between everything and nothing for
+the remaining six years. The same miscount was already costing rebalances
+before the first fix, because a fragment written off on the scheduled date was
+counted alongside its own cohort: one rebalance held both slots.
+
+Slots are now counted per rebalance on its scheduled window.
+
+| engine | | before | after |
+|---|---|---|---|
+| cohort | CAGR / Sharpe | 9.04% / 0.35 | 9.04% / 0.35 |
+| | beta, alpha/yr (HAC t) | +1.25, −7.61% (−1.35) | +1.31, −8.04% (−1.35) |
+| | rebalances opened | 55 | 57 |
+| | written off at zero | 2 | 1 |
+| rank-hold | CAGR / Sharpe | 21.43% / 0.63 | 20.49% / 0.61 |
+| | alpha/yr (HAC t) | +2.86% (+0.30) | +1.97% (+0.22) |
+
+The cohort CAGR agreeing to two decimals is a coincidence of the endpoint
+(final NAV 193,569 against 193,531): the book runs on a different schedule from
+August 2020 onward and holds different cohorts. Fixing only the first defect
+gave 6.89%, which is the alternating book, and is why the second was found.
+
+Rank-hold fell although a write-off became a deferral. The deferred name, NBL
+again, is held through its grace period — eleven weekly exit attempts — and occupies one
+of fifteen positions while it does, where before the loss was taken at once and
+the slot refilled. It is written off in the end either way.
+
+**What neither fix addresses.** The names involved were acquired, not
+bankrupted, and were paid for: NBL in Chevron stock, DISCK into Warner Bros.
+Discovery. Without a row in the delisting evidence the engines settle such a
+name at zero once the grace period ends, which is what still happens to NBL in
+both, so terminal returns on acquired names are understated. DISCK now exits on
+a print dated 2022-06-29, eleven weeks after the merger closed; the panel
+carries scattered DISCK prints at one unchanging price into September 2022,
+which is vendor residue rather than a market. `data/delisting_proceeds.csv`
+carries one row, and the baseline is not run against it.
 
 ### Schedule offsets: the pinned long-short row is the best of 21
 
