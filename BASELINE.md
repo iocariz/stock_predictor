@@ -15,12 +15,12 @@ The short version, as of the 2026-11-10 baseline:
   before 2026-11-10 was measured with that leak. See
   [the sector label was a survivorship flag](#the-sector-label-was-a-survivorship-flag).
 * **Without it, no engine shows alpha distinguishable from zero.** Long-short
-  is +4.00% at t = +1.29 on the schedule this project has always quoted, and
+  is +4.53% at t = +1.47 on the schedule this project has always quoted, and
   that schedule is the **best of 21**: the median across rebalance offsets is
-  CAGR 7.50%, alpha +0.01%, t = 0.00, with 10 of 21 offsets negative. Cohort is
-  −8.04% at t = −1.35; rank-hold +1.97% at t = +0.22.
+  CAGR 7.87%, alpha +0.40%, t = +0.13, with 8 of 21 offsets negative. Cohort is
+  −7.82% at t = −1.29; rank-hold +3.55% at t = +0.37.
 * **The long-short book's "positive tilt" is withdrawn.** The previous revision
-  called it a positive tilt that did not reach |t| = 2. Centred on zero across
+  called it a positive tilt that did not reach |t| = 2. Centred near zero across
   schedules, it is not a tilt.
 * **The draw-to-draw spread has not been re-measured.** The four-rebuild bands
   below (±1.4 points of CAGR on long-short, ±3.7 on cohort, ±6.8 on rank-hold)
@@ -85,7 +85,7 @@ Execution panel: 4,188 sessions × 769 tickers.
 
 ## Verification
 
-All seventeen gates pass. Each is a hard failure, not a warning. Verification is
+All eighteen gates pass. Each is a hard failure, not a warning. Verification is
 **read-only and self-contained**: it reads membership from
 `snapshot/stints.parquet`, the benchmark from `snapshot/benchmark.parquet`, and
 the vendor-absent set from `vendor_absent.json` recorded at build time — never
@@ -101,9 +101,10 @@ the survivorship residual elsewhere.
 | point-in-time integrity | 0 of 951,577 scored rows outside index membership, on the half-open `[start_date, end_date)` convention production filters with; labels stop exactly at the last labelable session; execution covers every scored row; scored and execution prices agree on 951,577/951,577 cells |
 | survivorship | 271 of 347 departed names carry prices **during their membership** (**78.1%**, the measured ceiling); departed names are scored on **99.9%** of the sessions they were members (117,973/118,147) |
 | recorded benchmark | SPY, 1,924 sessions, from the snapshot — so beta, alpha and the HAC t are checkable offline |
+| delisting evidence | 12 names from `delisting_proceeds.csv`, recorded with the baseline; all 14 disposals across the three engines settle on it, none at zero and none at a carried mark |
 | pinned metrics | every published CAGR, Sharpe, drawdown, beta, alpha and HAC t recomputed against `expected_metrics.json` |
 | accounting (cohort) | NAV reconciles with the trade ledger exactly (`0.00e+00`); cash + holdings = NAV on all 1,924 sessions (residual `0.00e+00`) |
-| accounting (rank-hold) | reconciles to `2.81e-16`, with 15 open positions and +4,892.34 unrealized; per-session residual `0.00e+00` |
+| accounting (rank-hold) | reconciles to `1.37e-15`, with 15 open positions and +5,503.06 unrealized; per-session residual `0.00e+00` |
 | accounting (long-short) | cash + holdings = NAV on all 1,924 sessions (residual `0.00e+00`). No cohort ledger to close a terminal identity against, but `specs.md:414`'s per-session identity applies and is checked |
 | fills (all three engines) | zero stale fills; every refusal disposed under a stated policy |
 | deterministic backtest (all three) | identical NAV hashes on repeat |
@@ -205,9 +206,9 @@ verification fails if any of them moves.
 <!-- pinned-metrics:start -->
 | engine | CAGR | Sharpe | max drawdown | beta | alpha/yr | HAC t |
 |---|---|---|---|---|---|---|
-| long-short | 10.99% | 0.56 | -19.11% | +0.20 | +4.00% | +1.29 |
-| cohort | 9.04% | 0.35 | -45.49% | +1.31 | -8.04% | -1.35 |
-| rank-hold | 20.49% | 0.61 | -64.38% | +1.44 | +1.97% | +0.22 |
+| long-short | 11.58% | 0.60 | -19.00% | +0.20 | +4.53% | +1.47 |
+| cohort | 9.30% | 0.35 | -45.49% | +1.31 | -7.82% | -1.29 |
+| rank-hold | 22.36% | 0.65 | -64.38% | +1.44 | +3.55% | +0.37 |
 <!-- pinned-metrics:end -->
 
 SPY over the same window: **17.59%** CAGR, beta 1.00 by construction.
@@ -258,17 +259,23 @@ What it did, measured as a replay — same snapshot, same seed, one code change:
 
 | engine | | with the leak (`baseline_v9`) | without (this baseline) |
 |---|---|---|---|
-| long-short | CAGR / Sharpe / max DD | 13.41% / 0.77 / −14.14% | 10.99% / 0.56 / −19.11% |
-| | alpha/yr (HAC t) | +5.54% (+1.47) | +4.00% (+1.29) |
-| cohort | CAGR / Sharpe / max DD | 21.72% / 0.71 / −46.75% | 9.04% / 0.35 / −45.49% |
-| | alpha/yr (HAC t) | +2.81% (+0.47) | −8.04% (−1.35) |
-| rank-hold | CAGR / Sharpe / max DD | 19.51% / 0.59 / −56.70% | 20.49% / 0.61 / −64.38% |
-| | alpha/yr (HAC t) | +1.15% (+0.16) | +1.97% (+0.22) |
+| long-short | CAGR / Sharpe / max DD | 13.41% / 0.77 / −14.14% | 11.58% / 0.60 / −19.00% |
+| | alpha/yr (HAC t) | +5.54% (+1.47) | +4.53% (+1.47) |
+| cohort | CAGR / Sharpe / max DD | 22.27% / 0.72 / −46.75% | 9.30% / 0.35 / −45.49% |
+| | alpha/yr (HAC t) | +3.25% (+0.54) | −7.82% (−1.29) |
+| rank-hold | CAGR / Sharpe / max DD | 20.33% / 0.61 / −56.70% | 22.36% / 0.65 / −64.38% |
+| | alpha/yr (HAC t) | +1.80% (+0.25) | +3.55% (+0.37) |
 
-Both columns are measured with the engines as they are now, including
-[the gap fix below](#a-missing-quote-was-a-write-off-in-the-long-only-engines);
-`baseline_v9`'s own pin predates it and reads cohort 22.85% / +4.34% and
-rank-hold 19.18% / +0.86%.
+Both columns are measured with the engines as they are now and with the same
+delisting evidence — [the gap fix](#a-missing-quote-was-a-write-off-in-the-long-only-engines)
+and [the evidence](#delisted-names-settle-on-what-they-paid) below — so the two
+differ by the leak and nothing else. `baseline_v9`'s own pin predates both and
+reads cohort 22.85% / +4.34% and rank-hold 19.18% / +0.86%.
+
+On this one schedule the long-short t is the same on both sides, +1.47: the
+leak raised return and residual risk together. That is offset 0, and
+[the next-but-one section](#schedule-offsets-the-pinned-long-short-row-is-the-best-of-21)
+is why it should not be read as the leak not mattering.
 
 The long-short and cohort falls are in the direction the mechanism predicts.
 Rank-hold rose, which it does not predict; its alpha was and is indistinguishable
@@ -283,7 +290,9 @@ only. It is off by default and no figure here uses it.
 ### A missing quote was a write-off in the long-only engines
 
 Two defects in the cohort and rank-hold engines, fixed at `547df75`. The pinned
-figures above include the fix; the long-short book never had either.
+figures above include the fix; the long-short book never had either. The table
+in this section is the effect of this fix alone, measured before the delisting
+evidence of the next section was applied.
 
 **The gap was measured from the wrong origin.** The counter that says how long
 a holding has gone unquoted was NaN on exactly the sessions where a quote was
@@ -324,15 +333,56 @@ again, is held through its grace period — eleven weekly exit attempts — and 
 of fifteen positions while it does, where before the loss was taken at once and
 the slot refilled. It is written off in the end either way.
 
-**What neither fix addresses.** The names involved were acquired, not
-bankrupted, and were paid for: NBL in Chevron stock, DISCK into Warner Bros.
-Discovery. Without a row in the delisting evidence the engines settle such a
-name at zero once the grace period ends, which is what still happens to NBL in
-both, so terminal returns on acquired names are understated. DISCK now exits on
-a print dated 2022-06-29, eleven weeks after the merger closed; the panel
-carries scattered DISCK prints at one unchanging price into September 2022,
-which is vendor residue rather than a market. `data/delisting_proceeds.csv`
-carries one row, and the baseline is not run against it.
+### Delisted names settle on what they paid
+
+With the counter fixed, what remained was the value a dark holding settles at.
+Every disposal the three engines make on this baseline is an acquisition:
+
+| | names | settled, with no evidence |
+|---|---|---|
+| long legs | VIAB, NBL, CXO, CERN (long-short); NBL (cohort, rank-hold) | **zero** |
+| short legs | TSS, AGN, TIF, FLIR, VAR, JNPR (long-short) | last mark, after the grace period |
+
+None of them went to zero. VIAB merged into ViacomCBS, NBL was paid in Chevron
+stock, CXO in ConocoPhillips stock, CERN $95.00 a share in cash. The policy
+settles a dark long at zero deliberately, as the conservative reading of an
+unexplained silence; these silences are explained. The mechanism for saying so
+existed and the live book used it. The baseline was measured without it.
+
+`data/delisting_proceeds.csv` now carries those ten and DISCK, each with its
+terms. Cash deals carry the cash price. Stock and mixed deals are valued at the
+target's own last close — what a holder could have sold for that day — rather
+than at a ratio times the acquirer's price, which this panel holds only in
+back-adjusted form. The file is **recorded with the baseline** at build time
+and read from there, so adding a row to the repo's copy cannot change the
+verdict on fixed artifacts.
+
+| engine | | zero / mark | on evidence |
+|---|---|---|---|
+| long-short | CAGR / Sharpe | 10.99% / 0.56 | 11.58% / 0.60 |
+| | alpha/yr (HAC t) | +4.00% (+1.29) | +4.53% (+1.47) |
+| | disposals | 4 written off, 6 covered at mark | 10 on evidence |
+| cohort | CAGR / Sharpe | 9.04% / 0.35 | 9.30% / 0.35 |
+| | alpha/yr (HAC t) | −8.04% (−1.35) | −7.82% (−1.29) |
+| rank-hold | CAGR / Sharpe | 20.49% / 0.61 | 22.36% / 0.65 |
+| | alpha/yr (HAC t) | +1.97% (+0.22) | +3.55% (+0.37) |
+
+Three limits on this.
+
+* **It covers the names these books held, not the names that left.** 347
+  companies left the index in the window and twelve have a row. A different
+  model holds different names at the moment they go dark, and until its
+  acquisitions are added it will be measured the conservative way again. The
+  evidence gate lists what is covered so that is visible rather than assumed.
+* **The labels are untouched.** Evidence prices what the engines sell for. The
+  forward returns the model is trained and scored on still end where the
+  vendor's prices end.
+* **Some dead names keep printing.** The panel carries scattered DISCK prints
+  at one unchanging price into September 2022, five months after the merger,
+  and CERN prints three months after Oracle paid for it. The engines treat a
+  print as a quote and trade on it before evidence is consulted. The prices
+  are near the deal value, so the effect is small here, but it is vendor
+  residue being read as a market.
 
 ### Schedule offsets: the pinned long-short row is the best of 21
 
@@ -342,24 +392,25 @@ anchor in steps of three, on this baseline:
 
 | | CAGR | Sharpe | max drawdown | beta | alpha/yr | HAC t |
 |---|---|---|---|---|---|---|
-| offset 0 (pinned) | 10.99% | 0.56 | −19.11% | +0.20 | +4.00% | +1.29 |
-| median of 21 | 7.50% | 0.30 | −18.93% | +0.20 | +0.01% | +0.00 |
-| minimum | 2.81% | −0.08 | −20.11% | +0.16 | −3.55% | −1.07 |
-| maximum | 10.99% | 0.56 | −15.65% | +0.29 | +4.00% | +1.29 |
+| offset 0 (pinned) | 11.58% | 0.60 | −19.00% | +0.20 | +4.53% | +1.47 |
+| median of 21 | 7.87% | 0.32 | −18.87% | +0.20 | +0.40% | +0.13 |
+| minimum | 3.06% | −0.06 | −20.11% | +0.16 | −3.30% | −0.99 |
+| maximum | 11.58% | 0.60 | −15.49% | +0.29 | +4.53% | +1.47 |
 
-**Offset 0 is the maximum on CAGR, Sharpe, alpha and t.** Ten of the 21 offsets
+**Offset 0 is the maximum on CAGR, Sharpe, alpha and t.** Eight of the 21 offsets
 have negative alpha and none reaches t = 2. Every long-short figure this project
 has recorded was produced on offset 0, so the row in the results table is the
 top of this distribution, not its centre. Cash earns 4.5% in this engine and
 the book holds about its whole capital in cash against a dollar-neutral pair of
-legs, so most of the 7.50% median is the financing rate.
+legs, so most of the 7.87% median is the financing rate.
 
 On a leaked panel the same sweep, run 2026-10-10, had a median alpha of +5.01%
 (range +1.05% … +8.63%) and no negative offsets. The leak was the level; the
 schedule was always the spread.
 
 Rebalancing more or less often does not rescue it. Median alpha across offsets
-by cadence, same baseline: −0.8% at 5 sessions, +0.5% at 10, +1.3% at 21, +1.7%
+by cadence, same baseline, measured before the delisting evidence was applied
+(which moved the 63-session median from 0.0% to +0.4%): −0.8% at 5 sessions, +0.5% at 10, +1.3% at 21, +1.7%
 at 42, 0.0% at 63, −0.6% at 126 — the best median t is +0.59, and at 5 sessions
 slippage is seven times what it is at 63. The differences between 21, 42 and 63
 are smaller than the spread across offsets inside any one of them, so this is
@@ -381,6 +432,9 @@ does on either holdout. The committed configuration changed — decile 0.20 wher
 the leaked panel chose 0.10, and where the earlier text called 0.20 "the worst
 of the three in all four". That claim does not survive either.
 
+These were measured before the delisting evidence was applied;
+`locked_holdout.py` does not take it yet.
+
 Two cautions against reading +1.47 and +1.60 as nearly there. Every cell of this
 grid runs on offset 0, the schedule the previous section shows to be the most
 favourable, and the grid was not swept across offsets. And both holdouts are
@@ -396,7 +450,7 @@ short side at 0.90% against 1.22% for the universe, and alpha held t +2.58 at
 0%, +2.45 at 1%, +2.31 at 2%. Those were measured on leaked panels, where the
 short book was disproportionately the companies about to leave the index. The
 composition of the short book has changed and the levels are obsolete; with
-alpha centred on zero before any borrow is charged, borrow is still not what
+alpha centred near zero before any borrow is charged, borrow is still not what
 decides this strategy, for a less flattering reason.
 
 ---
