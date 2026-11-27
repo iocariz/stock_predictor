@@ -17,7 +17,9 @@ import pandas as pd
 
 from stock_predictor.corporate_actions import (
     describe_adjustments,
+    parse_confirmations,
     rebase_to_adjusted_history,
+    unapplied_confirmations,
 )
 from stock_predictor.data_provider import DataProvider, get_provider
 from stock_predictor.delisting import (
@@ -610,6 +612,18 @@ def parse_args() -> argparse.Namespace:
         "backtested. Expiries always settle either way",
     )
     p.add_argument(
+        "--confirm-action",
+        action="append",
+        default=[],
+        dest="confirm_action",
+        metavar="TICKER=KIND",
+        help="Settle a held name's pending corporate action as a 'split' "
+        "(shares rescale, no cash) or a 'distribution' (cash moves, shares "
+        "do not). An adjustment of 3%% or more is never settled without "
+        "this, because the factor alone cannot tell the two apart. "
+        "Repeatable. One-shot: the run stops if there is nothing to settle",
+    )
+    p.add_argument(
         "--force-rebalance",
         action="store_true",
         dest="force_rebalance",
@@ -670,6 +684,11 @@ def _delisting_inputs(args: argparse.Namespace) -> tuple[DelistingPolicy, pd.Dat
 def main() -> None:
     args = parse_args()
     delisting_policy, delisting_proceeds = _delisting_inputs(args)
+    try:
+        # Read before anything downloads: a typo should not cost a full run.
+        confirmed_actions = parse_confirmations(args.confirm_action)
+    except ValueError as exc:
+        sys.exit(f"--confirm-action: {exc}")
     provider = get_provider(args.provider, batch_size=args.batch_size)
 
     # Load or init state
@@ -867,10 +886,23 @@ def main() -> None:
     # stored entry price on different scales. Unsettled, a spin-off reads as
     # P&L in NAV and the kill switch -- the CTVA short booked its Vylor
     # distribution as +$911.
-    state, adjustments = rebase_to_adjusted_history(state, adj_close)
+    try:
+        state, adjustments = rebase_to_adjusted_history(
+            state, adj_close, confirmed=confirmed_actions)
+    except ValueError as exc:
+        sys.exit(f"--confirm-action: {exc}")
     if adjustments:
         print("History adjusted since entry; settled in cash:", file=sys.stderr)
         print(describe_adjustments(adjustments), file=sys.stderr)
+    ignored = unapplied_confirmations(confirmed_actions, adjustments)
+    if ignored:
+        # Stop before anything is saved: the operator believes an action was
+        # settled, and the book says otherwise.
+        sys.exit(
+            f"--confirm-action {', '.join(ignored)}: nothing to settle. The "
+            "name is not held, its history shows no adjustment since entry, "
+            "or it was already settled. Nothing was changed."
+        )
 
     # Quotes come from the raw download, not the scored panel. The panel is
     # point-in-time filtered, so a departed holding has no row in it and would

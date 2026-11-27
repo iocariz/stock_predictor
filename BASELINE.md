@@ -7,20 +7,25 @@ scored panel pricing its own fills, an alpha that was mostly the risk-free
 rate. **Those numbers are obsolete.** This file records what replaces them,
 what verified it, and how much of it is trustworthy.
 
-The short version, after four independent rebuilds of one commit and one
-pinned window:
+The short version, as of the 2026-11-10 baseline:
 
-* **Neither long-only engine shows alpha distinguishable from zero**, and
-  neither is stable enough to quote from a single run. Cohort alpha changes
-  sign between draws; rank-hold's CAGR carries a ±10.7-point band.
-* **No engine's alpha clears |t| = 2, in any draw.** Long-short reaches
-  +5.90% ± 0.61% at t = +1.54 and is the best-controlled book by a distance —
-  beta 0.222, a drawdown a third of the others' — but it is no longer
-  statistically distinguishable from them. Pre-committed evaluations reach
-  +1.55 and +1.18. Positive tilt, no edge.
-* **Any comparison must clear the spread to mean anything**: ±1.4 points of
-  CAGR on long-short, ±3.7 on cohort, ±6.8 on rank-hold. Use
-  `--replay-snapshot` for code comparisons; a fresh rebuild has a price.
+* **The model was being told which companies would leave the index.** Sector
+  labels come from today's constituents, so a departed company has none, and
+  the raw `sector` label was a model feature. Every figure this file carried
+  before 2026-11-10 was measured with that leak. See
+  [the sector label was a survivorship flag](#the-sector-label-was-a-survivorship-flag).
+* **Without it, no engine shows alpha distinguishable from zero.** Long-short
+  is +4.00% at t = +1.29 on the schedule this project has always quoted, and
+  that schedule is the **best of 21**: the median across rebalance offsets is
+  CAGR 7.50%, alpha +0.01%, t = 0.00, with 10 of 21 offsets negative. Cohort is
+  −7.61% at t = −1.35; rank-hold +2.86% at t = +0.30.
+* **The long-short book's "positive tilt" is withdrawn.** The previous revision
+  called it a positive tilt that did not reach |t| = 2. Centred on zero across
+  schedules, it is not a tilt.
+* **The draw-to-draw spread has not been re-measured.** The four-rebuild bands
+  below (±1.4 points of CAGR on long-short, ±3.7 on cohort, ±6.8 on rank-hold)
+  predate the fix. They still say how much a fresh rebuild moves; their levels
+  are obsolete. Use `--replay-snapshot` for code comparisons.
 
 ---
 
@@ -28,10 +33,17 @@ pinned window:
 
 | | |
 |---|---|
-| commit | `91635b0b4448` (clean tree) |
-| run id | `20260906T103531Z_1e935e12` |
-| built by | `./scripts/rebuild_baseline.sh` |
+| commit | `ad8b6ff03b0d` (clean tree) |
+| run id | `20261110T165657Z_8ade2d22` |
+| built by | `train-sp500 --replay-snapshot artifacts/baseline_v9` — the inputs of run `20260906T135731Z_f0260ab4` (commit `91635b0b4448`), re-run through the fixed feature code |
 | verified by | `uv run python scripts/verify_baseline.py artifacts/baseline` |
+
+This baseline is a **replay, not a fresh download**: prices, membership, macro
+and the sector map are the ones `baseline_v9` recorded, so the difference
+between the two is the code change and nothing else. `artifacts/baseline_v10`
+is the same artifact under its build name. The baseline this file described
+until 2026-11-10 (run `20260906T103531Z_1e935e12`) is kept as
+`artifacts/baseline_v6`.
 
 Configuration, pinned and recorded in `artifacts/baseline/config.json`:
 
@@ -49,25 +61,25 @@ Input snapshot hashes (`artifacts/baseline/snapshot/manifest.json`):
 
 | snapshot | sha256 (16) | rows |
 |---|---|---|
-| `equity_prices_long` | `2a95c682575f175b` | 3,492,792 |
-| `execution_prices` | `2a95c682575f175b` | 3,492,792 |
-| `features_clean` | `d2a612c67ffc657e` | 1,937,884 |
-| `labeled` | `21fe2bb3d749c6e3` | 3,492,792 |
+| `equity_prices_long` | `e1d722deae857d1e` | 3,220,572 |
+| `execution_prices` | `e1d722deae857d1e` | 3,220,572 |
+| `features_clean` | `c9ded790b3c235c0` | 1,937,884 |
+| `labeled` | `1174316a48c66f3f` | 3,220,572 |
 | `macro` | `7196119df94c96af` | 4,228 |
 | `sector_map` | `1eed8462eeea73d7` | 503 |
 | `stints` | `bc11e6d48d9671c1` | 1,247 |
-| `benchmark` | `0aeb727c4a9a2be7` | 4,190 |
+| `benchmark` | `9c91e6d3ff30394a` | 4,188 |
 
 Output hashes (`manifest["outputs"]`, checked on every verification, both
 **recorded at write time** by the run that produced them):
 
 | output | sha256 (16) |
 |---|---|
-| `wf_scored` | `f4ccf279d6e9bbdf` |
-| `execution_prices` | `e267b2851323202a` |
+| `wf_scored` | `d4582419014e41cd` |
+| `execution_prices` | `ca83d3a63a5e5aa0` |
 
 Scored panel: 951,577 rows, 1,924 sessions, 642 tickers.
-Execution panel: 4,188 sessions × 834 tickers.
+Execution panel: 4,188 sessions × 769 tickers.
 
 ---
 
@@ -84,14 +96,14 @@ the survivorship residual elsewhere.
 |---|---|
 | snapshot integrity | all eight input artifacts recomputed and matching their recorded sha256, all written by this run |
 | output integrity | `wf_scored.parquet` and `execution_prices.parquet` recomputed against recorded hashes |
-| execution derivation | the wide panel reproduced exactly from the hashed long snapshot: 4,188 sessions × 764 priced tickers |
+| execution derivation | the wide panel reproduced exactly from the hashed long snapshot: 4,188 sessions × 769 priced tickers |
 | ticker renames | 15 checked for successor coverage; **0 of 15 testable for concurrent trading** — canonicalisation removes the predecessor's own symbol from the panel, so the one real falsifier cannot run. Coverage shows a successor prices the predecessor's membership; it cannot show they are the same issuer, and each entry's recorded note remains the warrant |
 | point-in-time integrity | 0 of 951,577 scored rows outside index membership, on the half-open `[start_date, end_date)` convention production filters with; labels stop exactly at the last labelable session; execution covers every scored row; scored and execution prices agree on 951,577/951,577 cells |
 | survivorship | 271 of 347 departed names carry prices **during their membership** (**78.1%**, the measured ceiling); departed names are scored on **99.9%** of the sessions they were members (117,973/118,147) |
 | recorded benchmark | SPY, 1,924 sessions, from the snapshot — so beta, alpha and the HAC t are checkable offline |
 | pinned metrics | every published CAGR, Sharpe, drawdown, beta, alpha and HAC t recomputed against `expected_metrics.json` |
-| accounting (cohort) | NAV reconciles with the trade ledger to `3.37e-16`; cash + holdings = NAV on all 1,924 sessions (residual `0.00e+00`) |
-| accounting (rank-hold) | reconciles to `7.83e-16`, with 15 open positions and −27,937.51 unrealized; per-session residual `0.00e+00` |
+| accounting (cohort) | NAV reconciles with the trade ledger to `1.50e-16`; cash + holdings = NAV on all 1,924 sessions (residual `0.00e+00`) |
+| accounting (rank-hold) | reconciles to `7.94e-16`, with 15 open positions and +5,192.39 unrealized; per-session residual `0.00e+00` |
 | accounting (long-short) | cash + holdings = NAV on all 1,924 sessions (residual `0.00e+00`). No cohort ledger to close a terminal identity against, but `specs.md:414`'s per-session identity applies and is checked |
 | fills (all three engines) | zero stale fills; every refusal disposed under a stated policy |
 | deterministic backtest (all three) | identical NAV hashes on repeat |
@@ -169,13 +181,14 @@ nothing first.
 
 ### What the survivorship gate still tolerates
 
-30 of the 347 companies that left the index carry no usable history, listed in
-`artifacts/baseline/survivorship_gap.json`. Both vendors return 0–12 rows for
-each and return the same on a refetch, so the bar is the **measured ceiling**,
-not a threshold chosen to pass; a name missing because a quota ran out still
-fails.
+76 of the 347 companies that left the index carry no prices during their
+membership: the 51 reused symbols above, and 25 with no usable history at all
+(`verify_baseline.py --report` writes the list). Both vendors return 0–12 rows
+for each of those and return the same on a refetch, so the bar is the
+**measured ceiling**, not a threshold chosen to pass; a name missing because a
+quota ran out still fails.
 
-Four of the 30 — **BK, MMC, ATGE, IGT** — are *currently listed* index members
+Four of the vendor-absent names — **BK, MMC, ATGE, IGT** — are *currently listed* index members
 that neither yfinance nor Tiingo will serve. MMC and BK are large and liquid,
 so this is a vendor-side gap rather than anything this code does, but it means
 two current members are absent from every panel here.
@@ -192,36 +205,154 @@ verification fails if any of them moves.
 <!-- pinned-metrics:start -->
 | engine | CAGR | Sharpe | max drawdown | beta | alpha/yr | HAC t |
 |---|---|---|---|---|---|---|
-| long-short | 14.63% | 0.88 | -14.27% | +0.22 | +6.76% | +1.75 |
-| cohort | 24.72% | 0.82 | -46.61% | +1.16 | +6.02% | +1.00 |
-| rank-hold | 23.25% | 0.69 | -58.63% | +1.36 | +4.52% | +0.64 |
+| long-short | 10.99% | 0.56 | -19.11% | +0.20 | +4.00% | +1.29 |
+| cohort | 9.04% | 0.35 | -45.49% | +1.25 | -7.61% | -1.35 |
+| rank-hold | 21.43% | 0.63 | -64.38% | +1.44 | +2.86% | +0.30 |
 <!-- pinned-metrics:end -->
 
-SPY over the same window: **17.55%** CAGR, beta 1.00 by construction.
-
-**Borrow.** Those figures charge **0.5%** flat on the short leg, the
-`LongShortConfig` default. The pipeline trades **1%**, which is above the
-**0.90%** this book's short side measures under the stylised per-name proxy —
-so the live book never charges less than the simulation it was validated
-against. The difference is inside the ±1.50% draw-to-draw spread on alpha, so it
-changes nothing that is claimed here. The sensitivity curve below predates the
-disposal and grid fixes and overstates every row by roughly 3 points of alpha;
-its shape — that borrow is not what decides this strategy — is unaffected.
-
-The short book is *cheaper* than the universe (0.90% against 1.22%, a 0.74×
-concentration) because the model ranks volatility positively and parks the
-expensive, hard-to-borrow names in the **long** book, where no borrow is paid.
-The opposite was assumed for a long time and was wrong.
-
-Borrow is not what decides this strategy. Alpha holds t +2.58 at 0%, +2.45 at
-1%, +2.31 at 2%, and only falls below 2 near **5%** — five times the measured
-rate.
+SPY over the same window: **17.59%** CAGR, beta 1.00 by construction.
 
 Generated by `scripts/pin_baseline_metrics.py`, not typed, and compared against
 `expected_metrics.json` by a test.
 
-**Read none of those numbers on their own.** They are one draw. The table below
-is the one to quote from.
+**Read none of those numbers on their own.** They are one draw of the data and,
+for long-short, one rebalance schedule out of 63 — the most favourable of the
+21 measured. [Schedule offsets](#schedule-offsets-the-pinned-long-short-row-is-the-best-of-21)
+is the table to quote from.
+
+Signal quality, walk-forward, per signal date: precision@15 0.435, rank IC
++0.023, top-15 excess +0.58% per 63-session horizon. With the leak those read
+≈ 0.47, ≈ +0.05 and ≈ +3.1%.
+
+### The sector label was a survivorship flag
+
+Sector labels come from the current Wikipedia constituents table. A company
+that has left the index is not in it, so it has no sector — on every row of its
+history, including the years it was a member. The model was given two things
+that encoded this:
+
+* the raw `sector` label, missing for exactly the names that would later leave;
+* three sector-relative spreads (`ret_5d_vs_sector`, `ret_21d_vs_sector`,
+  `vol_vs_sector`), NaN for the same names because there was no sector to take
+  a median over.
+
+LightGBM routes missing values deliberately, so "has no sector" became a
+feature meaning "will not be in the index in 2026" — information from the
+future, on historical rows. Names without a sector are 12.5% of the scored
+panel. With the leak they were **30.4% of the short decile and 8.8% of the
+long**; with the four sector features removed, 11.2% and 24.7%.
+
+The fix is structural rather than a better data source. Tiingo does not serve
+sector for delisted names on this plan, and EDGAR SIC codes cover 151 of 257
+departed names at about 80% SIC→GICS agreement — a partial fix would have left
+a quieter version of the same flag. So:
+
+* the raw `sector` label is no longer a model feature. It stays on the panel,
+  where `--sector-neutral` reads it;
+* the spreads fall back to the same-date **market** median for a name with no
+  sector, so they are missing only where the underlying return or volatility
+  is. On the real panel their NaN rate for departed names went from 100% to
+  0.2–0.8%.
+
+What it did, measured as a replay — same snapshot, same seed, one code change:
+
+| engine | | with the leak (`baseline_v9`) | without (this baseline) |
+|---|---|---|---|
+| long-short | CAGR / Sharpe / max DD | 13.41% / 0.77 / −14.14% | 10.99% / 0.56 / −19.11% |
+| | alpha/yr (HAC t) | +5.54% (+1.47) | +4.00% (+1.29) |
+| cohort | CAGR / Sharpe / max DD | 22.85% / 0.76 / −46.75% | 9.04% / 0.35 / −45.49% |
+| | alpha/yr (HAC t) | +4.34% (+0.78) | −7.61% (−1.35) |
+| rank-hold | CAGR / Sharpe / max DD | 19.18% / 0.58 / −56.70% | 21.43% / 0.63 / −64.38% |
+| | alpha/yr (HAC t) | +0.86% (+0.12) | +2.86% (+0.30) |
+
+The long-short and cohort falls are in the direction the mechanism predicts.
+Rank-hold rose, which it does not predict; its alpha was and is indistinguishable
+from zero, and a fifteen-name book moves that much between draws of one commit.
+None of the three differences is a measurement of the leak's size in any one
+engine. What is measured is that removing it leaves nothing significant.
+
+**What still carries the flag.** `--sector-neutral` balances the book inside
+each sector and skips names without one, so that book is drawn from survivors
+only. It is off by default and no figure here uses it.
+
+### Schedule offsets: the pinned long-short row is the best of 21
+
+The long-short book reconstitutes every 63 sessions, on a grid anchored at the
+panel's first session. That picks one of 63 possible calendars. Sweeping the
+anchor in steps of three, on this baseline:
+
+| | CAGR | Sharpe | max drawdown | beta | alpha/yr | HAC t |
+|---|---|---|---|---|---|---|
+| offset 0 (pinned) | 10.99% | 0.56 | −19.11% | +0.20 | +4.00% | +1.29 |
+| median of 21 | 7.50% | 0.30 | −18.93% | +0.20 | +0.01% | +0.00 |
+| minimum | 2.81% | −0.08 | −20.11% | +0.16 | −3.55% | −1.07 |
+| maximum | 10.99% | 0.56 | −15.65% | +0.29 | +4.00% | +1.29 |
+
+**Offset 0 is the maximum on CAGR, Sharpe, alpha and t.** Ten of the 21 offsets
+have negative alpha and none reaches t = 2. Every long-short figure this project
+has recorded was produced on offset 0, so the row in the results table is the
+top of this distribution, not its centre. Cash earns 4.5% in this engine and
+the book holds about its whole capital in cash against a dollar-neutral pair of
+legs, so most of the 7.50% median is the financing rate.
+
+On a leaked panel the same sweep, run 2026-10-10, had a median alpha of +5.01%
+(range +1.05% … +8.63%) and no negative offsets. The leak was the level; the
+schedule was always the spread.
+
+Rebalancing more or less often does not rescue it. Median alpha across offsets
+by cadence, same baseline: −0.8% at 5 sessions, +0.5% at 10, +1.3% at 21, +1.7%
+at 42, 0.0% at 63, −0.6% at 126 — the best median t is +0.59, and at 5 sessions
+slippage is seven times what it is at 63. The differences between 21, 42 and 63
+are smaller than the spread across offsets inside any one of them, so this is
+not a reason to change cadence.
+
+### The locked holdout, re-run without the leak
+
+Same procedure as [below](#the-locked-holdout): search the 18-configuration
+grid on the early window by Sharpe, commit to the winner, evaluate it once on
+the later window as a continuation.
+
+| split | committed configuration | selection t | holdout alpha | HAC t | rank | grid on holdout |
+|---|---|---|---|---|---|---|
+| 2023-01-01 | decile 0.20, 1.0x, 63d | +0.76 | +4.44% | **+1.47** | 2 / 18 | median +1.13, range +0.47 … +1.55, 0 above +2 |
+| 2022-01-01 | decile 0.20, 1.0x, 63d | +0.74 | +3.96% | **+1.60** | 1 / 18 | median +0.82, range +0.25 … +1.60, 0 above +2 |
+
+No pre-committed configuration reaches t = 2, and no configuration in the grid
+does on either holdout. The committed configuration changed — decile 0.20 where
+the leaked panel chose 0.10, and where the earlier text called 0.20 "the worst
+of the three in all four". That claim does not survive either.
+
+Two cautions against reading +1.47 and +1.60 as nearly there. Every cell of this
+grid runs on offset 0, the schedule the previous section shows to be the most
+favourable, and the grid was not swept across offsets. And both holdouts are
+windows of one panel that this project has now examined many times.
+
+### Borrow
+
+The pinned figures charge **0.5%** flat on the short leg, the `LongShortConfig`
+default. The pipeline trades **1%**.
+
+*Not re-measured on this baseline:* the stylised per-name proxy put this book's
+short side at 0.90% against 1.22% for the universe, and alpha held t +2.58 at
+0%, +2.45 at 1%, +2.31 at 2%. Those were measured on leaked panels, where the
+short book was disproportionately the companies about to leave the index. The
+composition of the short book has changed and the levels are obsolete; with
+alpha centred on zero before any borrow is charged, borrow is still not what
+decides this strategy, for a less flattering reason.
+
+---
+
+## Before the sector fix
+
+> **Everything from here to [*Reproducibility*](#reproducibility--solved) was
+> measured on panels that carried the sector leak**, and on the baseline now
+> kept as `artifacts/baseline_v6` (pinned there at long-short 14.63% / t +1.75,
+> cohort 24.72% / t +1.00, rank-hold 23.25% / t +0.64). It is kept because the
+> mechanisms it records are real — the four defects, the grid fix, how much a
+> fresh rebuild moves — and because the retractions in it should stay on the
+> record. **Its levels are obsolete and none of them should be quoted.** The
+> four-rebuild spread has not been repeated on the fixed code: it needs four
+> fresh downloads.
 
 ### Retraction: no engine clears |t| = 2, and the spread was overstated
 
@@ -300,7 +431,7 @@ lands somewhere else.
 | cohort | 25.17% ± 1.86% | 0.82 ± 0.04 | +6.33% ± 1.56% | +1.03 ± 0.20 | +0.78 … +1.25 |
 | rank-hold | 22.79% ± 3.41% | 0.67 ± 0.07 | +3.97% ± 2.91% | +0.51 ± 0.33 | +0.12 … +0.88 |
 
-`uv run python scripts/baseline_spread.py artifacts/baseline artifacts/baseline_v3 artifacts/baseline_v4 artifacts/baseline_v5`
+`uv run python scripts/baseline_spread.py artifacts/baseline_v6 artifacts/baseline_v3 artifacts/baseline_v4 artifacts/baseline_v5`
 
 **What a difference has to clear before it means anything (2 sd on CAGR):**
 
@@ -441,8 +572,8 @@ full-period figure as settled, and the holdout above confirms the first two:
    between draws.
 
 Against SPY, with CAPM on excess returns and Newey–West standard errors. These
-are the pinned figures from [the results table](#results), measured on the
-recorded benchmark rather than a fresh download:
+are the figures pinned to the previous baseline (`artifacts/baseline_v6`), not
+the ones in [the results table](#results):
 
 | engine | beta | alpha/yr (this draw) | HAC t | alpha across 4 draws |
 |---|---|---|---|---|
@@ -467,9 +598,9 @@ supported is the claim that any of them moved alpha by a specific amount. The
 one durable finding is the one that never depended on a difference: neither
 long-only engine's alpha is distinguishable from zero, in any draw.
 
-Signal quality, walk-forward, per signal date: precision@15 ≈ 0.47, rank IC
-≈ +0.05, top-15 excess ≈ +3.1% per 63-session horizon. The ranking carries some
-information; it does not survive the cost of trading it.
+Signal quality, walk-forward, per signal date, on that baseline: precision@15
+≈ 0.47, rank IC ≈ +0.05, top-15 excess ≈ +3.1% per 63-session horizon. Part of
+that was the leak; the current figures are under [Results](#results).
 
 ---
 
@@ -557,6 +688,10 @@ Every performance number published before this file, including:
 - every result from `backtest_sweep.py`, `grid_search_sharpe.py` and
   `signal_depth.py` prior to those scripts accepting `--execution-prices`;
 - any alpha computed on raw rather than excess returns;
+- every figure measured before the sector fix (commit `ad8b6ff`), which is
+  every baseline from `baseline_v1` to `baseline_v9` and everything under
+  [*Before the sector fix*](#before-the-sector-fix);
+- any long-short figure quoted from a single rebalance offset;
 - any figure quoted to two decimals without a run-to-run spread.
 
 The long-short book is now covered: `backtest-sp500 --mode long-short`, gated

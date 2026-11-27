@@ -778,7 +778,7 @@ notebooks/               Exploration + full pipeline
 |--------|------|-------|
 | [fja05680/sp500](https://github.com/fja05680/sp500) | PIT membership stints | Community-maintained |
 | Yahoo Finance (`yfinance`) | OHLCV, macro, earnings | Rate-limited; data quality varies |
-| Wikipedia | GICS sector mapping | Snapshot + hard-coded 2018 override—not a full historical sector time series |
+| Wikipedia | GICS sector mapping | Snapshot + hard-coded 2018 override—not a full historical sector time series. Covers current members only, so the raw `sector` label is not a model feature (it flagged every company that later left the index); the `*_vs_sector` spreads fall back to the market median where it is missing |
 
 ## Limitations
 
@@ -1765,7 +1765,7 @@ notebooks/               Exploration + full pipeline
   objective.**
 
   Configurations that look good still get there through beta. `--mode rank-hold --exit-rank 100` returns **+97%** (Sharpe 0.65) with **beta 1.40** and alpha **−6.7%** — leverage, not selection. Treat any better-looking result you produce here with the same suspicion: read the HAC alpha t-stat and the beta column, compare against RSP as well as SPY, and re-test on a sub-window the configuration has never seen.
-- **Sector labels** are a pragmatic blend of current Wikipedia GICS and a fixed override; they are not a perfect point-in-time sector history for every ticker-date.
+- **Sector labels** are a pragmatic blend of current Wikipedia GICS and a fixed override; they are not a perfect point-in-time sector history for every ticker-date. Departed members have no sector at all. Until 2026-11 that missingness reached the model as its top feature (14% of gain) — a survivorship flag worth roughly a quarter of the long-short alpha on `baseline_v9` (+5.70% → +4.23%/yr, HAC t +1.46 → +1.22, same snapshot). Baselines built before the fix carry it; see `tests/test_sector_survivorship.py`.
 - **Earnings** come from Yahoo as-of download time; the feature is not a fully audited point-in-time fundamental database.
 - **Delisted tickers**: Yahoo no longer serves many departed S&P members (~90–140 depending on the window), so even with PIT membership the price panel has survivorship bias that flatters results. A Tiingo key recovers most of them.
 - **FOMC / calendar** helpers depend on maintained date lists—verify critical dates for your own research.
