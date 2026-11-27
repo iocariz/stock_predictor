@@ -246,3 +246,12 @@ def test_a_confirmed_corporate_action_reaches_the_live_side() -> None:
 
 def test_no_confirmation_is_passed_unless_asked_for() -> None:
     assert "--confirm-action" not in _cmd("predict")
+
+
+def test_rearming_the_kill_switch_reaches_the_live_side() -> None:
+    assert "--rearm-kill-switch" in _cmd("predict", REARM_KILL_SWITCH="1")
+
+
+def test_the_kill_switch_is_not_rearmed_unless_asked() -> None:
+    assert "--rearm-kill-switch" not in _cmd("predict")
+    assert "--rearm-kill-switch" not in _cmd("predict", REARM_KILL_SWITCH="0")

@@ -637,7 +637,7 @@ uv run predict-sp500 --model models/latest.pkl --skip-earnings --confirm
 
 #### Kill-switch
 
-The predict CLI tracks a high watermark in the portfolio state. If the current NAV drops more than `--max-drawdown` (default 15%) below the watermark, all new entries are blocked: order generation runs with **no buy leg**, so **`--confirm` never persists new positions** while halted—only expiries and cash from sells update state. Reset by manually editing `portfolio_state.json` or re-initializing with `--init`.
+The predict CLI tracks a high watermark in the portfolio state. If the current NAV drops more than `--max-drawdown` (default 15%) below the watermark, all new entries are blocked: order generation runs with **no buy leg**, so **`--confirm` never persists new positions** while halted—only expiries and cash from sells update state. The high-water mark only rises, so a halted book stays halted on its own. To let it trade again, pass `--rearm-kill-switch` once (`REARM_KILL_SWITCH=1 ./scripts/run_pipeline.sh predict --confirm`): drawdown is then measured from the book's current value, and the change is written to the state file's `history`. The run stops if the switch is not engaged, so the flag cannot sit in a crontab. The long-short book also appends one `nav` record per session and one `rebalance` record per turnover to `history`.
 
 ### Python API
 

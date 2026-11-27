@@ -46,6 +46,7 @@ from stock_predictor.portfolio import (
     generate_orders_rank_hold,
     init_state,
     load_state,
+    rearm_kill_switch,
     save_state,
     stale_positions,
 )
@@ -612,6 +613,15 @@ def parse_args() -> argparse.Namespace:
         "backtested. Expiries always settle either way",
     )
     p.add_argument(
+        "--rearm-kill-switch",
+        action="store_true",
+        dest="rearm_kill_switch",
+        help="Measure drawdown from the book's current value, so a book the "
+        "kill switch halted can trade again. The high-water mark only rises "
+        "on its own, so a halted book stays halted until this is passed. "
+        "One-shot: the run stops if the switch is not engaged",
+    )
+    p.add_argument(
         "--confirm-action",
         action="append",
         default=[],
@@ -941,6 +951,25 @@ def main() -> None:
     # Kill-switch check. Valued on `marks`: an unquoted holding must still be
     # markable or it falls back to its entry price and can never show a loss.
     halted, nav, dd = check_kill_switch(state, marks, args.max_drawdown)
+    if args.rearm_kill_switch:
+        if not halted:
+            # A flag left in a crontab would move the watermark down to NAV
+            # every night and the switch would never trip.
+            sys.exit(
+                f"--rearm-kill-switch: the kill switch is not engaged "
+                f"(drawdown {dd:+.1%}, limit {-args.max_drawdown:.0%}). "
+                "Nothing was changed."
+            )
+        before = state.high_watermark
+        session = (str(adj_close.index[-1].date()) if len(adj_close)
+                   else date.today().isoformat())
+        state = rearm_kill_switch(state, marks, when=session)
+        print(
+            f"Kill switch re-armed: drawdown was {dd:+.1%} from a high-water "
+            f"mark of ${before:,.0f}; it is now measured from ${nav:,.0f}.",
+            file=sys.stderr,
+        )
+        halted, nav, dd = check_kill_switch(state, marks, args.max_drawdown)
     # Staleness measured on the executable dict, which is the one that can be
     # empty. Measured on the forward-filled dict this never fired.
     stale = stale_positions(state, latest_prices)
