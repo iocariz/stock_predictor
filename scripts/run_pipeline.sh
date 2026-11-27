@@ -128,6 +128,12 @@ cd "$ROOT"
 # nothing left to confirm and predict stops rather than ignore the flag.
 : "${CONFIRM_ACTIONS:=}"
 
+# Set to 1 for a single run to let a book the kill switch halted trade again:
+# drawdown is then measured from the book's current value. The high-water mark
+# only rises on its own, so a halted book stays halted until this is passed.
+# One-shot, never in the crontab: predict stops if the switch is not engaged.
+: "${REARM_KILL_SWITCH:=0}"
+
 # Selection rules, emitted one per line so both consumers read the same list.
 # The flags below exist on backtest-sp500 and predict-sp500 alike; see
 # tests/test_pipeline_flags.py, which fails if the two ever diverge again.
@@ -261,6 +267,7 @@ predict_daily() {
   local -a actions=()
   local _action
   for _action in $CONFIRM_ACTIONS; do actions+=(--confirm-action "$_action"); done
+  [[ "$REARM_KILL_SWITCH" == "1" ]] && actions+=(--rearm-kill-switch)
   ${DRY_RUN:+echo} uv run predict-sp500 \
     --model "$MODEL" \
     --state "$STATE" \

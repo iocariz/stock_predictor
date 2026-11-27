@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 from dataclasses import asdict, dataclass, fields, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -218,6 +218,70 @@ def portfolio_value(state: PortfolioState, prices: dict[str, float]) -> float:
     return state.cash + sum(
         p.shares * mark_price(p, prices) for p in state.positions
     )
+
+
+NAV_RECORD = "nav"
+REBALANCE_RECORD = "rebalance"
+REARM_RECORD = "kill_switch_rearmed"
+"""``history`` record kinds written by the long-short book.
+
+The long-only engines append a record when a cohort closes and carry no
+``kind``. The long-short book has no cohorts to close, so for eleven weeks its
+state file held where it was and nothing of how it got there: the NAV series
+existed only as formatted text in the cron's log.
+"""
+
+
+def _with_nav_record(
+    state: PortfolioState, prices: dict[str, float], session: str,
+) -> PortfolioState:
+    """Record what the book is worth on *session*, once per session.
+
+    A second run on the same session replaces the record rather than adding
+    one: the cron retries, and an operator may run by hand the same morning.
+    """
+    long_value = sum(p.shares * mark_price(p, prices)
+                     for p in state.positions if p.shares > 0)
+    short_value = sum(p.shares * mark_price(p, prices)
+                      for p in state.positions if p.shares < 0)
+    record = {
+        "kind": NAV_RECORD,
+        "date": session,
+        "nav": round(float(state.cash) + long_value + short_value, 2),
+        "cash": round(float(state.cash), 2),
+        "long": round(long_value, 2),
+        "short": round(short_value, 2),
+        "positions": len(state.positions),
+    }
+    kept = tuple(h for h in state.history
+                 if not (h.get("kind") == NAV_RECORD and h.get("date") == session))
+    return replace(state, history=(*kept, record))
+
+
+def rearm_kill_switch(
+    state: PortfolioState,
+    prices: dict[str, float],
+    *,
+    when: str | None = None,
+) -> PortfolioState:
+    """Measure drawdown from where the book is now.
+
+    The limit is measured from a high-water mark that only rises, so a book
+    that tripped it and was unwound into cash stays past it forever; nothing
+    it can do there moves it back inside. Re-arming is the operator saying the
+    halt has been looked at and the book may trade again. It trades nothing,
+    and it is written to ``history`` because it moves the line the risk limit
+    is measured from.
+    """
+    nav = portfolio_value(state, prices)
+    event = {
+        "kind": REARM_RECORD,
+        "date": when or date.today().isoformat(),
+        "watermark_before": round(float(state.high_watermark), 2),
+        "watermark_after": round(float(nav), 2),
+    }
+    return replace(state, high_watermark=float(nav),
+                   history=(*state.history, event))
 
 
 def check_kill_switch(
@@ -875,7 +939,7 @@ def generate_orders_long_short(
                   cohort_id=LONG_SHORT_COHORT, reason="delisted_disposal")
             for p in settled_now.values()
         )
-        return orders_now, quiet
+        return orders_now, _with_nav_record(quiet, prices, priced_through)
 
     nav = portfolio_value(quiet, prices)
     current = {p.ticker: p for p in marked}
@@ -893,7 +957,7 @@ def generate_orders_long_short(
         if not target:
             # Too thin a cross-section to build a book. Hold what is there
             # rather than liquidating into a bad tape.
-            return (), quiet
+            return (), _with_nav_record(quiet, prices, priced_through)
 
     orders: list[Order] = []
     positions: dict[str, Position] = {}
@@ -978,7 +1042,13 @@ def generate_orders_long_short(
         last_signal_date=priced_through,
         updated_at=datetime.now(timezone.utc).isoformat(),
     )
-    return tuple(orders), new_state
+    new_state = replace(new_state, history=(*new_state.history, {
+        "kind": REBALANCE_RECORD,
+        "date": priced_through,
+        "orders": len(orders),
+        "turnover": round(sum(o.shares * o.price for o in orders), 2),
+    }))
+    return tuple(orders), _with_nav_record(new_state, prices, priced_through)
 
 
 def _long_short_reason(have: int, want: int) -> str:

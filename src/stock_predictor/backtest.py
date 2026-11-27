@@ -310,6 +310,26 @@ def _fill_metrics(tally: dict[str, int]) -> dict[str, float]:
     }
 
 
+_MIN_COHORT_CAPITAL = 1.0
+"""Dollars. Below this a "cohort" is float residue from the cash arithmetic."""
+
+
+def _last_priced_session(actual: pd.DataFrame) -> pd.DataFrame:
+    """Row position of each ticker's most recent real quote, per session.
+
+    NaN only before a ticker has ever printed. The ``ffill`` is the point:
+    ``cummax`` skips NaN but does not fill it, so without it the frame is NaN
+    on exactly the rows where a quote is missing -- the only rows a disposal
+    reads. The gap then came out as "sessions since the start of the backtest",
+    any grace period was already spent, and a holding that missed one session
+    was written off to zero. The long-short engine had this fixed; the two
+    engines here carried the same line without it, and wrote JNPR and DISCK
+    off at zero on the recorded baseline.
+    """
+    position = np.arange(len(actual), dtype=float)
+    return actual.mul(position, axis=0).where(actual).cummax().ffill()
+
+
 def _resolve_leg_exit(
     ticker: str,
     exit_date: pd.Timestamp,
@@ -981,8 +1001,7 @@ def run_backtest(
     proceeds_evidence = load_proceeds(delisting_proceeds)
     # Sessions since each ticker last had a real quote, per session -- the
     # grace period is counted in sessions, not in exit attempts.
-    _pos = np.arange(len(actual), dtype=float)
-    _last_priced = actual.mul(_pos, axis=0).where(actual).cummax()
+    _last_priced = _last_priced_session(actual)
     _validate_weighting(df, config)
     risk_free = _resolve_risk_free(df, config)
 
@@ -1003,6 +1022,8 @@ def run_backtest(
     # A deferred leg settles after the cohort it came from, so exits are no
     # longer in entry order and a single advancing pointer would stall on it.
     settled: list[bool] = []
+    # signal date -> (entry, scheduled exit) of each rebalance that opened.
+    schedule: dict[pd.Timestamp, tuple[pd.Timestamp, pd.Timestamp]] = {}
 
     for sig_date in rebalance_dates:
         # Credit realized proceeds from cohorts that have exited by this
@@ -1022,8 +1043,16 @@ def run_backtest(
         # entry until the session it sells on, exclusive -- matching
         # active_cohort_ids, which counts a position only while
         # expiry_date > as_of.
+        #
+        # Counted per rebalance on its *scheduled* window, not per Cohort
+        # object. A leg whose exit defers is carried as its own single-ticker
+        # Cohort until it settles, and counting that fragment gave one
+        # stranded position a whole slot: the next cohort took all the cash
+        # instead of half, the one after it opened on what was left, and the
+        # book alternated between everything and nothing from then on.
         active = sum(
-            1 for c in cohorts if c.entry_date <= sig_date < c.exit_date
+            1 for entry, scheduled_exit in schedule.values()
+            if entry <= sig_date < scheduled_exit
         )
         free_slots = config.max_overlapping_cohorts - active
         if free_slots <= 0:
@@ -1031,7 +1060,9 @@ def run_backtest(
         if sig_date not in by_date.groups:
             continue
         capital = (cash / free_slots) * _vix_exposure_scale(config, vix_by_date, sig_date)
-        if capital <= 0:
+        if capital < _MIN_COHORT_CAPITAL:
+            # Float dust is not a cohort, and opening one on it would hold a
+            # slot for a full holding period with nothing in it.
             continue
         scored_day = by_date.get_group(sig_date)
         built = _build_cohort(
@@ -1043,6 +1074,13 @@ def run_backtest(
             cohorts.append(c)
             settled.append(False)
             cash -= c.capital
+        if built:
+            entry = built[0].entry_date
+            scheduled_exit = offset_trading_days(
+                entry, config.holding_days, trading_dates)
+            # _build_cohort returns nothing when the window runs off the
+            # calendar, so a built cohort always has a scheduled exit.
+            schedule[sig_date] = (entry, scheduled_exit)
 
     # Daily NAV
     daily_nav, daily_cash, daily_positions = _build_daily_nav(
@@ -1120,8 +1158,7 @@ def run_rank_hold_backtest(
     # Sessions since each ticker last had a real quote, per session. The grace
     # period is expressed in sessions, so counting exit *attempts* (weekly)
     # against it would be off by the rebalance interval.
-    _pos = np.arange(len(actual), dtype=float)
-    _last_priced = actual.mul(_pos, axis=0).where(actual).cummax()
+    _last_priced = _last_priced_session(actual)
     disposals: dict[str, int] = {}
     proceeds_cash = 0.0
     proceeds_evidence = load_proceeds(delisting_proceeds)

@@ -637,7 +637,7 @@ uv run predict-sp500 --model models/latest.pkl --skip-earnings --confirm
 
 #### Kill-switch
 
-The predict CLI tracks a high watermark in the portfolio state. If the current NAV drops more than `--max-drawdown` (default 15%) below the watermark, all new entries are blocked: order generation runs with **no buy leg**, so **`--confirm` never persists new positions** while halted—only expiries and cash from sells update state. Reset by manually editing `portfolio_state.json` or re-initializing with `--init`.
+The predict CLI tracks a high watermark in the portfolio state. If the current NAV drops more than `--max-drawdown` (default 15%) below the watermark, all new entries are blocked: order generation runs with **no buy leg**, so **`--confirm` never persists new positions** while halted—only expiries and cash from sells update state. The high-water mark only rises, so a halted book stays halted on its own. To let it trade again, pass `--rearm-kill-switch` once (`REARM_KILL_SWITCH=1 ./scripts/run_pipeline.sh predict --confirm`): drawdown is then measured from the book's current value, and the change is written to the state file's `history`. The run stops if the switch is not engaged, so the flag cannot sit in a crontab. The long-short book also appends one `nav` record per session and one `rebalance` record per turnover to `history`.
 
 ### Python API
 
@@ -1737,6 +1737,11 @@ notebooks/               Exploration + full pipeline
   `beta_resid` at offset 0 reads +5.4% at t = +1.96; that is the same
   most-favourable schedule as everywhere else, and its median is +0.8%.
 
+  This table was measured on `baseline_v10`. The baseline has since been
+  rebuilt with corrupt prints quarantined, which is a different draw of the
+  model; the table has not been repeated on it, and `BASELINE.md` shows how far
+  one draw moves.
+
   The default stays `raw`. `beta_resid` is kept as the target to use when a
   feature family that is not a price derivative is tested: it is the one that
   cannot be satisfied by exposure. Reproduce with `--replay-snapshot
@@ -1803,5 +1808,7 @@ notebooks/               Exploration + full pipeline
 - **Sector labels** are a pragmatic blend of current Wikipedia GICS and a fixed override; they are not a perfect point-in-time sector history for every ticker-date. Departed members have no sector at all. Until 2026-11 that missingness reached the model as its top feature (14% of gain) — a survivorship flag worth roughly a quarter of the long-short alpha on `baseline_v9` (+5.70% → +4.23%/yr, HAC t +1.46 → +1.22, same snapshot). Baselines built before the fix carry it; see `tests/test_sector_survivorship.py`.
 - **Earnings** come from Yahoo as-of download time; the feature is not a fully audited point-in-time fundamental database.
 - **Delisted tickers**: Yahoo no longer serves many departed S&P members (~90–140 depending on the window), so even with PIT membership the price panel has survivorship bias that flatters results. A Tiingo key recovers most of them.
+
+- **Corrupt prints on delisted symbols.** The vendor serves some departed tickers with two unrelated series interleaved (TIE alternating between ~$2.70 and ~$12,000; CBE moving 34,000-fold in a session). `quarantine_corrupt_prices` blanks a symbol from its first print more than +200% above the previous one and records it in the run manifest (`quarantined_prices`). It looks only backwards and only at gains, so a real collapse is kept. On the 2010–2026 panel it removes twelve symbols' tails and 1,964 training rows (0.1%). What it cannot do is recover the real prices: those names simply go dark from that session, which adds to the survivorship gap rather than closing it. See `BASELINE.md`.
 - **FOMC / calendar** helpers depend on maintained date lists—verify critical dates for your own research.
 - **Survivorship and data snooping**: even with PIT index membership, corporate actions, delistings, and feature lookahead need careful review for any live use.

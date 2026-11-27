@@ -764,3 +764,41 @@ def test_a_split_that_does_not_give_whole_shares_stops_the_run(rig) -> None:
     with pytest.raises(SystemExit, match="whole number"):
         _run_long_short(model_path, state_path, "--confirm-action", f"{SPLIT_NAME}=split")
     assert state_path.read_text() == before
+
+
+# ---------------------------------------------------------------------------
+# Re-arming the kill switch
+# ---------------------------------------------------------------------------
+
+
+def test_a_halted_book_can_be_rearmed_and_trades_again(rig, capsys) -> None:
+    """Halted books stayed halted: the watermark only rises, and the documented
+    way back was to edit the state file by hand."""
+    _, state_path = rig
+    _halted_state(state_path)
+    _run(rig, "--confirm", "--rearm-kill-switch", "--max-drawdown", "0.15")
+
+    after = load_state(state_path)
+    assert "KILL-SWITCH ENGAGED" not in capsys.readouterr().out
+    assert len(after.positions) > 0, "a re-armed book still refused to buy"
+    assert after.high_watermark <= 100_000.0 * 1.01
+    assert [h["kind"] for h in after.history if h.get("kind")] .count(
+        "kill_switch_rearmed") == 1
+
+
+def test_rearming_a_book_that_is_not_halted_stops_the_run(rig) -> None:
+    """A flag left in a crontab would otherwise reset the watermark every
+    night, and the switch would never trip."""
+    _, state_path = rig
+    before = state_path.read_text()
+    with pytest.raises(SystemExit, match="not engaged"):
+        _run(rig, "--confirm", "--rearm-kill-switch")
+    assert state_path.read_text() == before
+
+
+def test_a_dry_run_rearm_changes_nothing(rig) -> None:
+    _, state_path = rig
+    _halted_state(state_path)
+    before = state_path.read_text()
+    _run(rig, "--rearm-kill-switch", "--max-drawdown", "0.15")
+    assert state_path.read_text() == before

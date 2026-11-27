@@ -264,9 +264,35 @@ worth arguing about is thousands of times larger than this."""
 RISK_FREE = 0.045
 
 
+EVIDENCE_FILE = "delisting_proceeds.csv"
+"""What delisted names paid, recorded with the baseline at build time.
+
+Every disposal on the first baseline measured this way was an acquisition, and
+with no evidence the policy settles a dark long at zero: the long-short book
+booked four total losses on names whose holders were paid. The file is read
+from the baseline directory rather than from ``data/`` so the verdict on fixed
+artifacts does not move when the repo's copy gains a row."""
+
+
+def load_baseline_evidence(baseline_dir: Path) -> pd.DataFrame | None:
+    """The baseline's recorded delisting evidence, or ``None`` if it has none.
+
+    A file that is present but unreadable raises: measuring without evidence
+    because it failed to parse is the silent version of not having wired it."""
+    path = Path(baseline_dir) / EVIDENCE_FILE
+    if not path.exists():
+        return None
+    frame = pd.read_csv(path)
+    from stock_predictor.delisting import load_proceeds
+    load_proceeds(frame)          # validates columns and values
+    return frame
+
+
 def measure_engines(scored, execution, *, provider, top_n: int, horizon: int,
                     max_cohorts: int, slippage_bps: float, rebalance_day: str,
-                    exit_rank: int) -> dict[str, dict]:
+                    exit_rank: int,
+                    delisting_proceeds: pd.DataFrame | None = None,
+                    ) -> dict[str, dict]:
     """Run all three engines and return both the results and their metrics.
 
     Shared with ``scripts/pin_baseline_metrics.py`` so that what gets pinned and
@@ -285,7 +311,8 @@ def measure_engines(scored, execution, *, provider, top_n: int, horizon: int,
         reject_stale_fills=True,
     )
     ls = run_long_short_backtest(scored, ls_cfg, provider=provider,
-                                 execution_prices=execution)
+                                 execution_prices=execution,
+                                 delisting_proceeds=delisting_proceeds)
     ls_metrics = dict(ls.metrics)
     if len(getattr(ls, "bench_daily_nav", ())) > 1:
         ls_metrics.update(relative_metrics(
@@ -302,7 +329,8 @@ def measure_engines(scored, execution, *, provider, top_n: int, horizon: int,
         ("rank-hold", run_rank_hold_backtest, {"exit_rank": exit_rank}),
     ):
         cfg = BacktestConfig(**common, **extra)
-        res = engine(scored, cfg, provider=provider, execution_prices=execution)
+        res = engine(scored, cfg, provider=provider, execution_prices=execution,
+                     delisting_proceeds=delisting_proceeds)
         metrics = dict(res.metrics)
         bench_nav = getattr(res, "spy_daily_nav", None)
         if bench_nav is not None and len(bench_nav) > 1:
@@ -924,7 +952,8 @@ def _hash_series(s: pd.Series) -> str:
     ).hexdigest()[:16]
 
 
-def gate_determinism(scored, execution, config, engine, label: str) -> Gate:
+def gate_determinism(scored, execution, config, engine, label: str,
+                     delisting_proceeds: pd.DataFrame | None = None) -> Gate:
     """Same scored panel, same NAV. Twice, in one process, compared by hash.
 
     Scope, stated because the name overstates it: this covers the *backtest*
@@ -944,8 +973,10 @@ def gate_determinism(scored, execution, config, engine, label: str) -> Gate:
     hashed snapshot instead of a fresh download.
     """
     g = Gate(f"deterministic backtest, fixed scores ({label})")
-    a = engine(scored, config, execution_prices=execution)
-    b = engine(scored, config, execution_prices=execution)
+    a = engine(scored, config, execution_prices=execution,
+               delisting_proceeds=delisting_proceeds)
+    b = engine(scored, config, execution_prices=execution,
+               delisting_proceeds=delisting_proceeds)
     ha, hb = _hash_series(a.daily_nav), _hash_series(b.daily_nav)
     g.note(f"NAV hash {ha} / {hb}")
     if ha != hb:
@@ -1038,11 +1069,25 @@ def main() -> None:
               f"scripts/record_baseline_benchmark.py {d}\n")
         provider = None
 
+    try:
+        evidence = load_baseline_evidence(d)
+    except (OSError, ValueError) as exc:
+        sys.exit(f"{d / EVIDENCE_FILE}: {exc}")
+    evidence_gate = Gate("delisted names settle on recorded evidence")
+    if evidence is None:
+        evidence_gate.note(
+            f"no {EVIDENCE_FILE} recorded with this baseline: a dark long "
+            "settles at zero and a dark short at its last mark")
+    else:
+        evidence_gate.note(
+            f"{len(evidence)} name(s) from {EVIDENCE_FILE}, recorded with the "
+            "baseline: " + ", ".join(sorted(evidence["ticker"].astype(str))))
+
     measured = measure_engines(
         scored, execution, provider=provider, top_n=args.top_n,
         horizon=args.horizon, max_cohorts=args.max_cohorts,
         slippage_bps=args.slippage_bps, rebalance_day=args.rebalance_day,
-        exit_rank=args.exit_rank,
+        exit_rank=args.exit_rank, delisting_proceeds=evidence,
     )
 
     bench_gate = Gate("relative metrics are measured against a recorded benchmark")
@@ -1056,6 +1101,7 @@ def main() -> None:
         else:
             bench_gate.note(f"SPY, {n:,} sessions, from the snapshot")
     gates.append(bench_gate)
+    gates.append(evidence_gate)
     gates.append(gate_expected_metrics(d, measured))
 
     for label in ("long-short", "cohort", "rank-hold"):
@@ -1098,7 +1144,8 @@ def main() -> None:
     from stock_predictor.long_short import run_long_short_backtest
 
     ls_b = run_long_short_backtest(scored, measured["long-short"]["config"],
-                                   provider=provider, execution_prices=execution)
+                                   provider=provider, execution_prices=execution,
+                                   delisting_proceeds=evidence)
     g = Gate("deterministic backtest, fixed scores (long-short)")
     ha, hb = _hash_series(ls.daily_nav), _hash_series(ls_b.daily_nav)
     g.note(f"NAV hash {ha} / {hb}")
@@ -1114,7 +1161,8 @@ def main() -> None:
         cfg = measured[label]["config"]
         gates.append(gate_accounting(res, cfg, label))
         gates.append(gate_fills(res, label))
-        gates.append(gate_determinism(scored, execution, cfg, engine, label))
+        gates.append(gate_determinism(scored, execution, cfg, engine, label,
+                                      delisting_proceeds=evidence))
     print()
 
     for g in gates:

@@ -20,6 +20,7 @@ from stock_predictor.pit import (
     current_members,
     drop_recycled_prices,
     load_sp500_stints,
+    quarantine_corrupt_prices,
 )
 from stock_predictor.training import (
     LABEL_TARGETS,
@@ -559,6 +560,20 @@ def main() -> None:
         print(f"  Dropped reused-symbol price blocks for {len(recycled)} "
               f"departed ticker(s): {', '.join(recycled[:8])}"
               + (" …" if len(recycled) > 8 else ""))
+    # A different defect from a reused symbol, and not confined to dates after
+    # a name left the index: the vendor interleaves two unrelated series under
+    # some delisted tickers, and about 780 such rows sat inside membership on
+    # the 2010-2026 baseline, in the training panel.
+    adj_close, volume, quarantined = quarantine_corrupt_prices(
+        adj_close, volume=volume,
+    )
+    if quarantined:
+        print(f"  Quarantined {len(quarantined)} ticker(s) from their first "
+              "impossible print onward: "
+              + ", ".join(f"{t} ({d.date()})" for t, d in sorted(quarantined.items())))
+    if manifest is not None:
+        manifest["quarantined_prices"] = {
+            t: str(d.date()) for t, d in sorted(quarantined.items())}
     # Recorded, not dropped invisibly. Removing the contaminated prices also
     # removes the evidence that the symbol was reused, so without this the
     # survivorship gate cannot tell "another issuer holds this symbol now"

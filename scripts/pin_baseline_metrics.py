@@ -36,8 +36,10 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from verify_baseline import (  # noqa: E402
+    EVIDENCE_FILE,
     PINNED_METRICS,
     RISK_FREE,
+    load_baseline_evidence,
     measure_engines,
     read_manifest_key,
 )
@@ -106,11 +108,16 @@ def main() -> None:
         sys.exit(f"{exc}\n\nRecord it first: "
                  f"uv run python scripts/record_baseline_benchmark.py {d}")
 
+    try:
+        evidence = load_baseline_evidence(d)
+    except (OSError, ValueError) as exc:
+        sys.exit(f"{d / EVIDENCE_FILE}: {exc}")
+
     engines = measure_engines(
         scored, execution, provider=provider, top_n=args.top_n,
         horizon=args.horizon, max_cohorts=args.max_cohorts,
         slippage_bps=args.slippage_bps, rebalance_day=args.rebalance_day,
-        exit_rank=args.exit_rank,
+        exit_rank=args.exit_rank, delisting_proceeds=evidence,
     )
     metrics = {k: v["metrics"] for k, v in engines.items()}
 
@@ -125,6 +132,8 @@ def main() -> None:
         "pinned_at_commit": repro.git_revision().get("commit"),
         "provenance": "measured-from-these-artifacts",
         "risk_free_rate": RISK_FREE,
+        "delisting_evidence": (
+            sorted(evidence["ticker"].astype(str)) if evidence is not None else None),
         "config": {
             "top_n": args.top_n, "horizon": args.horizon,
             "max_cohorts": args.max_cohorts, "slippage_bps": args.slippage_bps,

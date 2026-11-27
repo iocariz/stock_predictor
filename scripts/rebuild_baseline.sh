@@ -105,6 +105,13 @@ uv run train-sp500 \
   --snapshot-dir "$BASELINE_DIR/snapshot" \
   ${opts[@]+"${opts[@]}"} 2>&1 | tee "$LOG"
 
+# Record what delisted names paid, at build time, next to the artifacts it is
+# used to measure. Verification reads this copy and never data/, so adding a
+# row to the repo's file later cannot change the verdict on this baseline.
+if [[ -f data/delisting_proceeds.csv ]]; then
+  cp data/delisting_proceeds.csv "$BASELINE_DIR/delisting_proceeds.csv"
+fi
+
 # Record which tickers the vendor genuinely cannot serve, at build time. The
 # survivorship gate's bar depends on this set; reading it from the live cache
 # at verification time made the verdict on fixed artifacts depend on what had
