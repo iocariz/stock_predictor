@@ -234,3 +234,15 @@ def test_the_execution_panel_path_moves_with_the_override() -> None:
         "artifacts/other.parquet"
     assert _flag(_cmd("backtest", **env), "--execution-prices") == \
         "artifacts/other.parquet"
+
+
+def test_a_confirmed_corporate_action_reaches_the_live_side() -> None:
+    """The cron goes through this script, so a flag that exists only on
+    predict-sp500 cannot be used on the book the cron maintains."""
+    cmd = _cmd("predict", CONFIRM_ACTIONS="SNDK=split CTVA=distribution")
+    given = [cmd[i + 1] for i, tok in enumerate(cmd) if tok == "--confirm-action"]
+    assert given == ["SNDK=split", "CTVA=distribution"]
+
+
+def test_no_confirmation_is_passed_unless_asked_for() -> None:
+    assert "--confirm-action" not in _cmd("predict")

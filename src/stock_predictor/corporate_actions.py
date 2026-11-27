@@ -38,7 +38,7 @@ names it in ``confirmed``.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -222,6 +222,39 @@ def rebase_to_adjusted_history(
         return state, notes
     cash = state.cash + sum(a.cash_adjustment for a in notes)
     return replace(state, positions=positions, cash=cash), notes
+
+
+def parse_confirmations(items: Iterable[str]) -> dict[str, str]:
+    """``["SNDK=split"]`` -> ``{"SNDK": "split"}``: the operator's word, as typed.
+
+    Refuses anything it cannot read as one ticker and one of :data:`KINDS`,
+    and a ticker named as two different things. A confirmation moves shares or
+    cash on the book, so a guess at what was meant is worse than stopping."""
+    confirmed: dict[str, str] = {}
+    for item in items:
+        ticker, sep, kind = (part.strip() for part in item.partition("="))
+        ticker, kind = ticker.upper(), kind.lower()
+        if not sep or not ticker or not kind or "=" in kind:
+            raise ValueError(f"{item!r}: expected TICKER=KIND, e.g. SNDK=split")
+        if kind not in KINDS:
+            raise ValueError(f"{item!r}: kind must be one of {' or '.join(KINDS)}, not {kind!r}")
+        if confirmed.get(ticker, kind) != kind:
+            raise ValueError(f"{ticker} is confirmed as both {confirmed[ticker]} and {kind}")
+        confirmed[ticker] = kind
+    return confirmed
+
+
+def unapplied_confirmations(
+    confirmed: Mapping[str, str],
+    notes: tuple[Adjustment, ...],
+) -> tuple[str, ...]:
+    """Confirmed tickers for which nothing was settled.
+
+    A mistyped ticker, a name the book does not hold, or an action already
+    settled all leave the confirmation with nothing to act on. Reported so the
+    caller can stop: a flag that silently does nothing reads as success."""
+    settled = {a.ticker for a in notes if a.settled and a.kind == confirmed.get(a.ticker)}
+    return tuple(sorted(t for t in confirmed if t not in settled))
 
 
 def describe_adjustments(notes: tuple[Adjustment, ...]) -> str:

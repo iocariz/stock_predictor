@@ -121,6 +121,13 @@ cd "$ROOT"
 # backtest whose window contains one of these names. Empty disables it.
 : "${DELISTING_PROCEEDS:=data/delisting_proceeds.csv}"
 
+# Corporate actions the operator vouches for, space-separated TICKER=KIND with
+# KIND one of split|distribution, e.g. CONFIRM_ACTIONS="SNDK=split". predict
+# will not settle an adjustment of 3% or more without it. One-shot: set it for
+# a single run, never in the crontab -- once the action is settled there is
+# nothing left to confirm and predict stops rather than ignore the flag.
+: "${CONFIRM_ACTIONS:=}"
+
 # Selection rules, emitted one per line so both consumers read the same list.
 # The flags below exist on backtest-sp500 and predict-sp500 alike; see
 # tests/test_pipeline_flags.py, which fails if the two ever diverge again.
@@ -251,6 +258,9 @@ predict_daily() {
     [[ -f "$DELISTING_PROCEEDS" ]] || { echo "DELISTING_PROCEEDS not found: $DELISTING_PROCEEDS" >&2; return 1; }
     evidence=(--delisting-proceeds "$DELISTING_PROCEEDS")
   fi
+  local -a actions=()
+  local _action
+  for _action in $CONFIRM_ACTIONS; do actions+=(--confirm-action "$_action"); done
   ${DRY_RUN:+echo} uv run predict-sp500 \
     --model "$MODEL" \
     --state "$STATE" \
@@ -260,6 +270,7 @@ predict_daily() {
     --max-drawdown "$MAX_DD" \
     ${batch[@]+"${batch[@]}"} \
     ${evidence[@]+"${evidence[@]}"} \
+    ${actions[@]+"${actions[@]}"} \
     ${flags[@]+"${flags[@]}"} \
     ${confirm_flag[@]+"${confirm_flag[@]}"}
 }

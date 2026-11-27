@@ -674,3 +674,93 @@ def test_a_malformed_evidence_file_stops_the_run(rig, tmp_path) -> None:
     bad.write_text("ticker,price\nT07,31\n")
     with pytest.raises(SystemExit, match="proceeds"):
         _run_long_short(model_path, state_path, "--delisting-proceeds", str(bad))
+
+
+# ---------------------------------------------------------------------------
+# Confirming a corporate action
+# ---------------------------------------------------------------------------
+
+SPLIT_NAME = "T05"
+
+
+def _rig_unsettled_split(rig, *, ratio: int = 8):
+    """A long-short book long one share of a name that has since split
+    *ratio*:1 -- the vendor's history is on the new scale, the leg is not."""
+    model_path, state_path = rig
+    state = load_state(state_path)
+    last = str(DATES[-1].date())
+    adj, _ = _GappingProvider().download_equity_ohlcv(TICKERS, None, None)
+    ref_session = DATES[-40]
+    ref = float(adj[SPLIT_NAME].loc[ref_session]) * ratio
+    leg = Position(
+        ticker=SPLIT_NAME, shares=1, entry_price=ref, entry_date=str(ref_session.date()),
+        expiry_date="9999-12-31", cohort_id="long-short", last_price=ref,
+        entry_ref_price=ref, entry_ref_date=str(ref_session.date()),
+    )
+    save_state(replace(state, positions=(leg,), last_signal_date=last,
+                       last_accrual_date=last), state_path)
+    return model_path, state_path
+
+
+def _leg(state_path, ticker: str = SPLIT_NAME) -> Position:
+    return next(p for p in load_state(state_path).positions if p.ticker == ticker)
+
+
+def test_an_unconfirmed_split_is_left_exactly_as_it_was(rig, capsys) -> None:
+    model_path, state_path = _rig_unsettled_split(rig)
+    _run_long_short(model_path, state_path)
+    assert _leg(state_path).shares == 1
+    assert "PENDING CORPORATE ACTION" in capsys.readouterr().err
+
+
+def test_a_confirmed_split_multiplies_the_shares_and_moves_no_cash(rig, capsys) -> None:
+    """SNDK, 8:1: one share at the old price is eight at the new one."""
+    model_path, state_path = _rig_unsettled_split(rig)
+    before = load_state(state_path)
+    old = before.positions[0]
+    _run_long_short(model_path, state_path, "--confirm-action", f"{SPLIT_NAME}=split",
+                    "--rf-rate", "0")
+    leg = _leg(state_path)
+    assert leg.shares == 8
+    assert leg.entry_price == pytest.approx(old.entry_price / 8)
+    assert load_state(state_path).cash == pytest.approx(before.cash)
+    assert f"{SPLIT_NAME}: SPLIT" in capsys.readouterr().err
+
+
+def test_a_settled_split_is_not_settled_again(rig) -> None:
+    """Once settled there is nothing pending, so repeating the flag is a
+    mistake and is refused rather than quietly ignored."""
+    model_path, state_path = _rig_unsettled_split(rig)
+    _run_long_short(model_path, state_path, "--confirm-action", f"{SPLIT_NAME}=split")
+    with pytest.raises(SystemExit, match=SPLIT_NAME):
+        _run_long_short(model_path, state_path, "--confirm-action", f"{SPLIT_NAME}=split")
+    assert _leg(state_path).shares == 8
+
+
+def test_confirming_a_name_with_nothing_pending_stops_the_run(rig) -> None:
+    model_path, state_path = _rig_unsettled_split(rig)
+    before = state_path.read_text()
+    with pytest.raises(SystemExit, match="T06"):
+        _run_long_short(model_path, state_path, "--confirm-action", "T06=split")
+    assert state_path.read_text() == before
+
+
+def test_a_malformed_confirmation_stops_the_run(rig) -> None:
+    model_path, state_path = _rig_unsettled_split(rig)
+    with pytest.raises(SystemExit, match="TICKER=KIND"):
+        _run_long_short(model_path, state_path, "--confirm-action", "T05")
+
+
+def test_a_split_that_does_not_give_whole_shares_stops_the_run(rig) -> None:
+    """Called a split, but 1 share at this factor is not a whole number: the
+    operator has the kind wrong, or it needs settling by hand."""
+    model_path, state_path = _rig_unsettled_split(rig, ratio=1)
+    state = load_state(state_path)
+    leg = state.positions[0]
+    odd = replace(leg, entry_price=leg.entry_price * 1.5,
+                  entry_ref_price=leg.entry_ref_price * 1.5)
+    save_state(replace(state, positions=(odd,)), state_path)
+    before = state_path.read_text()
+    with pytest.raises(SystemExit, match="whole number"):
+        _run_long_short(model_path, state_path, "--confirm-action", f"{SPLIT_NAME}=split")
+    assert state_path.read_text() == before
