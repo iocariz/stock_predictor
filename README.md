@@ -1737,6 +1737,11 @@ notebooks/               Exploration + full pipeline
   `beta_resid` at offset 0 reads +5.4% at t = +1.96; that is the same
   most-favourable schedule as everywhere else, and its median is +0.8%.
 
+  This table was measured on `baseline_v10`. The baseline has since been
+  rebuilt with corrupt prints quarantined, which is a different draw of the
+  model; the table has not been repeated on it, and `BASELINE.md` shows how far
+  one draw moves.
+
   The default stays `raw`. `beta_resid` is kept as the target to use when a
   feature family that is not a price derivative is tested: it is the one that
   cannot be satisfied by exposure. Reproduce with `--replay-snapshot
