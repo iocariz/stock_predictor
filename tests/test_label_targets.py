@@ -23,17 +23,20 @@ def _panel() -> pd.DataFrame:
     """
     rows = []
     for di, d in enumerate(DATES):
-        rows.append({"date": d, "ticker": "CALM", "fwd_ret": 0.010, "vol_21d": 0.004})
+        rows.append({"date": d, "ticker": "CALM", "fwd_ret": 0.010, "vol_21d": 0.004,
+                     "beta_252d": 0.6})
         rows.append({"date": d, "ticker": "VOLA",
-                     "fwd_ret": 0.10 if di % 2 else -0.08, "vol_21d": 0.050})
-        rows.append({"date": d, "ticker": "MID", "fwd_ret": 0.005, "vol_21d": 0.010})
+                     "fwd_ret": 0.10 if di % 2 else -0.08, "vol_21d": 0.050,
+                     "beta_252d": 1.7})
+        rows.append({"date": d, "ticker": "MID", "fwd_ret": 0.005, "vol_21d": 0.010,
+                     "beta_252d": 1.0})
     return pd.DataFrame(rows)
 
 
 def test_known_targets_are_exposed() -> None:
     """'excess' was removed: ranking within a date makes it identical to 'raw'.
     See tests/test_label_excess_removed.py."""
-    assert set(LABEL_TARGETS) == {"raw", "vol_adj", "excess_vol_adj"}
+    assert set(LABEL_TARGETS) == {"raw", "vol_adj", "excess_vol_adj", "beta_resid"}
 
 
 def test_unknown_target_raises() -> None:

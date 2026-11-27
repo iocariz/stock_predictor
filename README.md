@@ -357,7 +357,7 @@ These are **not** recommendations—only sensible axes to explore when you stres
 | `--horizon` | 10 | Forward return horizon (sessions); also the **purge window** at every split boundary |
 | `--threshold` | 0.05 | Binary label threshold (e.g. 5%) |
 | `--objective` | rank | `rank`: LGBMRanker (lambdarank, grouped by date) on per-date forward-return quintile grades. `binary`: LGBMClassifier on `fwd_ret >= --threshold`. Applies to Optuna (NDCG@15 vs PR-AUC), the walk-forward, and the saved model |
-| `--label-target` | raw | With `--objective rank`, what the ranker ranks: `raw` forward return, `vol_adj` (per unit trailing volatility), or `excess_vol_adj` (peer-relative per unit risk). A plain `excess` option was removed — grades are ranked within a date, so subtracting that date's median cannot change the ordering |
+| `--label-target` | raw | With `--objective rank`, what the ranker ranks: `raw` forward return, `vol_adj` (per unit trailing volatility), `excess_vol_adj` (peer-relative per unit risk), or `beta_resid` (forward return minus trailing beta times the market's — what a name did beyond its exposure; none of the alternatives has beaten `raw`, see Limitations). A plain `excess` option was removed — grades are ranked within a date, so subtracting that date's median cannot change the ordering |
 | `--rank-objective` | — | Deprecated; `rank` is now the default. Accepted for compatibility, conflicts with `--objective binary` |
 | `--no-optuna` | off | Skip Optuna search; use defaults + any prior best |
 | `--optuna-trials` | 40 | Optuna trials |
@@ -1706,6 +1706,41 @@ notebooks/               Exploration + full pipeline
   No single bucket clears |t| = 2 on its own, so read the *ordering*, not any one row: forward return rises monotonically from the top of the list down to the top-50 band, then falls away again. Rank IC is **+0.0082 (HAC t = +0.49)** — indistinguishable from noise. The earlier claim that this model showed "real cross-sectional ranking skill, roughly enough to pay its own trading costs" did not survive the universe and feature-staging fixes.
 
   Reproduce all of the above on any panel with [`scripts/signal_depth.py`](scripts/signal_depth.py) — this disclosure is meant to be re-derived, not trusted.
+
+  **Changing what the ranker is graded on does not uncover selection.** With
+  the sector leak removed, the model graded on raw forward return has rank IC
+  +0.024 against return and **−0.002 against beta-residual return**
+  (`fwd_ret − beta × market`): everything it knows is exposure. Its score
+  correlates +0.42 with trailing volatility and +0.25 with trailing beta. Three
+  other targets were replayed on the same snapshot to see whether a different
+  target finds what is left:
+
+  | `--label-target` | IC vs return (t) | IC vs residual (t) | score vs vol | score vs beta | long-short alpha, median of 21 offsets (t) | negative offsets |
+  |---|---|---|---|---|---|---|
+  | `raw` | +0.024 (+1.13) | −0.002 (−0.09) | +0.42 | +0.25 | +0.0% (+0.00) | 10 / 21 |
+  | `vol_adj` | −0.001 (−0.03) | +0.015 (+0.81) | −0.61 | −0.34 | −3.4% (−1.14) | 18 / 21 |
+  | `excess_vol_adj` | +0.019 (+1.10) | +0.014 (+0.84) | −0.22 | −0.09 | −1.7% (−0.53) | 16 / 21 |
+  | `beta_resid` | +0.027 (+1.79) | +0.005 (+0.35) | +0.12 | +0.08 | +0.8% (+0.27) | 7 / 21 |
+
+  The volatility-scaled targets do not remove the bias, they invert it: the
+  ranker goes from ranking volatility to ranking its absence, and the book ends
+  up short the volatile names through a rising market. `beta_resid` — new, and
+  the reason `beta_252d` is on the panel without being a model feature — cuts
+  the dependence on volatility and beta to a third and is the least bad book,
+  and its residual IC is +0.005. No target reaches t = 1 on residual IC and
+  none puts the long-short book's median alpha anywhere near significant.
+
+  Two cautions on reading the columns against each other. Each is one replay,
+  and an earlier replay of `beta_resid` — before its beta was bounded against
+  corrupt prints — had a median alpha of +1.2% with 5 negative offsets, so the
+  difference between +0.8% and +1.2% is what one idea looks like twice. And
+  `beta_resid` at offset 0 reads +5.4% at t = +1.96; that is the same
+  most-favourable schedule as everywhere else, and its median is +0.8%.
+
+  The default stays `raw`. `beta_resid` is kept as the target to use when a
+  feature family that is not a price derivative is tested: it is the one that
+  cannot be satisfied by exposure. Reproduce with `--replay-snapshot
+  artifacts/baseline --label-target <target>`.
 
   **The label mattered; tuning did not — under any metric.** Switching to the
   rank objective is the one change that improved the traded end of the ranking

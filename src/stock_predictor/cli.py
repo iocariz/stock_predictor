@@ -188,8 +188,9 @@ def parse_args() -> argparse.Namespace:
         choices=list(LABEL_TARGETS),
         dest="label_target",
         help="With --rank-objective, what the ranker is asked to rank: raw "
-        "forward return, vol_adj (per unit trailing volatility), excess "
-        "(minus the date's cross-sectional median), or excess_vol_adj. The "
+        "forward return, vol_adj (per unit trailing volatility), "
+        "excess_vol_adj (peer-relative, per unit volatility), or beta_resid "
+        "(minus trailing beta times the market's forward return). The "
         "default +5%%-in-10-days label is satisfied mechanically by "
         "volatility, so a model trained on it ranks risk, not return",
     )
