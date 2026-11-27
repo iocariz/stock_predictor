@@ -384,6 +384,33 @@ Three limits on this.
   are near the deal value, so the effect is small here, but it is vendor
   residue being read as a market.
 
+### Corrupt prints in the training panel — not yet in this baseline
+
+The vendor serves some delisted symbols with two unrelated series interleaved
+under one ticker. Titanium Metals alternates between about $2.70 and about
+$12,000 from one session to the next; Cooper Industries moves 34,000-fold in a
+day; Compuware flips between two levels three and four times apart. Twelve
+symbols in this panel carry such prints. For seven of them the prints fall
+after the company left the index and the point-in-time filter keeps them out.
+For five — **BMC, CBE, CPWR, MEE, TIE** — and for MIL on the day of the 2010
+flash crash, they fall inside membership: **1,964 of 1,937,884 training rows**,
+all between 2010 and 2013, with forward returns up to 9,499× and a 21-day
+volatility of 1,577.
+
+`quarantine_corrupt_prices` now stops trusting a symbol from its first
+impossible print onward — a session more than +200% above the previous print,
+against +135% for the best day of the 2021 GameStop squeeze. It looks only
+backwards, and only gains trip it: SIVB resuming 99% lower is a market, not
+corruption. The symbols and dates it removes are written to the run manifest.
+
+**This baseline predates it.** It is a replay of a snapshot taken before the
+rule existed, so those 1,964 rows are in the panel its model was trained on.
+None is in the out-of-sample window, so no fill, mark or scored row here
+touches one: the effect is confined to what the model learned from 0.1% of its
+training rows, where a 9,499× forward return is graded the same top quintile
+as any other large one. A replay with the rule on would be a new draw of the
+model, and is the next rebuild rather than a correction to this one.
+
 ### Schedule offsets: the pinned long-short row is the best of 21
 
 The long-short book reconstitutes every 63 sessions, on a grid anchored at the

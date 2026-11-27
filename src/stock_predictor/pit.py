@@ -167,6 +167,68 @@ class Cleaned(NamedTuple):
     dropped: list[str]
 
 
+MAX_SESSION_GAIN = 2.0
+"""A print more than this far above the one before it (+200%) is not a market.
+
+The best single session of the 2021 GameStop squeeze was +135%, and no index
+member in the 2010-2026 panel has a real session above it. The vendor's corrupt
+series for delisted symbols mostly move by thousands -- two unrelated
+instruments interleaved under one ticker -- but Compuware's alternate by
+three- and fourfold, which a looser bound let through."""
+
+
+class Quarantined(NamedTuple):
+    """Result of :func:`quarantine_corrupt_prices`."""
+
+    prices: pd.DataFrame
+    volume: pd.DataFrame | None
+    quarantined: dict[str, pd.Timestamp]
+    """Ticker -> the session of its first impossible print."""
+
+
+def quarantine_corrupt_prices(
+    prices: pd.DataFrame,
+    *,
+    volume: pd.DataFrame | None = None,
+    max_session_gain: float = MAX_SESSION_GAIN,
+) -> Quarantined:
+    """Stop trusting a symbol from its first impossible print onward.
+
+    Some delisted symbols are served with two unrelated series interleaved:
+    Titanium Metals alternates between about $2.70 and about $12,000, Cooper
+    Industries moves 34,000-fold in a session. About 780 such rows fell inside
+    index membership on the 2010-2026 baseline and reached the training panel,
+    with forward returns up to 9,499x.
+
+    Once a symbol has printed something no market produced there is no telling
+    which of its later prints are real, so everything from that session on is
+    blanked. The rule looks only backwards -- each print is judged against the
+    previous one -- so it could have been applied on the day.
+
+    Only gains trip it. A collapse is not corruption: SIVB resumed 99% lower,
+    and blanking that would hide the move a short book most needs to see.
+    """
+    if prices is None or not len(prices):
+        return Quarantined(prices, volume, {})
+    out = prices.copy()
+    vol = volume.copy() if volume is not None else None
+    found: dict[str, pd.Timestamp] = {}
+    for ticker in out.columns:
+        seen = out[ticker].dropna()
+        if len(seen) < 2:
+            continue
+        gain = seen / seen.shift(1) - 1.0
+        impossible = gain[gain > max_session_gain]
+        if impossible.empty:
+            continue
+        first = impossible.index[0]
+        out.loc[out.index >= first, ticker] = float("nan")
+        if vol is not None and ticker in vol.columns:
+            vol.loc[vol.index >= first, ticker] = float("nan")
+        found[str(ticker)] = pd.Timestamp(first)
+    return Quarantined(out, vol, found)
+
+
 RECYCLE_GAP_DAYS = 180
 """A dead period this long after index departure means the symbol was reissued.
 
