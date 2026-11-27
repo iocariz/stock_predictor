@@ -381,7 +381,7 @@ def purged_date_splits(
     return splits
 
 
-LABEL_TARGETS: tuple[str, ...] = ("raw", "vol_adj", "excess_vol_adj")
+LABEL_TARGETS: tuple[str, ...] = ("raw", "vol_adj", "excess_vol_adj", "beta_resid")
 
 _NO_OP_TARGETS = {
     "excess": (
@@ -400,6 +400,13 @@ _NO_OP_TARGETS = {
 ``excess_vol_adj``
     Peer-relative return per unit of risk: the cross-sectional median is
     removed *and* the result divided by trailing volatility.
+``beta_resid``
+    Forward return minus trailing beta times the market's forward return (the
+    date's cross-sectional median). What a name did beyond its market
+    exposure. Within a date the market term is one number, so the ordering
+    changes only through beta: high-beta names stop topping the list in up
+    markets and bottoming it in down ones. A name with no beta yet is taken as
+    beta 1 rather than graded as the worst of the day.
 
 A plain ``excess`` option was removed. Ranking happens within a date, so
 subtracting a per-date constant cannot change the order — it was identical to
@@ -435,6 +442,16 @@ def label_target_series(
         raise ValueError(f"label_target_series requires a {fwd_col!r} column")
 
     target = df[fwd_col].astype(float)
+    if label_target == "beta_resid":
+        if BETA_COL not in df.columns:
+            raise ValueError(
+                f"label_target='beta_resid' requires a {BETA_COL!r} column; "
+                "add_timeseries_features computes it, so the panel was "
+                "probably built before it existed"
+            )
+        market = df.groupby(date_col)[fwd_col].transform("median")
+        beta = df[BETA_COL].astype(float).fillna(1.0)
+        target = target - beta * market
     if label_target == "excess_vol_adj":
         target = target - df.groupby(date_col)[fwd_col].transform("median")
     if label_target in ("vol_adj", "excess_vol_adj"):
@@ -1114,6 +1131,55 @@ def build_labeled_panel(
     return filter_panel_to_pit(labeled, stints)
 
 
+BETA_COL = "beta_252d"
+BETA_WINDOW = 252
+BETA_MIN_OBS = 126
+BETA_RETURN_CLIP = 0.5
+BETA_BOUNDS = (-1.0, 4.0)
+"""Trailing market beta, for building a label -- not a model feature.
+
+Daily returns are clipped at ±50% before estimating and the estimate is held
+inside ``BETA_BOUNDS``; both exist for corrupt prints, not for real stocks,
+which sit well inside either.
+
+
+One year of daily returns, defined once half of it exists. It is deliberately
+kept out of every ``*_FEATURE_COLS`` list: the ``beta_resid`` label asks what
+changing the *target* does, and adding an input at the same time would answer
+a different question.
+"""
+
+
+def add_market_beta(df: pd.DataFrame) -> pd.DataFrame:
+    """Add :data:`BETA_COL`: each name's trailing beta to the market.
+
+    The market is the same-date cross-sectional **median** daily return, not
+    the mean: this panel carries dead symbols with prints thousands of times
+    too large, and one of those in a mean would sit in every name's beta for a
+    year. Needs ``ret_1d`` and rows sorted by ticker then date. Uses only
+    returns up to and including each row's own session.
+    """
+    ret = df["ret_1d"].astype(float).replace([np.inf, -np.inf], np.nan)
+    # A print thousands of times too high is one return of +5,000 and one of
+    # -0.9998, and either alone outweighs a year of covariance: unbounded,
+    # betas on the real panel ran from -3,564 to +510. Clipped, such a session
+    # counts as a very bad day rather than as the whole estimate.
+    ret = ret.clip(-BETA_RETURN_CLIP, BETA_RETURN_CLIP)
+    market = ret.groupby(df["date"]).transform("median")
+    both = ret.notna() & market.notna()
+    ret, market = ret.where(both), market.where(both)
+
+    def trailing_mean(values: pd.Series) -> pd.Series:
+        return values.groupby(df["ticker"]).transform(
+            lambda s: s.rolling(BETA_WINDOW, min_periods=BETA_MIN_OBS).mean())
+
+    mean_ret, mean_mkt = trailing_mean(ret), trailing_mean(market)
+    cov = trailing_mean(ret * market) - mean_ret * mean_mkt
+    var = trailing_mean(market * market) - mean_mkt * mean_mkt
+    df[BETA_COL] = (cov / var.where(var > 0)).clip(*BETA_BOUNDS)
+    return df
+
+
 def add_timeseries_features(labeled: pd.DataFrame, volume: pd.DataFrame) -> pd.DataFrame:
     """Per-ticker price and volume features.
 
@@ -1122,6 +1188,7 @@ def add_timeseries_features(labeled: pd.DataFrame, volume: pd.DataFrame) -> pd.D
     point-in-time membership filter removes interior rows.
     """
     features = add_price_features(labeled.sort_values(["ticker", "date"]).copy())
+    features = add_market_beta(features)
     vol_long = volume.stack(future_stack=True).rename("volume").reset_index()
     vol_long.columns = ["date", "ticker", "volume"]
     features = features.merge(vol_long, on=["date", "ticker"], how="left")

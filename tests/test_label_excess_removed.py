@@ -18,7 +18,7 @@ def _panel() -> pd.DataFrame:
     d = pd.bdate_range("2024-01-01", periods=4)
     return pd.DataFrame([
         {"date": x, "ticker": f"T{i}", "fwd_ret": (i * 7 + j) % 11 / 100,
-         "vol_21d": 0.01 + i / 500}
+         "vol_21d": 0.01 + i / 500, "beta_252d": 0.6 + i / 10}
         for j, x in enumerate(d) for i in range(10)
     ])
 
