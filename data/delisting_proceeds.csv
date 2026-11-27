@@ -1,2 +1,13 @@
 ticker,date,proceeds,source
+TSS,2019-09-17,133.27,"Merged into Global Payments 2019-09-17 for 0.8101 GPN shares per share; stock consideration, valued at TSS's last close"
+VIAB,2019-12-04,24.22,"Merged with CBS into ViacomCBS 2019-12-04 for 0.59625 shares per share; stock consideration, valued at VIAB's last close"
+AGN,2020-05-08,193.02,"Acquired by AbbVie 2020-05-08 for $120.30 cash plus 0.8660 ABBV shares per share; valued at AGN's last close"
+NBL,2020-10-05,8.46,"Acquired by Chevron 2020-10-05 for 0.1191 CVX shares per share; stock consideration, valued at NBL's last close"
+TIF,2021-01-07,131.50,"Acquired by LVMH 2021-01-07 for $131.50 cash per share"
+CXO,2021-01-15,65.60,"Acquired by ConocoPhillips 2021-01-15 for 1.46 COP shares per share; stock consideration, valued at CXO's last close"
+VAR,2021-04-15,177.50,"Acquired by Siemens Healthineers 2021-04-15 for $177.50 cash per share"
+FLIR,2021-05-14,57.34,"Acquired by Teledyne 2021-05-14 for $28.00 cash plus 0.0718 TDY shares per share; valued at FLIR's last close"
+DISCK,2022-04-08,24.42,"Merged into Warner Bros. Discovery 2022-04-08, one WBD share per share; stock consideration, valued at DISCK's last close"
+CERN,2022-06-08,95.00,"Acquired by Oracle 2022-06-08 for $95.00 cash per share"
+JNPR,2025-07-02,40.00,"Acquired by Hewlett Packard Enterprise 2025-07-02 for $40.00 cash per share"
 WBD,2026-10-06,31.01666668,"Skydance (ex-Paramount Skydance) cash merger closed 2026-10-06; Nasdaq delisting 8-K"
