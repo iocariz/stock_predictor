@@ -4,36 +4,37 @@ LightGBM model that ranks S&P 500 stocks by expected 10-day performance. Two tra
 
 > ## ⚠️ Performance figures in this file are obsolete
 >
-> A clean, verified rebuild on 2026-08-28 supersedes every performance number
-> below. See **[BASELINE.md](BASELINE.md)** for what replaces them and what
-> verified it. Two findings change how the rest of this document should be read:
+> **[BASELINE.md](BASELINE.md)** holds the current, verified figures (baseline
+> of 2026-11-27) and supersedes every performance number below. What it says,
+> in short:
 >
-> - **One engine does show alpha, and it is not the one being traded.** The
->   dollar-neutral long-short book returns **16.92% ± 1.19%** with alpha
->   **+8.90% (HAC t = +2.76)** on beta **+0.21** and a **−11.5%** drawdown,
->   with all four runs above |t| = 2. It is now reachable as
->   `backtest-sp500 --mode long-short`.
-> - **But it does not survive a locked holdout.** Choosing the configuration on
->   2019–2022 and testing it once on 2023–2026 gives **t = +1.78** (+2.26 if the
->   cut is moved a year), and the committed choice ranks mid-pack on the
->   holdout — the search carried no information. What survives is a *positive
->   but unestablished tilt*, structured by holding period: 21-day rebalancing
->   destroys it, 63–126 day does not. See `BASELINE.md`.
-> - **The long-only engines show none.** Against SPY on excess returns, the cohort engine
->   — the one the live path simulates — shows **+2.36%/yr (HAC t = +0.37)** on
->   beta **+1.190**; rank-hold shows **+6.80% (t = +0.84)** on beta **+1.431**.
->   Neither is distinguishable from zero, and both carry well over one unit of
->   market risk, so most of what they beat the index by is leverage.
-> - **A run can now be reproduced exactly.** `train-sp500 --replay-snapshot`
->   rebuilds from a run's verified snapshot; two replays produce byte-identical
->   panels and reproduce the original backtest to four decimals. Use it to
->   compare code changes. *Fresh* rebuilds still draw new vendor noise:
-> - **The headline number is not stable across fresh rebuilds.** Four rebuilds from one commit, one
->   pinned data window and one seed produced cohort CAGRs spanning 17.20% to
->   23.12% — **20.24% ± 2.45%**. SPY returned 17.60% over the same window. Vendor float noise flips LightGBM splits, and a different fifteen
->   names get held. Every figure quoted below to two decimals implies a
->   precision that does not exist, and most historical comparisons between
->   configurations are smaller than this noise floor.
+> - **No engine shows alpha distinguishable from zero.** Against SPY on excess
+>   returns, the dollar-neutral long-short book — the one the paper book
+>   trades — shows **+4.17%/yr (HAC t = +1.19)** on beta +0.19 with an 11.08%
+>   CAGR and a −19.4% drawdown. Cohort shows **−4.44% (t = −0.68)** on beta
+>   +1.30; rank-hold **−5.77% (t = −0.59)** on beta +1.46. The long-only
+>   engines carry well over one unit of market risk, so what they return is
+>   leverage.
+> - **The long-short figure is the most favourable of 21 schedules.** A book
+>   rebalanced every 63 sessions can start on any of 63 days; across the 21
+>   offsets measured, the median CAGR is 8.91% and the median alpha is
+>   **+2.14% (t = +0.65)**. Quote the median, not offset 0.
+> - **It fails a locked holdout.** A configuration chosen on the early window
+>   and tested once on the later one comes out negative: **t = −1.42**, and
+>   −0.37 with the cut moved a year.
+> - **The model used to be told which companies would leave the index.** The
+>   raw `sector` label was a model feature and is missing for every departed
+>   member. Every figure published before 2026-11-10 — including the long-short
+>   alpha of +8.90% at t = +2.76 this banner used to carry — was measured with
+>   that leak.
+> - **One rebuild moves every number.** A data-cleaning rule that removed 0.1%
+>   of the training rows moved rank-hold from 22.36% CAGR to 11.31% and the
+>   holdout from t = +1.47 to −1.42. That is not the effect of the rule; it is
+>   the distance between two draws of this model. Every figure quoted below to
+>   two decimals implies a precision that does not exist.
+> - **A run can be reproduced exactly.** `train-sp500 --replay-snapshot`
+>   rebuilds from a run's verified snapshot, so a code change can be compared
+>   on identical inputs. *Fresh* downloads still draw new vendor noise.
 >
 > The findings *about defects* below remain accurate and are worth reading; the
 > performance figures attached to them are not.
@@ -137,7 +138,11 @@ with nothing looking wrong.
 | `COMMISSION_PER_SHARE`, `COMMISSION_PER_ORDER` | 0, 0 | both |
 | `REBALANCE_DAY` | `Friday` (`any` to trade every session) | both |
 | `HOLD_MODE` | `long-short` (`fixed` for cohort expiry, `rank` for rank-decay exits) | both |
-| `MAX_DD` | 0.15 | live only — the kill switch has no simulation twin |
+| `DECILE`, `LONG_WEIGHT`, `SHORT_WEIGHT` | 0.10, 0.5, 0.5 | both, long-short only |
+| `REBALANCE_EVERY`, `MIN_NAMES_PER_SIDE` | 63, 3 | both, long-short only |
+| `SHORT_BORROW_ANNUAL` | 0.01 | both, long-short only |
+| `DELISTING_PROCEEDS` | `data/delisting_proceeds.csv` | live only — passing it to the backtest would change recorded results |
+| `MAX_DD` | 0.15 | live only — the kill switch has no simulation twin. The baseline's long-short book draws down −19.4%, so a halt is within what the backtest measures |
 
 `HOLDING_DAYS` **derives from `HORIZON`** rather than being a second number to
 keep in step. Trading a 63-day signal on a 10-day exit is the same class of
@@ -145,10 +150,12 @@ mismatch as measuring one configuration and trading another, and it is not
 something to rely on remembering. Override it explicitly if you want them to
 differ; it still moves both sides together.
 
-Training defaults reproduce the deployed model: `--rank-objective`,
-`--horizon 63`, `--skip-earnings`, `--no-optuna`, `--provider hybrid`, trained
-2010→2024. A monthly retrain therefore rebuilds the model that is deployed
-instead of silently reverting to an older configuration. `TRAIN_PROVIDER` is
+Training defaults reproduce the deployed model's recipe: rank objective,
+`--horizon 63`, `--skip-earnings`, `--no-optuna`, `--provider hybrid`, data
+from 2010. `evaluate` holds back everything after `TRAIN_END` for the
+walk-forward; `refit` trains through the newest date a label exists for and is
+what the deployed model comes from. A retrain therefore rebuilds the model that
+is deployed instead of silently reverting to an older configuration. `TRAIN_PROVIDER` is
 `hybrid` (an unbiased training panel needs the delisted names) while
 `PREDICT_PROVIDER` is `yfinance` (a live run only ever trades current index
 members, and should not spend Tiingo quota on names it could not buy).
@@ -237,7 +244,7 @@ The alpha t-statistic is **Newey–West (HAC)**, with the lag window set to at l
 | Flag | Default | Description |
 |------|---------|-------------|
 | `scored_path` | — | Parquet (`.parquet`) or CSV with a `date` column |
-| `--mode` | cohort | `cohort` (fixed `--holding-days` baskets) or `rank-hold` (sell on rank decay) |
+| `--mode` | cohort | `cohort` (fixed `--holding-days` baskets), `rank-hold` (sell on rank decay) or `long-short` (dollar-neutral decile spread; see the long-short rows below) |
 | `--top-n` | 15 | Number of tickers per cohort / portfolio slots (ranked by score) |
 | `--holding-days` | 10 | Cohort mode: holding period in **trading** days |
 | `--exit-rank` | 40 | Rank-hold mode: sell held names ranked worse than this (must be ≥ top-n) |
@@ -262,6 +269,16 @@ The alpha t-statistic is **Newey–West (HAC)**, with the lag window set to at l
 | `--compare-label-b` | stem of compare file | Legend label for `--compare-with` |
 | `--commission-per-share` | 0 | Dollars per share on each buy and sell leg (0 = off) |
 | `--commission-per-order` | 0 | Flat dollars per ticker on each buy and sell order (0 = off) |
+| `--decile` | 0.10 | Long-short: fraction of the ranked universe taken on each side |
+| `--long-weight` / `--short-weight` | 0.5 / 0.5 | Long-short: notional per side as a fraction of capital. The defaults give 1.0x gross and 0.0 net |
+| `--rebalance-every` | `--holding-days` | Long-short: sessions between reconstitutions |
+| `--min-names-per-side` | 5 | Long-short: refuse to build a book thinner than this |
+| `--short-borrow` | 0.005 | Long-short: flat annualized borrow on short notional. `--per-name-borrow` charges it per position instead |
+| `--hedge-beta` | none | Long-short: short this much benchmark exposure as an overlay. Dollar-neutral is not market-neutral |
+| `--sector-neutral` | off | Long-short: balance long and short names inside each sector. Needs a `sector` column, which only current members have |
+| `--delisting-proceeds` | none | Parquet/CSV of `ticker,date,proceeds`: what a holding that stopped trading actually paid. Used point-in-time, in preference to the fallback |
+| `--delisting-fallback` | write_off | What happens to a holding still unquoted after the grace period: `write_off` (a long goes to zero, a short is covered at its last print) or `hold` |
+| `--delisting-grace-sessions` | 63 | Sessions without a quote tolerated before the fallback applies |
 
 **Config-only option:** `BacktestConfig(vix_scale_exposure=True)` (Python API and the sweep's `--grid vix`) scales new-entry capital by the VIX regime instead of — or on top of — the hard skip: full size while `vix_percentile ≤ 0.5`, linearly down to zero at 1.0, with the remainder held in cash. Produces a lower-beta, lower-drawdown variant.
 
@@ -375,6 +392,7 @@ These are **not** recommendations—only sensible axes to explore when you stres
 | `--plots-dir` | none | Save evaluation and WF PNGs |
 | `--snapshot-dir` | `artifacts/runs/<id>/` | Parquet snapshots + `manifest.json` |
 | `--no-snapshot` | off | No Parquet dumps and **no** `manifest.json` |
+| `--replay-snapshot` | none | Rebuild from a previous run's snapshot instead of downloading. Hashes are verified first; features, labels and training all re-run, so a code change still shows |
 | `--provider` | yfinance | `yfinance` or `tiingo` (Tiingo equities + FRED macro; needs `[tiingo]` extra + API keys) |
 | `--no-macro-merge` | off | Disable **Yahoo ↔ FRED** macro cross-fill (default: merge to fill gaps) |
 
@@ -545,7 +563,27 @@ chmod +x scripts/run_pipeline.sh
 
 # Daily signal and persist portfolio_state.json
 ./scripts/run_pipeline.sh predict --confirm
+
+# Walk-forward evaluation on the held-back window (same as train-full)
+./scripts/run_pipeline.sh evaluate
+
+# Production refit: train through the newest date a label exists for.
+# Writes a candidate, never the deployed model
+./scripts/run_pipeline.sh refit
+
+# Promote the candidate after it passes the deploy checks; the outgoing
+# model is archived under artifacts/archive/
+./scripts/run_pipeline.sh deploy
 ```
+
+[`scripts/predict_cron.sh`](scripts/predict_cron.sh) is the entry point for an unattended daily run: it calls `run_pipeline.sh predict --confirm`, retries transient download failures with smaller batches, and never retries past the coverage guard.
+
+Two variables exist for a single manual run and must not go in a crontab, because each stops the run when it has nothing to do:
+
+| Variable | Effect |
+|---|---|
+| `CONFIRM_ACTIONS="SNDK=split ..."` | Settle the named corporate actions (see [Corporate actions](#corporate-actions)) |
+| `REARM_KILL_SWITCH=1` | Let a halted book trade again (see [Kill-switch](#kill-switch)) |
 
 Override paths and knobs with **environment variables**, for example:
 
@@ -633,11 +671,38 @@ uv run predict-sp500 --model models/latest.pkl --skip-earnings --confirm
 | `--commission-per-order` | 0 | Flat fee per ticker per buy/sell order (match `backtest-sp500`) |
 | `--no-macro-merge` | off | Same as training: skip Yahoo↔FRED macro merge |
 | `--one-lot-per-ticker` | off | Fixed mode: cap each ticker at one lot. **Default is cohort parity** — a persistently top-ranked name may sit in overlapping cohorts at double weight, exactly as `backtest-sp500 --mode cohort` models it |
+| `--provider` | yfinance | `yfinance`, `tiingo` or `hybrid` |
+| `--rebalance-day` | any | Only open a cohort on this weekday, matching the backtest's one-signal-per-week schedule. `run_pipeline.sh` sets `Friday` |
+| `--signal-lag` | 1 | Sessions between the signal and the fill. 1 matches the backtest, which ranks on one session and fills at the next |
+| `--force-rebalance` | off | Bypass the rebalance-day gate and the repeat-signal guard |
+| `--decile` | 0.10 | Long-short: fraction of the cross-section taken on each side |
+| `--long-weight` / `--short-weight` | 0.5 / 0.5 | Long-short: gross exposure per side as a fraction of NAV |
+| `--rebalance-every` | 63 | Long-short: sessions between rebalances |
+| `--min-names-per-side` | 3 | Long-short: refuse to build a book thinner than this |
+| `--short-borrow` | 0.005 | Long-short: flat annualized borrow charged on short notional |
+| `--delisting-proceeds` | none | Long-short: Parquet/CSV of `ticker,date,proceeds` saying what a holding that stopped trading paid — a cash acquisition price, or zero for a bankruptcy. A row dated after the run is ignored until it is not. `run_pipeline.sh` passes `data/delisting_proceeds.csv` |
+| `--delisting-fallback` | write_off | Long-short: what to do with a holding still unpriceable after the grace period. `write_off` takes a long to zero and covers a short at its last print; `hold` keeps it |
+| `--delisting-grace-sessions` | 63 | Long-short: sessions of silence tolerated before the fallback applies |
+| `--confirm-action TICKER=KIND` | none | Settle a held name's pending corporate action as a `split` or a `distribution`. Repeatable, one-shot. See [Corporate actions](#corporate-actions) |
+| `--rearm-kill-switch` | off | Let a book the kill switch halted trade again. One-shot. See [Kill-switch](#kill-switch) |
 | `--confirm` | off | Update portfolio state (without: dry run) |
 
 #### Kill-switch
 
 The predict CLI tracks a high watermark in the portfolio state. If the current NAV drops more than `--max-drawdown` (default 15%) below the watermark, all new entries are blocked: order generation runs with **no buy leg**, so **`--confirm` never persists new positions** while halted—only expiries and cash from sells update state. The high-water mark only rises, so a halted book stays halted on its own. To let it trade again, pass `--rearm-kill-switch` once (`REARM_KILL_SWITCH=1 ./scripts/run_pipeline.sh predict --confirm`): drawdown is then measured from the book's current value, and the change is written to the state file's `history`. The run stops if the switch is not engaged, so the flag cannot sit in a crontab. The long-short book also appends one `nav` record per session and one `rebalance` record per turnover to `history`.
+
+#### Corporate actions
+
+The book stores each fill price and marks against the latest print. When the vendor back-adjusts a held name's history for a dividend, a split or a spin-off, those two stop being on the same scale, and the gap would be booked as P&L. Each run therefore rebases held positions onto the adjusted history before marking them.
+
+An adjustment below 3% on a position with a recorded reference close is settled automatically as a distribution. A larger one is not, because the factor alone cannot tell a split (shares rescale, no cash moves) from a distribution (cash moves, shares do not): the run reports it and leaves the position as it was. Settle it once by hand, saying which it is:
+
+```bash
+CONFIRM_ACTIONS="SNDK=split" ./scripts/run_pipeline.sh predict --confirm
+# or: uv run predict-sp500 ... --confirm-action SNDK=split --confirm
+```
+
+The kinds are `split` and `distribution`, and several `TICKER=KIND` pairs may be given. It is one-shot by design: the run stops if there is nothing to settle, or if a split would leave a fractional share count, so the variable cannot sit in a crontab. A daily cron cannot settle one of these on its own — until someone confirms it, that position keeps its old basis.
 
 ### Python API
 
@@ -677,7 +742,7 @@ uv sync --extra dev --extra tiingo && uv run pytest
 
 **CI** — [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to `main` and every pull request: pytest on Python 3.12 and 3.13, `ruff check`, and an offline smoke job that exercises every console script and both backtest engines against a synthetic panel. It is deliberately network-free, so a Yahoo outage never reds the build. The long training and sweep workflows stay on `workflow_dispatch` / schedule.
 
-Covers PIT membership, calendar features, reproducibility, training utilities (purged splits, rank labels, both Optuna objectives), both backtest engines (NAV compounding, rank-decay exits, VIX scaling), relative-return metrics, portfolio management (fixed and rank-hold order generation), execution parity, macro merge, data providers, and the inference pipeline (`tests/`, 200+ tests).
+Covers PIT membership, calendar features, reproducibility and snapshot replay, training utilities (purged splits, rank labels and label targets, both Optuna objectives), the three backtest engines (NAV compounding, rank-decay exits, VIX scaling, long-short disposal of unquoted holdings), relative-return metrics, portfolio management (fixed, rank-hold and long-short order generation, corporate actions, the kill switch), execution parity, macro merge, data providers, the baseline gates, and the inference pipeline (`tests/`, about 1,400 tests).
 
 ## Reproducibility (snapshots + manifest)
 
@@ -697,6 +762,21 @@ With **`--no-snapshot`**, no Parquet files and no `manifest.json` are written (t
 
 `artifacts/` is gitignored by default—copy snapshots elsewhere if you need to keep them in version control or upload them to object storage.
 
+### Replaying a run and gating a baseline
+
+`train-sp500 --replay-snapshot <run dir>` rebuilds from a run's snapshot instead of the network. Hashes are checked first, then feature engineering, labelling and training all re-run, so the only thing that differs between two replays is the code. This is how a code change should be measured: a fresh download draws new vendor noise, and that noise alone moves the headline figures by several points.
+
+The baseline in `artifacts/baseline` is built and checked by four scripts:
+
+| Script | What it does |
+|---|---|
+| `scripts/rebuild_baseline.sh` | Builds a baseline and records what produced it (commit, config, inputs, the delisting evidence file) |
+| `scripts/verify_baseline.py <dir>` | 18 gates: the artifact reconciles with itself, fills are honest, hashes match, the engines are deterministic, and delisted names settle on recorded evidence |
+| `scripts/pin_baseline_metrics.py` | Writes `expected_metrics.json`; `tests/test_metric_pinning.py` then fails if `BASELINE.md` quotes anything else |
+| `scripts/locked_holdout.py` | Chooses the configuration on one window and tests it once on the next |
+
+Quote no figure from a baseline that has not passed `verify_baseline.py`.
+
 ## Pipeline
 
 1. **Universe**: Point-in-time S&P 500 membership via [fja05680/sp500](https://github.com/fja05680/sp500); capped by `--sample-n` as a seeded random draw and coverage-checked after download
@@ -704,7 +784,7 @@ With **`--no-snapshot`**, no Parquet files and no `manifest.json` are written (t
 3. **Labels**: Per-date forward-return quintile grades (default, market-neutral by construction), or `--objective binary` for `fwd_ret ≥ --threshold`.
 
    **Why rank is the default.** The binary `+5% in 10 sessions` label is satisfied *mechanically* by volatility: a name needs a wide return distribution to clear the threshold, regardless of its expected return. A model trained on it ranks risk, not return — measured on this pipeline, cross-sectional IC of score vs `vol_21d` was **+0.75** while score vs `fwd_ret` was **+0.008**, and mean annualized volatility ran 17% in the bottom score decile to 49% in the top. The rank objective halves that coupling (vol IC +0.43) and flips the top-5 selection bucket from **−0.81%** to **+0.91%** against the universe. See `scripts/signal_depth.py`.
-4. **Features**: Price/volume (15), sector-relative (4), macro (5), regime (2), cross-sectional ranks (3), calendar (6), optional earnings (1)
+4. **Features**: 38 by default — price/volume (19), sector-relative (3), macro (5), regime (2), cross-sectional ranks (3), calendar (6) — plus optional earnings (1). The raw `sector` label is deliberately not one of them (see Limitations), and `beta_252d` is on the panel only to build the `beta_resid` label
 
    **Stage order is load-bearing** (`build_feature_panel`):
 
@@ -718,23 +798,41 @@ With **`--no-snapshot`**, no Parquet files and no `manifest.json` are written (t
 6. **Training**: LightGBM (classifier or lambdarank ranker) with a purged inner validation split for effective tree count
 7. **Evaluation**: per-date Precision@K, rank IC and top-K excess return, aggregated across signal dates; pooled PR-AUC / ROC-AUC reported alongside as secondary (same binary target for both objectives, so they compare directly)
 8. **Walk-forward**: Monthly expanding window with a `horizon`-day purge before each test month (optional)
-9. **Backtest**: Cash-ledger simulation vs configurable benchmark — cohort or rank-hold engine, with relative-return framing (IR, beta, alpha + t-stat) and sweep grids
-10. **Inference**: Daily scoring of the live universe (either model family), portfolio state management, fixed-expiry or rank-hold order generation with kill-switch risk control
+9. **Backtest**: Cash-ledger simulation vs configurable benchmark — cohort, rank-hold or long-short engine, with relative-return framing (IR, beta, alpha + t-stat) and sweep grids. Corrupt vendor prints are quarantined before training, and a holding that stops being quoted is settled on recorded evidence or written off after a grace period
+10. **Inference**: Daily scoring of the live universe (either model family), portfolio state management, fixed-expiry, rank-hold or long-short order generation, corporate-action rebasing, and kill-switch risk control
 
 ## Project layout
 
 ```
 src/stock_predictor/
   __init__.py            Version + re-exports
-  pit.py                 PIT S&P 500 membership
+  pit.py                 PIT S&P 500 membership, recycled symbols, and the
+                         quarantine of corrupt vendor prints
+  renames.py             Ticker renames: one company filed under two symbols
   calendar_features.py   Calendar / FOMC features
-  training.py            Features, labels (binary + rank grades), purged CV,
-                         Optuna (PR-AUC / NDCG), walk-forward, train/eval, model IO
+  training.py            Features, labels (binary + rank grades, label targets),
+                         purged CV, Optuna (PR-AUC / NDCG), walk-forward,
+                         train/eval, model IO
   cli.py                 train-sp500 entry point
+  replay.py              Rebuild a run from its snapshot instead of the network
+  bundle.py              Ties a run's scores to the execution prices they
+                         were built with
+  deploy.py              Checked promotion of a candidate model; archives the
+                         outgoing one
+  freshness.py           Refuses to trade on a stale model, panel or state file
+  quotes.py              Separates the price a holding can be traded at from
+                         the price it can be valued at
+  delisting.py           Disposal of holdings that stop being quoted: recorded
+                         evidence first, then a conservative fallback
+  corporate_actions.py   Keeps live cost basis on the scale of the vendor's
+                         adjusted history; operator confirmation for splits
+  short_volume.py        Short-sale volume features (research; not a default
+                         model feature)
   execution.py           ONE selection/sizing core: backtest, paper and live
                          all call it, so a rule tuned in simulation reaches the
                          account. Only `whole_shares` differs between them
-  backtest.py            Backtest engines (cohort + rank-hold) + CLI
+  backtest.py            Backtest engines (cohort + rank-hold) + CLI; dispatches
+                         --mode long-short to long_short.py
   backtest_reporting.py  Reports, relative-return metrics (IR/beta/alpha/t), plots
   portfolio.py           Portfolio state, kill-switch, and order generation
                          (selection delegated to execution.py)
@@ -757,8 +855,25 @@ src/stock_predictor/
                          filer tags the components but not the total.
   stats.py               HAC / Newey-West helpers
   repro.py               Run manifests, hashing, Parquet snapshots
+data/
+  delisting_proceeds.csv What departed holdings actually paid (ticker, date,
+                         proceeds, source); read by the live book and copied
+                         into each baseline
 scripts/
-  run_pipeline.sh        train-full / backtest / predict orchestration
+  run_pipeline.sh        train-full / evaluate / refit / deploy / backtest /
+                         predict orchestration
+  predict_cron.sh        The unattended daily run, with retries
+  deploy_model.py        Promote a candidate model after checking it
+  rebuild_baseline.sh    Build a baseline and record what produced it
+  verify_baseline.py     The 18 gates a baseline must pass before it is quoted
+  pin_baseline_metrics.py  Pin a baseline's headline figures against drift
+  seal_baseline_outputs.py, record_baseline_benchmark.py
+                         Backfill hashes / the benchmark series for baselines
+                         built before the pipeline recorded them
+  baseline_spread.py     How far fresh rebuilds of one commit land from each other
+  locked_holdout.py      Choose on one window, test once on the next
+  recover_delisted.py    Fetch departed members from Tiingo, a quota window
+                         at a time
   backtest_sweep.py      Variant grids (default / vix / hold) + relative tables
   grid_search_sharpe.py  Config grid ranked by Sharpe, with alpha t-stats
   insider_signal.py      SEC Form 3/4/5 insider buying vs a scored panel
@@ -768,7 +883,7 @@ train_sp500.py           Thin launcher → cli
 backtest.py              Thin launcher → backtest
 sp500_pit.py             Notebook shim → pit
 calendar_features.py     Notebook shim → calendar_features
-tests/                   pytest suite (200+ tests)
+tests/                   pytest suite (about 1,400 tests)
 notebooks/               Exploration + full pipeline
 ```
 
@@ -779,6 +894,8 @@ notebooks/               Exploration + full pipeline
 | [fja05680/sp500](https://github.com/fja05680/sp500) | PIT membership stints | Community-maintained |
 | Yahoo Finance (`yfinance`) | OHLCV, macro, earnings | Rate-limited; data quality varies |
 | Wikipedia | GICS sector mapping | Snapshot + hard-coded 2018 override—not a full historical sector time series. Covers current members only, so the raw `sector` label is not a model feature (it flagged every company that later left the index); the `*_vs_sector` spreads fall back to the market median where it is missing |
+
+| `data/delisting_proceeds.csv` | What a departed holding paid | Hand-compiled, 19 rows: cash deals at the cash price, stock and mixed deals at the target's last close. Only two rows (DAY, HOLX) were checked against published sources when the file was compiled; the other 17 have not been independently verified. Covers 19 of the 347 departures in the window |
 
 ## Limitations
 

@@ -71,16 +71,18 @@ cd "$ROOT"
 # simulated. Set to "any" only if you also change the backtest.
 : "${REBALANCE_DAY:=Friday}"
 # fixed = holding_days expiry (cohort engine); rank = exit_rank decay.
-# The traded engine. long-short since 2026-09-05, on the evidence in
-# BASELINE.md: it is the only engine whose alpha survives four independent
-# rebuilds (t +2.44..+2.94) and the only one whose measured drawdown (-13.03%)
-# fits the MAX_DD kill switch below. The long-only engines' alpha is
-# indistinguishable from zero in every draw -- cohort's changes sign -- and
-# their drawdowns are three times the switch.
+# The traded engine. long-short since 2026-09-05. The case made for it then --
+# alpha at t +2.44..+2.94 across four rebuilds, a -13.03% drawdown -- was
+# measured while the model could see which companies would leave the index
+# (the sector leak, fixed 2026-11-10). On the current baseline (BASELINE.md) no
+# engine shows alpha distinguishable from zero: long-short is +4.17% at
+# t +1.19 on the most favourable of 21 schedules, +2.14% at t +0.65 at the
+# median, and negative on the locked holdout (t -1.42, -0.37).
 #
-# This is a tilt, not an established edge: it does not clear the locked holdout
-# (+1.66/+1.87/+1.95/+2.12 across two artifacts and two splits). Set
-# HOLD_MODE=fixed to go back.
+# It stays the default because it is the least exposed of the three, not
+# because it has an edge: beta +0.19 and a -19.44% drawdown, against betas
+# above 1.3 and drawdowns of -51.67% and -67.09% for the long-only engines.
+# Set HOLD_MODE=fixed to go back.
 : "${HOLD_MODE:=long-short}"   # fixed | rank | long-short
 # Long-short only. Defaults follow the backtest's own defaults; the locked
 # holdout does not identify a best configuration, so these are the documented
@@ -101,14 +103,15 @@ cd "$ROOT"
 # hard-to-borrow names in the LONG book where no borrow is paid. The opposite
 # was assumed for a long time and was wrong.
 #
-# Sensitivity on the pinned baseline: alpha holds t +2.63 at 0%, +2.49 at 1%,
-# +2.36 at 2%, and only falls below 2 near 5%. Borrow is not what decides this
-# strategy.
+# Borrow is not what decides this strategy: on the pre-2026-11 baseline the
+# alpha's t moved from +2.63 at 0% to +2.36 at 2%. Those levels predate the
+# sector-leak fix and the sensitivity has not been re-measured since.
 : "${SHORT_BORROW_ANNUAL:=0.01}"
-# Coherent with the traded engine for the first time: long-short's measured
-# max drawdown is -13.03%, inside this switch. Under HOLD_MODE=fixed or rank it
-# is not -- those engines draw down -45.94% and -51.90% -- so switching back
-# means raising this or expecting a halt.
+# The current baseline's long-short book draws down -19.44%, which is past
+# this switch: a halt is within what the backtest itself measures, and a halted
+# book stays halted until REARM_KILL_SWITCH=1 is passed once. Under
+# HOLD_MODE=fixed or rank it is far past it -- those engines draw down -51.67%
+# and -67.09% -- so switching back means raising this or expecting a halt.
 : "${MAX_DD:=0.15}"
 : "${OPTUNA_TRIALS:=40}"
 : "${TS_CV_SPLITS:=5}"
