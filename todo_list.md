@@ -49,11 +49,42 @@ Persistent list of **remaining** execution-realism and related items (phases 3�
 
 ## Research: what is left to try
 
-Five experiments have now come back negative or neutral (rank-band trading,
-vol-adjusted labels, excess labels, Optuna tuning, tuning-metric alignment).
-The one change that helped was the label — binary to rank. Under every
-configuration, validation performance peaks at 2-10 trees, which says the
-signal is not in the current inputs.
+**State as of 2026-11-27 (see `BASELINE.md`).** The raw `sector` label was a
+survivorship flag and has been removed from the model. Without it no engine
+shows alpha distinguishable from zero, the long-short book fails the locked
+holdout, and one rebuild that changed 0.1% of the training rows flipped the
+holdout's sign. The figures quoted in the completed items below predate that
+fix and are kept as a record of what was tried, not as results. Price and
+volume features on the S&P 500 are treated as exhausted: anything new here has
+to bring information that is not a derivative of the OHLCV panel, be graded
+with `--label-target beta_resid`, and be judged on the median of the rebalance
+offsets across more than one draw.
+
+Experiments that came back negative or neutral: rank-band trading,
+vol-adjusted labels, excess labels, the beta-residual label, Optuna tuning,
+tuning-metric alignment, rebalance cadence. Under every configuration,
+validation performance peaks at a handful of trees, which says the signal is
+not in the current inputs.
+
+- [x] **Label targets** — `vol_adj`, `excess_vol_adj` and `beta_resid` replayed
+  on one snapshot. The volatility-scaled targets invert the bias instead of
+  removing it; `beta_resid` is the least bad and still shows no selection
+  (residual IC +0.005). Default stays `raw`.
+- [x] **Rebalance cadence** — no cadence gives significant alpha; the spread
+  between rebalance offsets is larger than the spread between cadences.
+  - [ ] Staggered tranches would average the offset out instead of drawing one.
+- [x] **Sector survivorship leak** — `sector` removed as a feature.
+  - [ ] `--sector-neutral` still only knows the sector of current members.
+- [x] **Delisting evidence** — `data/delisting_proceeds.csv`, 19 of 347
+  departures, used by the live book and by the baseline's pinned schedule.
+  - [ ] Only two rows were checked against a published source.
+  - [ ] Other rebalance offsets, the labels, and `locked_holdout.py` do not
+    use it yet.
+- [x] **Corrupt vendor prints** — quarantined before training.
+  - [ ] The real prices are not recovered; those names go dark instead.
+- [ ] **Re-measure on the current baseline**: the draw-to-draw spread (four
+  fresh rebuilds), the borrow sensitivity, and the README's label-target table
+  all predate it.
 
 - [x] **Fundamentals** — SEC EDGAR point-in-time, joined on filing date.
   Used heavily by the model (31-46% of gain) but the price-only control still
@@ -71,20 +102,17 @@ signal is not in the current inputs.
   positively and the expensive names sit in the *long* book. Impact on median
   Sharpe: 0.74 -> 0.73.
   - [ ] Real borrow data would still beat the proxy; the hook is there.
-- [ ] **Recover the delisted names.** ~187 of 342 departed members are absent
-  on the 2010+ universe; a Tiingo equities key recovers most.
+- [ ] **Recover the delisted names.** Departed members the vendors no longer
+  serve are absent from the panel, and their absence flatters every result.
+  `scripts/recover_delisted.py` fetches them from Tiingo a quota window at a
+  time.
 - [ ] **More independent periods.** 30 is better than 14 and still modest for
   a 63-day horizon.
 - [ ] **Other feature families, not labels or tuners.** Every current feature is a
   price/volume/macro derivative of the same OHLCV panel. Candidates that add
-  genuinely new information: fundamentals (valuation, margins, revisions),
-  analyst estimate revisions, short interest, sector/industry momentum
-  spreads, or an intraday/higher-frequency price structure.
-- [ ] **Longer horizon.** Everything here is a 10-session forward return.
-  Cross-sectional equity signal is usually stronger at 1-6 months.
-- [ ] **Recover the delisted names.** ~97 of 691 departed members are absent
-  (Yahoo drops them); a Tiingo key recovers most, and their absence flatters
-  every result.
+  genuinely new information: earnings surprises, fundamentals (valuation,
+  margins, revisions), analyst estimate revisions, short interest. Set the
+  stopping rule before running it.
 
 ---
 
